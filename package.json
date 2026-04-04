@@ -13,7 +13,8 @@
   "signalk-plugin-enabled-by-default": true,
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && webpack",
+    "build:config": "webpack",
     "watch": "tsc --watch",
     "prettier": "prettier --write .",
     "lint": "eslint --fix",
@@ -29,15 +30,21 @@
     "url": "https://github.com/dirkwa/signalk-container"
   },
   "devDependencies": {
+    "@babel/core": "^7.29.0",
+    "@babel/preset-react": "^7.28.5",
     "@eslint/js": "^10.0.1",
     "@signalk/server-api": "latest",
     "@types/express": "^5.0.6",
     "@types/node": "^20.0.0",
+    "babel-loader": "^10.1.1",
     "eslint": "^10.2.0",
     "eslint-config-prettier": "^10.1.8",
     "globals": "^17.4.0",
     "prettier": "^3.8.1",
+    "react": "^19.2.4",
     "typescript": "^5.0.0",
-    "typescript-eslint": "^8.58.0"
+    "typescript-eslint": "^8.58.0",
+    "webpack": "^5.105.4",
+    "webpack-cli": "^7.0.2"
   }
 }
