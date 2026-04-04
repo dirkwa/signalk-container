@@ -14,7 +14,7 @@ describe("type contracts", () => {
       tag: "9.2.0",
       ports: { "9000/tcp": "127.0.0.1:9000" },
       volumes: {
-        "/var/lib/questdb": "/home/user/.signalk/plugin-config-data/questdb",
+        "/var/lib/questdb": "/tmp/plugin-config-data/questdb",
       },
       env: { QDB_TELEMETRY_ENABLED: "false" },
       restart: "unless-stopped",
