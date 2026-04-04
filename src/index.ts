@@ -27,8 +27,8 @@ import { runJob } from "./jobs";
 interface App {
   debug: (...args: unknown[]) => void;
   error: (...args: unknown[]) => void;
-  setPluginStatus: (id: string, msg: string) => void;
-  setPluginError: (id: string, msg: string) => void;
+  setPluginStatus: (msg: string) => void;
+  setPluginError: (msg: string) => void;
   [key: string]: unknown;
 }
 
@@ -160,14 +160,12 @@ module.exports = (app: App) => {
 
         if (!runtimeInfo) {
           app.setPluginError(
-            plugin.id,
             "No container runtime found. Install Podman: sudo apt install podman",
           );
           return;
         }
 
         app.setPluginStatus(
-          plugin.id,
           `${runtimeInfo.runtime} ${runtimeInfo.version}${runtimeInfo.isPodmanDockerShim ? " (podman shim)" : ""}`,
         );
 
@@ -191,7 +189,6 @@ module.exports = (app: App) => {
         app.debug("Container manager started");
       })().catch((err) => {
         app.setPluginError(
-          plugin.id,
           `Startup failed: ${err instanceof Error ? err.message : String(err)}`,
         );
       });
