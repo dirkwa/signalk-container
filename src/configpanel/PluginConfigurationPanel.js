@@ -193,11 +193,15 @@ export default function PluginConfigurationPanel({ configuration, save }) {
       }
 
       if (ctRes.ok) {
-        setContainers(await ctRes.json());
+        const ctData = await ctRes.json();
+        console.log("signalk-container panel: containers=", ctData);
+        setContainers(ctData);
       } else {
+        console.log("signalk-container panel: containers fetch failed", ctRes.status);
         setContainers([]);
       }
-    } catch {
+    } catch (err) {
+      console.log("signalk-container panel: fetch error", err);
       setRuntimeInfo(null);
       setContainers([]);
     }
