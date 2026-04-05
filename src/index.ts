@@ -21,6 +21,7 @@ import {
   pullImage,
   qualifyImage as qualifyImageForRuntime,
   removeContainer,
+  startContainer,
   stopContainer,
 } from "./containers";
 import { runJob } from "./jobs";
@@ -86,6 +87,11 @@ module.exports = (app: App) => {
         }, 60000);
         healthTimers.set(name, timer);
       }
+    },
+
+    async start(name: string) {
+      if (!runtimeInfo) throw new Error("No container runtime available");
+      await startContainer(runtimeInfo, name);
     },
 
     async stop(name: string) {
@@ -245,6 +251,17 @@ module.exports = (app: App) => {
         try {
           await api.stop(req.params.name);
           res.json({ status: "stopped" });
+        } catch (err) {
+          res.status(500).json({
+            error: err instanceof Error ? err.message : "Unknown error",
+          });
+        }
+      });
+
+      router.post("/api/containers/:name/start", async (req, res) => {
+        try {
+          await api.start(req.params.name);
+          res.json({ status: "started" });
         } catch (err) {
           res.status(500).json({
             error: err instanceof Error ? err.message : "Unknown error",

@@ -163,6 +163,17 @@ export async function ensureRunning(
   }
 }
 
+export async function startContainer(
+  runtime: ContainerRuntimeInfo,
+  name: string,
+): Promise<void> {
+  const fullName = prefixedName(name);
+  const result = await execRuntime(runtime, ["start", fullName]);
+  if (result.exitCode !== 0) {
+    throw new Error(`Failed to start ${fullName}: ${result.stderr}`);
+  }
+}
+
 export async function stopContainer(
   runtime: ContainerRuntimeInfo,
   name: string,

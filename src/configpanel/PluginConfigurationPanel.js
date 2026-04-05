@@ -220,6 +220,28 @@ export default function PluginConfigurationPanel({ configuration, save }) {
     setStatusError(false);
   };
 
+  const startContainer = async (name) => {
+    setActionStatus(`Starting ${name}...`);
+    setStatusError(false);
+    try {
+      const res = await fetch(
+        `/plugins/signalk-container/api/containers/${encodeURIComponent(name)}/start`,
+        { method: "POST" }
+      );
+      if (res.ok) {
+        setActionStatus(`${name} started.`);
+        fetchStatus();
+      } else {
+        const data = await res.json();
+        setActionStatus(`Failed: ${data.error}`);
+        setStatusError(true);
+      }
+    } catch (e) {
+      setActionStatus(`Error: ${e.message}`);
+      setStatusError(true);
+    }
+  };
+
   const stopContainer = async (name) => {
     setActionStatus(`Stopping ${name}...`);
     setStatusError(false);
@@ -242,7 +264,10 @@ export default function PluginConfigurationPanel({ configuration, save }) {
     }
   };
 
-  const removeContainer = async (name) => {
+  const removeContainer = async (name, state) => {
+    if (state === "running") {
+      if (!window.confirm(`${name} is running. Stop and remove it?`)) return;
+    }
     setActionStatus(`Removing ${name}...`);
     setStatusError(false);
     try {
@@ -393,6 +418,14 @@ export default function PluginConfigurationPanel({ configuration, save }) {
               </div>
             </div>
             <div style={S.containerActions}>
+              {ct.state === "stopped" && (
+                <button
+                  style={{ ...S.btn, ...S.btnPrimary }}
+                  onClick={() => startContainer(ct.name)}
+                >
+                  Start
+                </button>
+              )}
               {ct.state === "running" && (
                 <button
                   style={{ ...S.btn, ...S.btnWarning }}
@@ -403,7 +436,7 @@ export default function PluginConfigurationPanel({ configuration, save }) {
               )}
               <button
                 style={{ ...S.btn, ...S.btnDanger }}
-                onClick={() => removeContainer(ct.name)}
+                onClick={() => removeContainer(ct.name, ct.state)}
               >
                 Remove
               </button>

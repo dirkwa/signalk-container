@@ -81,6 +81,7 @@ export interface ContainerManagerApi {
     config: ContainerConfig,
     options?: HealthCheckOptions,
   ): Promise<void>;
+  start(name: string): Promise<void>;
   stop(name: string): Promise<void>;
   remove(name: string): Promise<void>;
   getState(name: string): Promise<ContainerState>;
