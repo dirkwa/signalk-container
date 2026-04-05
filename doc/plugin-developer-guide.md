@@ -8,17 +8,17 @@ How to use signalk-container from your Signal K plugin to manage Docker/Podman c
 // In your plugin's async startup function:
 const containers = (globalThis as any).__signalk_containerManager;
 if (!containers) {
-  app.setPluginError('signalk-container plugin is required');
+  app.setPluginError("signalk-container plugin is required");
   return;
 }
 
-await containers.ensureRunning('my-service', {
-  image: 'myorg/myimage',
-  tag: 'latest',
-  ports: { '8080/tcp': '127.0.0.1:8080' },
-  volumes: { '/data': app.getDataDirPath() },
-  env: { MY_VAR: 'value' },
-  restart: 'unless-stopped'
+await containers.ensureRunning("my-service", {
+  image: "myorg/myimage",
+  tag: "latest",
+  ports: { "8080/tcp": "127.0.0.1:8080" },
+  volumes: { "/data": app.getDataDirPath() },
+  env: { MY_VAR: "value" },
+  restart: "unless-stopped",
 });
 ```
 
@@ -31,6 +31,7 @@ await containers.ensureRunning('my-service', {
 Signal K server calls `plugin.start(config, restart)` **synchronously**. If your `start()` is `async`, the returned Promise is ignored. Errors from rejected promises become unhandled rejections — no error status, no logs, silent failure.
 
 **Wrong:**
+
 ```typescript
 // The server calls this but does NOT await it.
 // If ensureRunning() rejects, no one catches it.
@@ -41,6 +42,7 @@ async start(config) {
 ```
 
 **Correct:**
+
 ```typescript
 start(config) {
   asyncStart(config).catch((err) => {
@@ -58,14 +60,16 @@ Extract all async logic into a separate function and call it from a synchronous 
 The server wraps these methods per-plugin. The plugin id is pre-filled automatically.
 
 **Wrong:**
+
 ```typescript
-app.setPluginStatus(plugin.id, 'Running')  // plugin.id becomes the message!
+app.setPluginStatus(plugin.id, "Running"); // plugin.id becomes the message!
 ```
 
 **Correct:**
+
 ```typescript
-app.setPluginStatus('Running')
-app.setPluginError('Connection failed')
+app.setPluginStatus("Running");
+app.setPluginError("Connection failed");
 ```
 
 The server internally calls `app.setPluginStatus(pluginId, msg)` with two args, but the version given to plugins via `appCopy` is already bound to the plugin id.
@@ -79,15 +83,17 @@ The server internally calls `app.setPluginStatus(pluginId, msg)` with two args, 
 Signal K server creates each plugin's `app` via `_.assign({}, app, {...})`. This is a **shallow copy**. Setting a property on one plugin's `app` does NOT propagate to other plugins.
 
 **Wrong:**
+
 ```typescript
 // In signalk-container:
 (app as any).containerManager = api;
 
 // In signalk-questdb:
-const containers = (app as any).containerManager;  // undefined!
+const containers = (app as any).containerManager; // undefined!
 ```
 
 **Correct — use `globalThis`:**
+
 ```typescript
 // In signalk-container:
 (globalThis as any).__signalk_containerManager = api;
@@ -97,6 +103,7 @@ const containers = (globalThis as any).__signalk_containerManager;
 ```
 
 Clean up in `stop()`:
+
 ```typescript
 stop() {
   delete (globalThis as any).__signalk_containerManager;
@@ -116,12 +123,12 @@ async function asyncStart(config) {
     // containerManager is exposed immediately, but runtime detection
     // is async. Wait until getRuntime() returns non-null.
     if (containers && containers.getRuntime()) break;
-    app.setPluginStatus('Waiting for container runtime...');
+    app.setPluginStatus("Waiting for container runtime...");
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
 
   if (!containers || !containers.getRuntime()) {
-    app.setPluginError('signalk-container plugin not available');
+    app.setPluginError("signalk-container plugin not available");
     return;
   }
 
@@ -157,12 +164,12 @@ When your plugin's configuration changes (compression, ports, image version, etc
 
 ```typescript
 const containerConfig = {
-  image: 'questdb/questdb',
+  image: "questdb/questdb",
   tag: config.version,
-  ports: { '9000/tcp': '127.0.0.1:9000' },
-  volumes: { '/data': app.getDataDirPath() },
+  ports: { "9000/tcp": "127.0.0.1:9000" },
+  volumes: { "/data": app.getDataDirPath() },
   env: { MY_COMPRESSION: config.compression },
-  restart: 'unless-stopped'
+  restart: "unless-stopped",
 };
 
 // Hash the config to detect changes
@@ -173,22 +180,50 @@ const configHash = JSON.stringify({
 });
 
 const hashFile = `${app.getDataDirPath()}/container-config-hash`;
-let lastHash = '';
+let lastHash = "";
 try {
-  lastHash = readFileSync(hashFile, 'utf8');
-} catch { /* first run */ }
-
-const state = await containers.getState('my-service');
-if (state !== 'missing' && configHash !== lastHash) {
-  // Config changed — remove and recreate
-  await containers.remove('my-service');
+  lastHash = readFileSync(hashFile, "utf8");
+} catch {
+  /* first run */
 }
 
-await containers.ensureRunning('my-service', containerConfig);
+const state = await containers.getState("my-service");
+if (state !== "missing" && configHash !== lastHash) {
+  // Config changed — remove and recreate
+  await containers.remove("my-service");
+}
+
+await containers.ensureRunning("my-service", containerConfig);
 writeFileSync(hashFile, configHash);
 ```
 
 Data is safe because volumes live on the host filesystem, not inside the container.
+
+---
+
+## Stopping Containers When Plugin is Disabled
+
+When your plugin's `stop()` is called (user disables the plugin), you should stop the managed container. Otherwise it keeps running with no one managing it:
+
+```typescript
+async stop() {
+  // Clean up writer, timers, subscriptions...
+
+  // Stop the managed container
+  if (currentConfig?.managedContainer !== false) {
+    const containers = (globalThis as any).__signalk_containerManager;
+    if (containers) {
+      try {
+        await containers.stop('my-service');
+      } catch {
+        // may already be stopped
+      }
+    }
+  }
+}
+```
+
+The container is only stopped, not removed. Re-enabling the plugin will start it again instantly without pulling.
 
 ---
 
@@ -197,80 +232,96 @@ Data is safe because volumes live on the host filesystem, not inside the contain
 Access via `(globalThis as any).__signalk_containerManager`:
 
 ### `getRuntime(): RuntimeInfo | null`
+
 Returns detected runtime info or `null` if detection hasn't completed.
+
 ```typescript
 { runtime: 'podman', version: '5.4.2', isPodmanDockerShim: false }
 ```
 
 ### `ensureRunning(name, config, options?): Promise<void>`
+
 Creates and starts a container if not already running. No-op if already running.
 
 ```typescript
-await containers.ensureRunning('my-db', {
-  image: 'postgres',
-  tag: '16',
-  ports: { '5432/tcp': '127.0.0.1:5432' },
-  volumes: { '/var/lib/postgresql/data': '/host/path' },
-  env: { POSTGRES_PASSWORD: 'secret' },
-  restart: 'unless-stopped',
-  command: ['-c', 'shared_buffers=256MB']  // optional
+await containers.ensureRunning("my-db", {
+  image: "postgres",
+  tag: "16",
+  ports: { "5432/tcp": "127.0.0.1:5432" },
+  volumes: { "/var/lib/postgresql/data": "/host/path" },
+  env: { POSTGRES_PASSWORD: "secret" },
+  restart: "unless-stopped",
+  command: ["-c", "shared_buffers=256MB"], // optional
 });
 ```
 
 Use `networkMode: 'host'` for containers that need direct access to the host network (e.g. multicast/broadcast discovery). Port mappings are ignored when `networkMode` is set.
 
 ```typescript
-await containers.ensureRunning('mayara-server', {
-  image: 'ghcr.io/marineyachtradar/mayara-server',
-  tag: 'latest',
-  networkMode: 'host',
-  restart: 'unless-stopped'
+await containers.ensureRunning("mayara-server", {
+  image: "ghcr.io/marineyachtradar/mayara-server",
+  tag: "latest",
+  networkMode: "host",
+  restart: "unless-stopped",
 });
 ```
 
+### `start(name): Promise<void>`
+
+Starts a stopped container. Throws if container doesn't exist.
+
 ### `stop(name): Promise<void>`
+
 Stops a running container. Idempotent.
 
 ### `remove(name): Promise<void>`
+
 Stops and removes a container. Idempotent.
 
 ### `getState(name): Promise<ContainerState>`
+
 Returns `'running'`, `'stopped'`, `'missing'`, or `'no-runtime'`.
 
 ### `pullImage(image, onProgress?): Promise<void>`
+
 Pulls an image. `onProgress` receives line-by-line pull output.
 
 ### `imageExists(image): Promise<boolean>`
+
 Checks if an image exists locally.
 
 ### `runJob(config): Promise<ContainerJobResult>`
+
 Runs a one-shot container (exits when done).
 
 ```typescript
 const result = await containers.runJob({
-  image: 'myorg/converter',
-  command: ['convert', '/in/data.csv', '/out/data.parquet'],
-  inputs: { '/in': '/host/input' },     // read-only mount
-  outputs: { '/out': '/host/output' },   // read-write mount
-  env: { FORMAT: 'parquet' },
-  timeout: 120,                          // seconds
+  image: "myorg/converter",
+  command: ["convert", "/in/data.csv", "/out/data.parquet"],
+  inputs: { "/in": "/host/input" }, // read-only mount
+  outputs: { "/out": "/host/output" }, // read-write mount
+  env: { FORMAT: "parquet" },
+  timeout: 120, // seconds
   onProgress: (line) => console.log(line),
-  label: 'parquet-export'
+  label: "parquet-export",
 });
 
-if (result.status === 'completed') {
-  console.log('Exit code:', result.exitCode);
-  console.log('Output:', result.log);
+if (result.status === "completed") {
+  console.log("Exit code:", result.exitCode);
+  console.log("Output:", result.log);
 }
 ```
 
 ### `prune(): Promise<PruneResult>`
+
 Removes dangling images.
+
 ```typescript
 { imagesRemoved: 3, spaceReclaimed: '1.2 GB' }
 ```
 
 ### `listContainers(): Promise<ContainerInfo[]>`
+
 Lists all `sk-` prefixed containers.
 
 ---
@@ -283,12 +334,20 @@ If you want type safety, define a minimal interface in your plugin:
 interface ContainerManagerApi {
   getRuntime: () => { runtime: string; version: string } | null;
   ensureRunning: (name: string, config: unknown) => Promise<void>;
+  start: (name: string) => Promise<void>;
   stop: (name: string) => Promise<void>;
   remove: (name: string) => Promise<void>;
-  getState: (name: string) => Promise<'running' | 'stopped' | 'missing' | 'no-runtime'>;
-  pullImage: (image: string, onProgress?: (msg: string) => void) => Promise<void>;
+  getState: (
+    name: string,
+  ) => Promise<"running" | "stopped" | "missing" | "no-runtime">;
+  pullImage: (
+    image: string,
+    onProgress?: (msg: string) => void,
+  ) => Promise<void>;
   imageExists: (image: string) => Promise<boolean>;
-  runJob: (config: unknown) => Promise<{ status: string; exitCode?: number; log: string[] }>;
+  runJob: (
+    config: unknown,
+  ) => Promise<{ status: string; exitCode?: number; log: string[] }>;
   prune: () => Promise<{ imagesRemoved: number; spaceReclaimed: string }>;
   listContainers: () => Promise<unknown[]>;
 }
@@ -301,6 +360,7 @@ interface ContainerManagerApi {
 If you want a custom config UI like signalk-container and signalk-questdb, use the `signalk-plugin-configurator` pattern:
 
 ### package.json
+
 ```json
 {
   "keywords": ["signalk-node-server-plugin", "signalk-plugin-configurator"]
@@ -308,40 +368,45 @@ If you want a custom config UI like signalk-container and signalk-questdb, use t
 ```
 
 ### Webpack config
+
 ```javascript
-const { ModuleFederationPlugin } = require('webpack').container;
-const pkg = require('./package.json');
+const { ModuleFederationPlugin } = require("webpack").container;
+const pkg = require("./package.json");
 
 module.exports = {
-  entry: './src/configpanel/index',
-  mode: 'production',
-  output: { path: path.resolve(__dirname, 'public'), clean: false },
+  entry: "./src/configpanel/index",
+  mode: "production",
+  output: { path: path.resolve(__dirname, "public"), clean: false },
   module: {
-    rules: [{
-      test: /\.jsx?$/,
-      loader: 'babel-loader',
-      exclude: /node_modules/,
-      options: { presets: ['@babel/preset-react'] }
-    }]
+    rules: [
+      {
+        test: /\.jsx?$/,
+        loader: "babel-loader",
+        exclude: /node_modules/,
+        options: { presets: ["@babel/preset-react"] },
+      },
+    ],
   },
   plugins: [
     new ModuleFederationPlugin({
-      name: pkg.name.replace(/[-@/]/g, '_'),
-      library: { type: 'var', name: pkg.name.replace(/[-@/]/g, '_') },
-      filename: 'remoteEntry.js',
+      name: pkg.name.replace(/[-@/]/g, "_"),
+      library: { type: "var", name: pkg.name.replace(/[-@/]/g, "_") },
+      filename: "remoteEntry.js",
       exposes: {
-        './PluginConfigurationPanel': './src/configpanel/PluginConfigurationPanel'
+        "./PluginConfigurationPanel":
+          "./src/configpanel/PluginConfigurationPanel",
       },
       shared: {
-        react: { singleton: true, requiredVersion: '^19' },
-        'react-dom': { singleton: true, requiredVersion: '^19' }
-      }
-    })
-  ]
+        react: { singleton: true, requiredVersion: "^19" },
+        "react-dom": { singleton: true, requiredVersion: "^19" },
+      },
+    }),
+  ],
 };
 ```
 
 ### Component signature
+
 ```jsx
 export default function PluginConfigurationPanel({ configuration, save }) {
   // configuration = current plugin config object
@@ -352,6 +417,7 @@ export default function PluginConfigurationPanel({ configuration, save }) {
 The `save()` function provided by the Admin UI POSTs to `/plugins/{pluginId}/config` and triggers a plugin restart.
 
 ### Build output
+
 Webpack outputs to `public/` which Signal K serves at `/{package-name}/`. The Admin UI loads `remoteEntry.js` and dynamically imports `PluginConfigurationPanel`.
 
 **Do not commit `public/*.js` to git** — add them to `.gitignore`. They're built during `npm run build` (which CI and `npm publish` both run via `prepublishOnly`).
@@ -360,13 +426,16 @@ Webpack outputs to `public/` which Signal K serves at `/{package-name}/`. The Ad
 
 ## Common Mistakes Summary
 
-| Mistake | Symptom | Fix |
-|---------|---------|-----|
-| `async start()` without catch | Silent failure, no status | Sync `start()` + `asyncStart().catch()` |
-| `app.setPluginStatus(id, msg)` | Status shows plugin id as message | `app.setPluginStatus(msg)` (one arg) |
-| Setting property on `app` | Other plugins can't see it | Use `globalThis.__signalk_xxx` |
-| Not waiting for runtime detection | `getRuntime()` returns null | Poll until `getRuntime()` is non-null |
-| Short Docker image names with Podman | Pull fails with "short-name did not resolve" | signalk-container handles this automatically |
-| `DEDUP ENABLED UPSERT KEYS` in QuestDB DDL | Table creation fails | `DEDUP UPSERT KEYS` (no ENABLED) |
-| Committing webpack `public/` output | CI fails with "untracked files" | Add `public/*.js` to `.gitignore` |
-| `engines.node` missing from package.json | CI validation error | Add `"engines": { "node": ">=22" }` |
+| Mistake                                    | Symptom                                      | Fix                                            |
+| ------------------------------------------ | -------------------------------------------- | ---------------------------------------------- |
+| `async start()` without catch              | Silent failure, no status                    | Sync `start()` + `asyncStart().catch()`        |
+| `app.setPluginStatus(id, msg)`             | Status shows plugin id as message            | `app.setPluginStatus(msg)` (one arg)           |
+| Setting property on `app`                  | Other plugins can't see it                   | Use `globalThis.__signalk_xxx`                 |
+| Not waiting for runtime detection          | `getRuntime()` returns null                  | Poll until `getRuntime()` is non-null          |
+| Short Docker image names with Podman       | Pull fails with "short-name did not resolve" | signalk-container handles this automatically   |
+| `DEDUP ENABLED UPSERT KEYS` in QuestDB DDL | Table creation fails                         | `DEDUP UPSERT KEYS` (no ENABLED)               |
+| Committing webpack `public/` output        | CI fails with "untracked files"              | Add `public/*.js` to `.gitignore`              |
+| `engines.node` missing from package.json   | CI validation error                          | Add `"engines": { "node": ">=22" }`            |
+| Not stopping container in `stop()`         | Container runs after plugin disabled         | Call `containers.stop()` in plugin `stop()`    |
+| `savePluginOptions` doesn't restart        | Plugin stays stopped after config save       | Don't rely on it for restart; do work directly |
+| Config hash in QuestDB data volume         | Hash file lost (QuestDB owns the dir)        | Store hash file next to plugin JSON config     |

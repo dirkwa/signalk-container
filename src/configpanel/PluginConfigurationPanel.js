@@ -170,7 +170,7 @@ export default function PluginConfigurationPanel({ configuration, save }) {
   const cfg = configuration || {};
   const [runtime, setRuntime] = useState(cfg.runtime || "auto");
   const [pruneSchedule, setPruneSchedule] = useState(
-    cfg.pruneSchedule || "weekly"
+    cfg.pruneSchedule || "weekly",
   );
   const [runtimeInfo, setRuntimeInfo] = useState(null);
   const [containers, setContainers] = useState([]);
@@ -193,15 +193,11 @@ export default function PluginConfigurationPanel({ configuration, save }) {
       }
 
       if (ctRes.ok) {
-        const ctData = await ctRes.json();
-        console.log("signalk-container panel: containers=", ctData);
-        setContainers(ctData);
+        setContainers(await ctRes.json());
       } else {
-        console.log("signalk-container panel: containers fetch failed", ctRes.status);
         setContainers([]);
       }
-    } catch (err) {
-      console.log("signalk-container panel: fetch error", err);
+    } catch {
       setRuntimeInfo(null);
       setContainers([]);
     }
@@ -215,7 +211,11 @@ export default function PluginConfigurationPanel({ configuration, save }) {
   }, [fetchStatus]);
 
   const doSave = () => {
-    save({ runtime, pruneSchedule, maxConcurrentJobs: cfg.maxConcurrentJobs || 2 });
+    save({
+      runtime,
+      pruneSchedule,
+      maxConcurrentJobs: cfg.maxConcurrentJobs || 2,
+    });
     setActionStatus("Saved! Plugin will restart.");
     setStatusError(false);
   };
@@ -226,7 +226,7 @@ export default function PluginConfigurationPanel({ configuration, save }) {
     try {
       const res = await fetch(
         `/plugins/signalk-container/api/containers/${encodeURIComponent(name)}/start`,
-        { method: "POST" }
+        { method: "POST" },
       );
       if (res.ok) {
         setActionStatus(`${name} started.`);
@@ -248,7 +248,7 @@ export default function PluginConfigurationPanel({ configuration, save }) {
     try {
       const res = await fetch(
         `/plugins/signalk-container/api/containers/${encodeURIComponent(name)}/stop`,
-        { method: "POST" }
+        { method: "POST" },
       );
       if (res.ok) {
         setActionStatus(`${name} stopped.`);
@@ -273,7 +273,7 @@ export default function PluginConfigurationPanel({ configuration, save }) {
     try {
       const res = await fetch(
         `/plugins/signalk-container/api/containers/${encodeURIComponent(name)}/remove`,
-        { method: "POST" }
+        { method: "POST" },
       );
       if (res.ok) {
         setActionStatus(`${name} removed.`);
@@ -301,7 +301,7 @@ export default function PluginConfigurationPanel({ configuration, save }) {
         const data = await res.json();
         setPruneResult(data);
         setActionStatus(
-          `Pruned ${data.imagesRemoved} image(s), reclaimed ${data.spaceReclaimed}.`
+          `Pruned ${data.imagesRemoved} image(s), reclaimed ${data.spaceReclaimed}.`,
         );
       } else {
         const data = await res.json();
@@ -338,9 +338,7 @@ export default function PluginConfigurationPanel({ configuration, save }) {
                 runtimeInfo.runtime.slice(1)}
               {runtimeInfo.isPodmanDockerShim ? " (via docker shim)" : ""}
             </div>
-            <div style={S.runtimeVersion}>
-              Version {runtimeInfo.version}
-            </div>
+            <div style={S.runtimeVersion}>Version {runtimeInfo.version}</div>
           </div>
           <div
             style={{
@@ -353,7 +351,11 @@ export default function PluginConfigurationPanel({ configuration, save }) {
       ) : (
         <div style={S.runtimeCard}>
           <div
-            style={{ ...S.runtimeIcon, background: "#fef2f2", color: "#ef4444" }}
+            style={{
+              ...S.runtimeIcon,
+              background: "#fef2f2",
+              color: "#ef4444",
+            }}
           >
             !
           </div>
@@ -420,7 +422,12 @@ export default function PluginConfigurationPanel({ configuration, save }) {
             <div style={S.containerActions}>
               {ct.state === "stopped" && (
                 <button
-                  style={{ ...S.btn, ...S.btnPrimary, padding: "6px 12px", fontSize: 12 }}
+                  style={{
+                    ...S.btn,
+                    ...S.btnPrimary,
+                    padding: "6px 12px",
+                    fontSize: 12,
+                  }}
                   onClick={() => startContainer(ct.name)}
                 >
                   Start

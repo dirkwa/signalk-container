@@ -46,12 +46,19 @@ module.exports = (app: App) => {
 
     async pullImage(image: string, onProgress?: (msg: string) => void) {
       if (!runtimeInfo) throw new Error("No container runtime available");
-      await pullImage(runtimeInfo, qualifyImageForRuntime(image, runtimeInfo), onProgress);
+      await pullImage(
+        runtimeInfo,
+        qualifyImageForRuntime(image, runtimeInfo),
+        onProgress,
+      );
     },
 
     async imageExists(image: string) {
       if (!runtimeInfo) return false;
-      return imageExists(runtimeInfo, qualifyImageForRuntime(image, runtimeInfo));
+      return imageExists(
+        runtimeInfo,
+        qualifyImageForRuntime(image, runtimeInfo),
+      );
     },
 
     async ensureRunning(
@@ -179,22 +186,22 @@ module.exports = (app: App) => {
           `${runtimeInfo.runtime} ${runtimeInfo.version}${runtimeInfo.isPodmanDockerShim ? " (podman shim)" : ""}`,
         );
 
-      if (config.pruneSchedule && config.pruneSchedule !== "off") {
-        const intervalMs =
-          config.pruneSchedule === "weekly"
-            ? 7 * 24 * 60 * 60 * 1000
-            : 30 * 24 * 60 * 60 * 1000;
-        pruneTimer = setInterval(async () => {
-          try {
-            const result = await pruneImages(runtimeInfo!);
-            app.debug(
-              `Pruned ${result.imagesRemoved} images, reclaimed ${result.spaceReclaimed}`,
-            );
-          } catch (err) {
-            app.error("Auto-prune failed:", err);
-          }
-        }, intervalMs);
-      }
+        if (config.pruneSchedule && config.pruneSchedule !== "off") {
+          const intervalMs =
+            config.pruneSchedule === "weekly"
+              ? 7 * 24 * 60 * 60 * 1000
+              : 30 * 24 * 60 * 60 * 1000;
+          pruneTimer = setInterval(async () => {
+            try {
+              const result = await pruneImages(runtimeInfo!);
+              app.debug(
+                `Pruned ${result.imagesRemoved} images, reclaimed ${result.spaceReclaimed}`,
+              );
+            } catch (err) {
+              app.error("Auto-prune failed:", err);
+            }
+          }, intervalMs);
+        }
 
         app.debug("Container manager started");
       })().catch((err) => {
