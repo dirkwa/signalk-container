@@ -420,7 +420,7 @@ export default function PluginConfigurationPanel({ configuration, save }) {
             <div style={S.containerActions}>
               {ct.state === "stopped" && (
                 <button
-                  style={{ ...S.btn, ...S.btnPrimary }}
+                  style={{ ...S.btn, ...S.btnPrimary, padding: "6px 12px", fontSize: 12 }}
                   onClick={() => startContainer(ct.name)}
                 >
                   Start
