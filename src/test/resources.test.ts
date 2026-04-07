@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  fieldsRequiringRecreateForUnset,
   filterUnsupportedLimits,
   mergeResourceLimits,
   resourceFlagsForRun,
@@ -555,5 +556,100 @@ describe("tryLiveUpdate Bug C: container existence check", () => {
     );
     assert.equal(result.ok, true);
     assert.deepEqual(captured.args, ["update", "--cpus", "1.5", "sk-mayara"]);
+  });
+});
+
+describe("fieldsRequiringRecreateForUnset (Bug E)", () => {
+  it("returns empty when current and target both have memory set", () => {
+    const result = fieldsRequiringRecreateForUnset(
+      { memory: "512m" },
+      { memory: "1g" },
+    );
+    assert.deepEqual(result, []);
+  });
+
+  it("returns empty when neither has memory set", () => {
+    const result = fieldsRequiringRecreateForUnset(
+      { cpus: 1.0 },
+      { cpus: 2.0 },
+    );
+    assert.deepEqual(result, []);
+  });
+
+  it("returns ['memory'] when current has memory set and target drops it", () => {
+    const result = fieldsRequiringRecreateForUnset({ memory: "512m" }, {});
+    assert.deepEqual(result, ["memory"]);
+  });
+
+  it("treats null in target as unset", () => {
+    const result = fieldsRequiringRecreateForUnset(
+      { memory: "512m" },
+      { memory: null },
+    );
+    assert.deepEqual(result, ["memory"]);
+  });
+
+  it("treats undefined in target as unset", () => {
+    const result = fieldsRequiringRecreateForUnset(
+      { memory: "512m", cpus: 1.0 },
+      { memory: undefined, cpus: 2.0 },
+    );
+    assert.deepEqual(result, ["memory"]);
+  });
+
+  it("returns ['oomScoreAdj'] when oom-score-adj is being unset", () => {
+    const result = fieldsRequiringRecreateForUnset({ oomScoreAdj: 500 }, {});
+    assert.deepEqual(result, ["oomScoreAdj"]);
+  });
+
+  it("returns multiple fields when several are being unset", () => {
+    const result = fieldsRequiringRecreateForUnset(
+      {
+        memory: "512m",
+        memorySwap: "512m",
+        memoryReservation: "256m",
+        oomScoreAdj: 500,
+        cpus: 1.5,
+      },
+      { cpus: 2.0 },
+    );
+    // All four memory/oom fields are being unset
+    assert.equal(result.length, 4);
+    assert.ok(result.includes("memory"));
+    assert.ok(result.includes("memorySwap"));
+    assert.ok(result.includes("memoryReservation"));
+    assert.ok(result.includes("oomScoreAdj"));
+  });
+
+  it("does NOT include cpus or pidsLimit (they CAN be live-unset)", () => {
+    const result = fieldsRequiringRecreateForUnset(
+      { cpus: 1.5, pidsLimit: 200, memory: "512m" },
+      { memory: "512m" }, // unsetting cpus and pidsLimit
+    );
+    // Only memory is in the cannot-unset set, and it's still set in target
+    assert.deepEqual(result, []);
+  });
+
+  it("does NOT include cpusetCpus (CAN be live-unset)", () => {
+    const result = fieldsRequiringRecreateForUnset({ cpusetCpus: "0,1" }, {});
+    assert.deepEqual(result, []);
+  });
+
+  it("real-world scenario: removing oomScoreAdj while keeping cpus/memory", () => {
+    // This is the exact case that surfaced Bug E in the smoke test:
+    // mayara had oomScoreAdj: 500 from a prior update, user removes it.
+    const result = fieldsRequiringRecreateForUnset(
+      { cpus: 1.5, memory: "512m", memorySwap: "512m", oomScoreAdj: 500 },
+      { cpus: 1.5, memory: "512m", memorySwap: "512m" },
+    );
+    assert.deepEqual(result, ["oomScoreAdj"]);
+  });
+
+  it("does not mutate either input", () => {
+    const current = { memory: "512m", oomScoreAdj: 500 };
+    const target = { cpus: 1.0 };
+    fieldsRequiringRecreateForUnset(current, target);
+    assert.deepEqual(current, { memory: "512m", oomScoreAdj: 500 });
+    assert.deepEqual(target, { cpus: 1.0 });
   });
 });

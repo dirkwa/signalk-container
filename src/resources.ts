@@ -17,6 +17,58 @@ const LIVE_UPDATABLE_FIELDS: ReadonlyArray<keyof ContainerResourceLimits> = [
 ];
 
 /**
+ * Fields that, once set on a running container, cannot be UNSET via
+ * `podman update` / `docker update`. The runtime can lower or raise
+ * them, but cannot return them to the unlimited/default state without
+ * a container recreate.
+ *
+ *   - memory / memorySwap / memoryReservation: cgroup memory.max can
+ *     be lowered or raised, but resetting to "max" (unlimited) is
+ *     not exposed via `podman update`.
+ *   - oomScoreAdj: set at create time only, never via update.
+ *
+ * Used by the orchestration layer (index.ts) to detect "user is
+ * asking to remove a limit we previously set, and live update can't
+ * do that" and force a recreate. Without this check, the live-update
+ * path would silently no-op the unset and `effectiveResources` would
+ * report a state that doesn't match the actual container.
+ */
+const FIELDS_THAT_CANNOT_LIVE_UNSET: ReadonlySet<
+  keyof ContainerResourceLimits
+> = new Set(["memory", "memorySwap", "memoryReservation", "oomScoreAdj"]);
+
+/**
+ * Compare a snapshot of currently-applied resource limits to a
+ * target, and return the list of fields that the target is asking
+ * to UNSET (i.e. fields present in `current` but absent or null in
+ * `target`) which cannot be live-unset.
+ *
+ * If this returns a non-empty list, the caller MUST take the
+ * recreate path — live update will silently no-op the unset.
+ *
+ * `current` is what `getLiveResources()` returned (the actual cgroup
+ * state). `target` is the post-merge intended state.
+ */
+export function fieldsRequiringRecreateForUnset(
+  current: ContainerResourceLimits,
+  target: ContainerResourceLimits,
+): Array<keyof ContainerResourceLimits> {
+  const result: Array<keyof ContainerResourceLimits> = [];
+  for (const field of FIELDS_THAT_CANNOT_LIVE_UNSET) {
+    const wasSet = isSet(current[field]);
+    const willBeSet = isSet(target[field]);
+    if (wasSet && !willBeSet) {
+      result.push(field);
+    }
+  }
+  return result;
+}
+
+function isSet(v: unknown): boolean {
+  return v !== undefined && v !== null;
+}
+
+/**
  * Maps each ContainerResourceLimits field to the cgroup v2 controller
  * it requires. `null` means the field is not gated by a cgroup
  * controller (oom_score_adj is set in /proc/<pid>/oom_score_adj, not

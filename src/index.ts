@@ -15,6 +15,7 @@ import {
   UpdateResourcesResult,
 } from "./types";
 import {
+  fieldsRequiringRecreateForUnset,
   filterUnsupportedLimits,
   mergeResourceLimits,
   resourceLimitsEqual,
@@ -162,6 +163,26 @@ module.exports = (app: App) => {
       // next consumer-plugin restart without forcing a recreate.
       if (!resourceLimitsEqual(preLimits, filteredMerged)) {
         const fullName = name.startsWith("sk-") ? name : `sk-${name}`;
+
+        // Bug E: if any field is being UNSET and it can't be unset
+        // via live update (memory, oomScoreAdj, etc.), the live path
+        // would silently no-op. We can't safely recreate from inside
+        // ensureRunning's "already running" branch — that would
+        // surprise the consumer plugin. Instead, log a clear warning
+        // pointing the user to the explicit recreate path.
+        const cannotUnset = fieldsRequiringRecreateForUnset(
+          preLimits,
+          filteredMerged,
+        );
+        if (cannotUnset.length > 0) {
+          app.error(
+            `ensureRunning(${name}): cannot live-unset fields ${cannotUnset.join(", ")} on already-running container. ` +
+              `These limits will remain at their previous values until the container is recreated. ` +
+              `Use POST /plugins/signalk-container/api/containers/${name}/resources to force a recreate.`,
+          );
+          // Still try to apply the OTHER (settable) fields via live update.
+        }
+
         const live = await tryLiveUpdate(runtimeInfo, fullName, filteredMerged);
         if (!live.ok) {
           // Live update failed (e.g. cpuset on a host that doesn't
@@ -304,9 +325,35 @@ module.exports = (app: App) => {
         };
       }
 
+      // Bug E: detect "user is asking to UNSET a field that's currently
+      // set on the container, AND that field cannot be unset via live
+      // update". Memory limits and oom-score-adj are the offenders —
+      // podman/docker can lower or raise them, but not return them to
+      // the unlimited/default state without a recreate. Without this
+      // check, the live update would silently no-op the unset and the
+      // cache would lie.
+      const liveBefore = await getLiveResources(runtimeInfo, name);
+      const mustRecreateForUnset = fieldsRequiringRecreateForUnset(
+        liveBefore,
+        filteredLimits,
+      );
+      const forceRecreate = mustRecreateForUnset.length > 0;
+      if (forceRecreate) {
+        const fieldList = mustRecreateForUnset.join(", ");
+        const w = `forcing recreate to unset live-non-unsettable fields: ${fieldList}`;
+        warnings.push(w);
+        app.debug(`updateResources(${name}): ${w}`);
+      }
+
       // Try the runtime's live `update` first — instantaneous, no
-      // downtime — and only fall back to recreate when it refuses.
-      const live = await tryLiveUpdate(runtimeInfo, fullName, filteredLimits);
+      // downtime — and only fall back to recreate when it refuses
+      // OR when we know live update can't perform the requested unset.
+      const live = forceRecreate
+        ? {
+            ok: false as const,
+            stderr: "force-recreate for unset of non-live-unsettable field(s)",
+          }
+        : await tryLiveUpdate(runtimeInfo, fullName, filteredLimits);
       if (live.ok) {
         effectiveResources.set(name, { ...filteredLimits });
         // Also keep the cached ContainerConfig in sync so that a
