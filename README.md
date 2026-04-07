@@ -118,6 +118,91 @@ All mounted at `/plugins/signalk-container/api/`:
 | Background update checks | `true`   | Periodically check for updates in the background. Disable on metered connections — manual checks via the UI button still work. |
 | Container overrides      | `{}`     | Per-container resource limits (CPU, memory, PIDs). Field-level merged on top of consumer plugin defaults. See dev guide.       |
 
+## Setting Resource Limits
+
+On a boat with limited compute (typically a Pi 4/5 or low-power x86 mini PC), one runaway container can starve Signal K, raise NMEA decode latency, trigger thermal throttling, or even take the host down via OOM. signalk-container exposes podman/docker resource flags so consumer plugins can set sensible defaults — and you, as the user, can override them per-container without touching code.
+
+### How it works
+
+Each consumer plugin (signalk-questdb, signalk-grafana, mayara, etc.) declares default CPU/memory limits when it starts its container. You can override any of these via the **Per-container resource overrides** field in this plugin's config. Your override is **merged field-by-field** on top of the plugin's defaults — you don't have to know what the plugin already set, just specify what you want different.
+
+### Example: capping mayara at 1.5 CPU cores and 512 MB
+
+In the signalk-container plugin config UI, set **Per-container resource overrides** to:
+
+```json
+{
+  "mayara-server": {
+    "cpus": 1.5,
+    "memory": "512m",
+    "memorySwap": "512m"
+  }
+}
+```
+
+The key (`mayara-server`) is the container name **without** the `sk-` prefix that signalk-container adds internally. After saving, restart the consumer plugin (or use the live update endpoint described below) for the new limits to take effect.
+
+### Available fields
+
+| Field               | Example          | What it does                                                                                                         |
+| ------------------- | ---------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `cpus`              | `1.5`            | Hard CPU cap. `1.5` = max 1.5 cores. The most important field for stability.                                         |
+| `cpuShares`         | `512`            | Soft CPU weight under contention (default 1024). Lower = lower priority.                                             |
+| `cpusetCpus`        | `"1,2"`          | Pin to specific cores. Useful to keep heavy containers off core 0 where Signal K runs.                               |
+| `memory`            | `"512m"`, `"2g"` | Hard memory cap. Container is OOM-killed if exceeded.                                                                |
+| `memorySwap`        | `"512m"`         | Memory + swap total. **Set equal to `memory` to disable swap entirely** — recommended on Pi/eMMC where swap is slow. |
+| `memoryReservation` | `"256m"`         | Soft memory floor. Kernel reclaims first from containers above this.                                                 |
+| `pidsLimit`         | `200`            | Cap on processes/threads. Prevents fork bombs and thread leaks.                                                      |
+| `oomScoreAdj`       | `500`            | OOM kill priority, -1000..1000. Higher = killed first when host runs out of memory.                                  |
+
+### Removing a limit set by a plugin
+
+Use `null` to explicitly remove a limit that the consumer plugin set:
+
+```json
+{
+  "mayara-server": { "memory": null }
+}
+```
+
+This keeps mayara's CPU limit (whatever the plugin's default is) but removes the memory cap.
+
+### When changes take effect
+
+- **For containers not yet started**: the next time the consumer plugin calls `ensureRunning`, your override is automatically merged in.
+- **For already-running containers**: the consumer plugin (or the REST API) needs to call `updateResources`. signalk-container tries `podman update` / `docker update` first (instantaneous, no downtime), and falls back to stop+remove+create if the runtime can't apply the change live (e.g. `cpusetCpus` or `oomScoreAdj`, which are set at create time only).
+- **The simplest path**: restart the consumer plugin via the Signal K admin UI after saving overrides. signalk-container will pick up the new merged limits on the next `ensureRunning` call.
+
+### Verifying limits are applied
+
+Check the live container with podman or docker:
+
+```bash
+podman inspect sk-mayara-server --format '
+  cpus={{.HostConfig.NanoCpus}}
+  memory={{.HostConfig.Memory}}
+'
+```
+
+`NanoCpus` is in CPU-nanoseconds per second; `1500000000` = 1.5 cores. Memory is in bytes.
+
+Or query the API:
+
+```bash
+curl http://localhost:3000/plugins/signalk-container/api/containers/mayara-server/resources
+# {"name":"mayara-server","effective":{"cpus":1.5,"memory":"512m"},"override":{"cpus":1.5,"memory":"512m"}}
+```
+
+### Picking the right values
+
+1. Run the container without overrides for a typical workload
+2. Watch resource use: `podman stats sk-mayara-server`
+3. Note peak CPU% and peak memory
+4. Set `cpus` ≈ peak / 100 + 25% headroom; `memory` ≈ peak rounded up + 25% headroom
+5. Re-test under load to make sure the container still functions inside its caps
+
+The plugin developer guide has a detailed walk-through in [doc/plugin-developer-guide.md#resource-limits](doc/plugin-developer-guide.md#resource-limits).
+
 ## Requirements
 
 - Node.js >= 22

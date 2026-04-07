@@ -496,6 +496,72 @@ The defaults you pick should reflect what your container actually needs at typic
 | `pidsLimit`         | `--pids-limit`         | Process/thread cap. Prevents fork bombs and runaway thread leaks.                                                          |
 | `oomScoreAdj`       | `--oom-score-adj`      | OOM score adjustment, -1000..1000. Higher = killed first under host OOM. Set high on "I'd rather lose this than Signal K". |
 
+### Picking sensible defaults
+
+Don't guess. Measure your container under realistic load on the smallest hardware you support (typically a Pi 4 or Pi 5), then add ~25% headroom. The workflow:
+
+1. **Run your container without limits first.** Don't set `resources` at all. Get it doing a typical workload — for mayara that means radar data flowing in, for questdb that means active inserts and queries from grafana, for grafana that means a panel actively rendering.
+
+2. **In another shell, watch live resource use:**
+
+   ```bash
+   podman stats sk-mayara-server
+   # or, for a continuously updating snapshot of all sk-* containers:
+   podman stats --no-reset $(podman ps --filter "name=sk-" --format "{{.Names}}")
+   ```
+
+   The output looks like:
+
+   ```
+   ID          NAME              CPU %    MEM USAGE / LIMIT   MEM %    NET IO            BLOCK IO    PIDS
+   abc123…     sk-mayara-server  87.42%   312.5MB / 7.7GB     3.96%    142kB / 2.1MB    0B / 0B     12
+   ```
+
+   Watch for ~5–10 minutes covering peaks (e.g. radar range changes, panel reloads, query bursts). Note **peak CPU %** and **peak MEM USAGE**.
+
+3. **Convert to limits:**
+   - `cpus`: divide peak CPU% by 100, then add headroom. Mayara peaking at 95% = needs about 1 core; set `cpus: 1.25` to give 25% headroom.
+   - `memory`: round peak MEM up to a clean unit, add headroom. Peaks at 312 MB → set `memory: "384m"` (≈25% headroom).
+   - `memorySwap`: set equal to `memory` to disable swap. On a Pi this is almost always what you want — swap is slow and unpredictable, and a clean OOM kill is more recoverable than a thrashing system.
+   - `pidsLimit`: get the running thread count from `ps -T -p $(pidof mayara-server) | wc -l` (or `--format "{{.PIDs}}"` from `podman stats`), double it, round up. Most containers stay under 50.
+
+4. **Apply the limits and re-test.** Watch `podman stats` again under load. If the container is hitting 100% CPU% with a `cpus` cap set, or `MEM USAGE` is bumping against `LIMIT`, your defaults are too low. Bump and repeat. You're aiming for the container to comfortably fit inside its limits at peak load.
+
+5. **Document what your defaults assume.** In your plugin's README or in a code comment next to the `ensureRunning` call, say "tested on Pi 5 with 8GB" or "assumes 1080p Grafana panels at 1Hz refresh". Users running on weaker hardware or different workloads may need to override.
+
+### Verifying limits are applied
+
+After your plugin starts the container, confirm the limits actually took effect:
+
+```bash
+podman inspect sk-mayara-server --format '
+  cpus={{.HostConfig.NanoCpus}}
+  memory={{.HostConfig.Memory}}
+  pids={{.HostConfig.PidsLimit}}
+'
+```
+
+`NanoCpus` is in nanoseconds-per-second of CPU quota; `1500000000` = 1.5 cores. `Memory` and `PidsLimit` are in bytes and absolute count. Zero means "no limit". Compare against what you passed in `resources` — they should match the **merged** values (your defaults ⊕ user overrides), which you can also see via:
+
+```bash
+curl http://localhost:3000/plugins/signalk-container/api/containers/mayara-server/resources
+# {"name":"mayara-server","effective":{"cpus":1.5,"memory":"512m"},"override":null}
+```
+
+If they don't match, the most likely culprit is that the user has an override in signalk-container's config that's superseding your default. Check the `override` field in the API response.
+
+### Troubleshooting
+
+| Symptom                                             | Likely cause                                        | Fix                                                                       |
+| --------------------------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------- |
+| Container restarts repeatedly with exit code 137    | OOM killed — `memory` cap too low                   | Raise `memory` and `memorySwap`, or measure peak first                    |
+| Container slow but never killed; `MEM %` near 100%  | Hitting `memory` cap, kernel reclaiming hard        | Same — raise the limits                                                   |
+| `CPU %` pinned at the cap, host responsive          | Working as designed; limits are protecting Signal K | Probably fine. If functionality suffers, raise `cpus`                     |
+| `updateResources()` returns `method: "recreated"`   | Limits include `cpusetCpus` or `oomScoreAdj`        | Expected — those can't be live-updated. Container had ~5s downtime        |
+| `getResources()` returns `{}` for a known container | Plugin hasn't called `ensureRunning` yet            | Wait for plugin startup; check `getRuntime()` first                       |
+| Override in signalk-container config has no effect  | Container was already running before override saved | Restart the consumer plugin, or call `updateResources()` from your plugin |
+| Live update silently skipped (no `--cpus` flag)     | All limits are `null` or empty after merge          | Check `getResources()` to see what merged effective is                    |
+
 ### User overrides via signalk-container config
 
 The user can override your defaults in signalk-container's plugin config UI under "Per-container resource overrides". The override is keyed by container name (without `sk-` prefix) and field-level merged on top of your default.
@@ -689,16 +755,20 @@ See the README's "Running Signal K in a Container" section for full details on s
 
 ## Common Mistakes Summary
 
-| Mistake                                    | Symptom                                      | Fix                                            |
-| ------------------------------------------ | -------------------------------------------- | ---------------------------------------------- |
-| `async start()` without catch              | Silent failure, no status                    | Sync `start()` + `asyncStart().catch()`        |
-| `app.setPluginStatus(id, msg)`             | Status shows plugin id as message            | `app.setPluginStatus(msg)` (one arg)           |
-| Setting property on `app`                  | Other plugins can't see it                   | Use `globalThis.__signalk_xxx`                 |
-| Not waiting for runtime detection          | `getRuntime()` returns null                  | Poll until `getRuntime()` is non-null          |
-| Short Docker image names with Podman       | Pull fails with "short-name did not resolve" | signalk-container handles this automatically   |
-| `DEDUP ENABLED UPSERT KEYS` in QuestDB DDL | Table creation fails                         | `DEDUP UPSERT KEYS` (no ENABLED)               |
-| Committing webpack `public/` output        | CI fails with "untracked files"              | Add `public/*.js` to `.gitignore`              |
-| `engines.node` missing from package.json   | CI validation error                          | Add `"engines": { "node": ">=22" }`            |
-| Not stopping container in `stop()`         | Container runs after plugin disabled         | Call `containers.stop()` in plugin `stop()`    |
-| `savePluginOptions` doesn't restart        | Plugin stays stopped after config save       | Don't rely on it for restart; do work directly |
-| Config hash in QuestDB data volume         | Hash file lost (QuestDB owns the dir)        | Store hash file next to plugin JSON config     |
+| Mistake                                                         | Symptom                                        | Fix                                                                                            |
+| --------------------------------------------------------------- | ---------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `async start()` without catch                                   | Silent failure, no status                      | Sync `start()` + `asyncStart().catch()`                                                        |
+| `app.setPluginStatus(id, msg)`                                  | Status shows plugin id as message              | `app.setPluginStatus(msg)` (one arg)                                                           |
+| Setting property on `app`                                       | Other plugins can't see it                     | Use `globalThis.__signalk_xxx`                                                                 |
+| Not waiting for runtime detection                               | `getRuntime()` returns null                    | Poll until `getRuntime()` is non-null                                                          |
+| Short Docker image names with Podman                            | Pull fails with "short-name did not resolve"   | signalk-container handles this automatically                                                   |
+| `DEDUP ENABLED UPSERT KEYS` in QuestDB DDL                      | Table creation fails                           | `DEDUP UPSERT KEYS` (no ENABLED)                                                               |
+| Committing webpack `public/` output                             | CI fails with "untracked files"                | Add `public/*.js` to `.gitignore`                                                              |
+| `engines.node` missing from package.json                        | CI validation error                            | Add `"engines": { "node": ">=22" }`                                                            |
+| Not stopping container in `stop()`                              | Container runs after plugin disabled           | Call `containers.stop()` in plugin `stop()`                                                    |
+| `savePluginOptions` doesn't restart                             | Plugin stays stopped after config save         | Don't rely on it for restart; do work directly                                                 |
+| Config hash in QuestDB data volume                              | Hash file lost (QuestDB owns the dir)          | Store hash file next to plugin JSON config                                                     |
+| No `resources` set on `ensureRunning`                           | Container can saturate the host                | Always set sensible CPU/memory caps; measure with `podman stats` first                         |
+| Setting `cpus: 4` on a Pi 4 (4 cores)                           | One container can starve all others + Signal K | Leave at least 1 core's worth of headroom for the OS and Signal K                              |
+| `memory` set, `memorySwap` left default                         | Container thrashes swap before OOM             | Set `memorySwap` equal to `memory` to disable swap entirely                                    |
+| Override in signalk-container config has key `sk-mayara-server` | Override silently ignored                      | Use the unprefixed name (`mayara-server`) — signalk-container adds the `sk-` prefix internally |
