@@ -1020,15 +1020,38 @@ export default function PluginConfigurationPanel({ configuration, save }) {
         if (upRes.ok) {
           const upList = await upRes.json();
           if (Array.isArray(upList)) {
-            const updatesMap = {};
             const pluginIdMap = {};
+            const freshMap = {};
             for (const u of upList) {
               if (u && u.containerName) {
-                updatesMap[u.containerName] = u;
+                freshMap[u.containerName] = u;
                 if (u.pluginId) pluginIdMap[u.containerName] = u.pluginId;
               }
             }
-            setUpdateStates(updatesMap);
+            // Sticky merge: if the new result is `reason: "unknown"`
+            // (meaning the update service couldn't get authoritative
+            // data this tick, e.g. because the state gate briefly
+            // misfired due to rootless podman reporting transient
+            // stopped state), prefer the previously-cached real
+            // result so the badge doesn't flap. A genuine unknown
+            // state (no prior result) still shows through.
+            setUpdateStates((prev) => {
+              const next = { ...freshMap };
+              for (const name of Object.keys(freshMap)) {
+                const incoming = freshMap[name];
+                const previous = prev[name];
+                if (
+                  incoming.reason === "unknown" &&
+                  previous &&
+                  previous.reason &&
+                  previous.reason !== "unknown"
+                ) {
+                  // Keep the prior real result visible.
+                  next[name] = previous;
+                }
+              }
+              return next;
+            });
             setPluginIdByContainer(pluginIdMap);
           }
         }

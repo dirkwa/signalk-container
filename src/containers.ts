@@ -104,19 +104,42 @@ export async function pullImage(
 export async function getContainerState(
   runtime: ContainerRuntimeInfo,
   name: string,
+  exec: ExecFn = execRuntime,
 ): Promise<ContainerState> {
   const fullName = prefixedName(name);
-  const result = await execRuntime(runtime, [
+  // Query multiple state fields and treat the container as running if
+  // ANY of them indicate running. Rationale: rootless podman on some
+  // kernels briefly returns inconsistent `State.Status` values for a
+  // container that's actually running (observed during heavy concurrent
+  // inspect traffic from the config panel's 5-second poll). The
+  // `State.Pid` field is a more authoritative signal — if there's a
+  // live PID, the container process exists regardless of what Status
+  // momentarily claims. Same for `State.Running` which is a boolean
+  // that podman populates independently from Status.
+  //
+  // Order in the format string: Status | Running | Pid
+  const result = await exec(runtime, [
     "inspect",
     "--format",
-    "{{.State.Status}}",
+    "{{.State.Status}}|{{.State.Running}}|{{.State.Pid}}",
     fullName,
   ]);
 
   if (result.exitCode !== 0) return "missing";
 
-  const status = result.stdout.toLowerCase();
-  if (status === "running") return "running";
+  const [rawStatus, rawRunning, rawPid] = result.stdout.split("|");
+  const status = (rawStatus ?? "").toLowerCase().trim();
+  const runningFlag = (rawRunning ?? "").toLowerCase().trim() === "true";
+  const pid = Number((rawPid ?? "").trim());
+  const hasLivePid = Number.isFinite(pid) && pid > 0;
+
+  // Running if ANY source says so. This is the defensive OR — we'd
+  // rather report "running" when the container is actually stopped
+  // (worst case: ensureRunning's "already running" fast path skips
+  // a start call, which would then fail the subsequent health check
+  // and recover) than report "stopped" when it's running (worst
+  // case: update service skips legit checks, user sees flap).
+  if (status === "running" || runningFlag || hasLivePid) return "running";
   return "stopped";
 }
 
