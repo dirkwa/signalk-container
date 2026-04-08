@@ -423,12 +423,36 @@ module.exports = (app: App) => {
       const fullName = name.startsWith("sk-") ? name : `sk-${name}`;
       const warnings: string[] = [];
 
-      // Filter the requested limits against the runtime's actual
-      // cgroup capabilities. Dropping a field here is silent at the
+      // Bug Y: `limits` is the user's intent for fields they want to
+      // change, NOT an absolute target. Merge it on top of the consumer
+      // plugin's pristine default (stored in pluginDefaults by the
+      // api.ensureRunning wrapper) so the fields the user didn't
+      // touch stay at the plugin default. Without this merge, the user
+      // submitting just `{cpus: 2}` would cause the container to be
+      // recreated with ONLY cpus (memory/swap/pids wiped), because
+      // updateResources was treating the payload as absolute.
+      //
+      // This mirrors the semantics of the api.ensureRunning wrapper
+      // which already merges plugin default + user override before
+      // applying. Now both entry points behave consistently: the
+      // final state applied to the container is always
+      // `pluginDefault ⊕ userOverride`, where userOverride is the
+      // minimal set of fields the user explicitly changed.
+      //
+      // The ORIGINAL unmerged `limits` is still passed to
+      // recordOverride, which in turn passes it through minimizeOverride
+      // (same plugin-default-aware logic). So the stored override is
+      // still minimal — only fields that actually differ from the
+      // default.
+      const pluginDefault = pluginDefaults.get(name) ?? {};
+      const mergedTarget = mergeResourceLimits(pluginDefault, limits);
+
+      // Filter the MERGED target against the runtime's actual cgroup
+      // capabilities. Dropping a field here is silent at the
       // resources.ts layer; we surface it once via app.debug so the
       // user knows their override is being ignored. (Bug B fix.)
       const { accepted: filteredLimits, dropped } = filterUnsupportedLimits(
-        limits,
+        mergedTarget,
         runtimeInfo,
       );
       for (const d of dropped) {
