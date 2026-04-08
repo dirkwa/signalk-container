@@ -18,6 +18,7 @@ import {
   fieldsRequiringRecreateForUnset,
   filterUnsupportedLimits,
   mergeResourceLimits,
+  minimizeOverride,
   resourceLimitsEqual,
   tryLiveUpdate,
 } from "./resources";
@@ -151,22 +152,37 @@ module.exports = (app: App) => {
    * page reloads AND full Signal K restarts.
    *
    * Called from inside `updateResources` after a successful apply.
-   * Stores the ORIGINAL unfiltered `limits` (pre-cgroup-filter), so
-   * that if the host's cgroup controller set changes (e.g. user adds
-   * cpuset delegation later), the filter layer re-evaluates and
-   * restores the field. Storing the filtered form would permanently
-   * drop any field that was unavailable at the time of the original
-   * apply.
    *
-   * An empty object `{}` clears the override entirely — that's the
-   * "revert to plugin defaults" case.
+   * The input `limits` is a snapshot of the user's intent for the
+   * container (e.g. the form state from the resource editor, which
+   * seeds from the current effective state). We minimize it against
+   * `pluginDefaults.get(name)` so that only fields which genuinely
+   * differ from the consumer plugin's default get stored. This:
+   *   - Prevents the "Override active" badge from sticking when the
+   *     user submits a form that matches the plugin default.
+   *   - Lets future plugin-default bumps (e.g. mayara bumping memory
+   *     from "512m" to "1g") propagate to users who only explicitly
+   *     overrode a different field like cpus.
+   *
+   * If the minimized result is empty (every submitted field matches
+   * the plugin default), the override is deleted entirely.
+   *
+   * When no plugin default is known (pluginDefaults lacks an entry —
+   * only possible if the consumer plugin never called ensureRunning,
+   * which shouldn't happen in practice since updateResources requires
+   * a prior ensureRunning for its recreate fallback path), we fall
+   * back to storing the raw limits as before.
    */
   function recordOverride(name: string, limits: ContainerResourceLimits): void {
-    const keys = Object.keys(limits);
+    const pluginDefault = pluginDefaults.get(name);
+    const minimized = pluginDefault
+      ? minimizeOverride(limits, pluginDefault)
+      : { ...limits };
+    const keys = Object.keys(minimized);
     if (keys.length === 0) {
       delete currentOverrides[name];
     } else {
-      currentOverrides[name] = { ...limits };
+      currentOverrides[name] = minimized;
     }
     persistOverridesToDisk(`recordOverride(${name})`);
   }

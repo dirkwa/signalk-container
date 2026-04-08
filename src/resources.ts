@@ -69,6 +69,69 @@ function isSet(v: unknown): boolean {
 }
 
 /**
+ * Compute the minimal override: the subset of `limits` fields whose
+ * values actually differ from the consumer plugin's default.
+ *
+ * The config panel's resource editor seeds its form from the current
+ * effective state (plugin default + override applied), which means
+ * users who only want to change ONE field end up submitting a payload
+ * containing all visible fields. Without minimization, every such
+ * submission would store a full snapshot as the override, which:
+ *   1. Shows "Override active" even when the submission matches
+ *      the plugin default exactly
+ *   2. Pins the user to the old default values if the plugin author
+ *      bumps the default in a future version (e.g. if mayara bumps
+ *      memory from "512m" to "1g", a snapshot override from before
+ *      the bump would silently keep the user on "512m")
+ *
+ * This helper compares each field in `limits` against `pluginDefault`
+ * and returns only the fields that represent a real user intent
+ * different from the default. Rules:
+ *
+ *   - `limits[k] === undefined` → drop (field not in submission)
+ *   - `limits[k] === null`:
+ *       - `pluginDefault[k] === undefined` → drop (both unset, no diff)
+ *       - `pluginDefault[k]` is set → KEEP (user explicitly unsetting
+ *         a value the plugin set — real intent)
+ *   - `limits[k]` has a value:
+ *       - equal to `pluginDefault[k]` → drop (redundant)
+ *       - different → KEEP (real user override)
+ *
+ * An empty result `{}` means "no override" — caller should delete the
+ * container's entry from `currentOverrides` rather than store `{}`.
+ *
+ * Equality comparison is `===` for primitives. The only complex field
+ * is cpusetCpus (a string); `1.5 === 1.5` for cpus works correctly.
+ */
+export function minimizeOverride(
+  limits: ContainerResourceLimits,
+  pluginDefault: ContainerResourceLimits,
+): ContainerResourceLimits {
+  const result: ContainerResourceLimits = {};
+  for (const key of Object.keys(limits) as Array<
+    keyof ContainerResourceLimits
+  >) {
+    const value = limits[key];
+    const defaultValue = pluginDefault[key];
+
+    if (value === undefined) continue;
+    if (value === null) {
+      // Null = "explicitly unset this field". Only meaningful if the
+      // plugin actually had it set in the first place.
+      if (isSet(defaultValue)) {
+        (result as Record<string, unknown>)[key] = null;
+      }
+      continue;
+    }
+    // Set value — compare to plugin default.
+    if (value !== defaultValue) {
+      (result as Record<string, unknown>)[key] = value;
+    }
+  }
+  return result;
+}
+
+/**
  * Maps each ContainerResourceLimits field to the cgroup v2 controller
  * it requires. `null` means the field is not gated by a cgroup
  * controller (oom_score_adj is set in /proc/<pid>/oom_score_adj, not

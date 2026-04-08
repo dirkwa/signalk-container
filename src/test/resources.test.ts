@@ -4,6 +4,7 @@ import {
   fieldsRequiringRecreateForUnset,
   filterUnsupportedLimits,
   mergeResourceLimits,
+  minimizeOverride,
   resourceFlagsForRun,
   resourceFlagsForUpdate,
   resourceLimitsEqual,
@@ -651,5 +652,114 @@ describe("fieldsRequiringRecreateForUnset (Bug E)", () => {
     fieldsRequiringRecreateForUnset(current, target);
     assert.deepEqual(current, { memory: "512m", oomScoreAdj: 500 });
     assert.deepEqual(target, { cpus: 1.0 });
+  });
+});
+
+describe("minimizeOverride (Bug Z: snapshot-override noise)", () => {
+  // Mayara's actual plugin default from src/index.ts DEFAULT_RESOURCES.
+  const mayaraDefault = {
+    cpus: 1.5,
+    memory: "512m",
+    memorySwap: "512m",
+    pidsLimit: 200,
+  };
+
+  it("returns empty when limits exactly match plugin default", () => {
+    // This is the user's exact bug: form was seeded from effective
+    // state which equals the plugin default, they click Apply without
+    // actually changing anything. Should NOT store an override.
+    const result = minimizeOverride(mayaraDefault, mayaraDefault);
+    assert.deepEqual(result, {});
+  });
+
+  it("returns only the differing field when user changes one value", () => {
+    // User opens the editor, cpus field shows 1.5 (default), they
+    // change it to 3, click Apply. Payload contains all 4 fields
+    // (the other 3 unchanged because the form is seeded). Only cpus
+    // should be stored.
+    const result = minimizeOverride(
+      { cpus: 3, memory: "512m", memorySwap: "512m", pidsLimit: 200 },
+      mayaraDefault,
+    );
+    assert.deepEqual(result, { cpus: 3 });
+  });
+
+  it("keeps explicit null (unsetting a field the plugin set)", () => {
+    // User clicks × on cpus to remove the limit entirely. The other
+    // fields remain at plugin default. Should store {cpus: null}
+    // (real intent: override mayara's cpus limit to "none").
+    const result = minimizeOverride(
+      { cpus: null, memory: "512m", memorySwap: "512m", pidsLimit: 200 },
+      mayaraDefault,
+    );
+    assert.deepEqual(result, { cpus: null });
+  });
+
+  it("drops null for a field the plugin never set", () => {
+    // User clicks × on oomScoreAdj (mayara default doesn't have it).
+    // No-op — both are "unset", no override needed.
+    const result = minimizeOverride(
+      { oomScoreAdj: null },
+      mayaraDefault, // has no oomScoreAdj
+    );
+    assert.deepEqual(result, {});
+  });
+
+  it("drops undefined fields", () => {
+    const result = minimizeOverride(
+      { cpus: 3, memory: undefined as unknown as string },
+      mayaraDefault,
+    );
+    assert.deepEqual(result, { cpus: 3 });
+  });
+
+  it("keeps a value that differs from default even if other fields match", () => {
+    const result = minimizeOverride(
+      { cpus: 1.5, memory: "1g", memorySwap: "1g", pidsLimit: 200 },
+      mayaraDefault,
+    );
+    // cpus matches (drop), memory differs (keep), memorySwap differs (keep), pidsLimit matches (drop)
+    assert.deepEqual(result, { memory: "1g", memorySwap: "1g" });
+  });
+
+  it("handles empty plugin default (plugin sets no resources)", () => {
+    // If the consumer plugin passes resources: undefined or {} to
+    // ensureRunning, the plugin default map stores {}. Any user-set
+    // fields are then all overrides, any user-null fields are dropped
+    // (can't unset what was never set).
+    const result = minimizeOverride(
+      { cpus: 3, memory: null, memorySwap: null },
+      {},
+    );
+    assert.deepEqual(result, { cpus: 3 });
+  });
+
+  it("empty limits against any default returns empty", () => {
+    const result = minimizeOverride({}, mayaraDefault);
+    assert.deepEqual(result, {});
+  });
+
+  it("does not mutate inputs", () => {
+    const limits = { cpus: 3, memory: "512m" };
+    const defaults = { cpus: 1.5, memory: "512m" };
+    minimizeOverride(limits, defaults);
+    assert.deepEqual(limits, { cpus: 3, memory: "512m" });
+    assert.deepEqual(defaults, { cpus: 1.5, memory: "512m" });
+  });
+
+  it("cpuset string comparison is exact", () => {
+    // '0,1' and '0-1' describe the same set but are not string-equal.
+    // Minimize is conservative: different strings count as an override.
+    assert.deepEqual(
+      minimizeOverride({ cpusetCpus: "0-1" }, { cpusetCpus: "0,1" }),
+      {
+        cpusetCpus: "0-1",
+      },
+    );
+    // Identical strings are dropped.
+    assert.deepEqual(
+      minimizeOverride({ cpusetCpus: "0,1" }, { cpusetCpus: "0,1" }),
+      {},
+    );
   });
 });
