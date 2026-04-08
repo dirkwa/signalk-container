@@ -615,23 +615,25 @@ function ResourceLimitsEditor({
   containerName, // unprefixed
   effective, // ContainerResourceLimits (merged plugin default + override)
   initialOverride, // ContainerResourceLimits or undefined
-  onApply, // (formState) => Promise<{ method, warnings?, error? }>
-  onResetToDefault, // () => Promise<{ method, warnings?, error? }>
+  // onApply/onResetToDefault return the server's fresh post-action
+  // effective state in the `effective` field, so the editor can
+  // re-seed its form inputs to match. Without this the form would
+  // drift from server truth after Reset (see Bug W).
+  onApply, // (formState) => Promise<{ method, warnings?, error?, effective? }>
+  onResetToDefault, // () => Promise<{ method, warnings?, error?, effective? }>
   onClose,
 }) {
-  // Seed form state from the effective limits (what's actually applied)
-  // rather than just the user override. This gives the user a visible
-  // starting point they can edit, including whatever the plugin default
-  // set. They can unset fields individually via the × button.
-  const seed = () => {
+  // Seed form state from the given effective limits (what's actually
+  // applied to the container). Defaults to the `effective` prop at
+  // mount time; can be called with a fresh value returned from an
+  // apply/reset action to re-sync the form to server truth without
+  // waiting for React's prop update cycle.
+  const seedFrom = (eff) => {
+    const src = eff ?? effective;
     const s = {};
     for (const f of RESOURCE_FIELDS) {
-      if (
-        effective &&
-        effective[f.key] !== undefined &&
-        effective[f.key] !== null
-      ) {
-        s[f.key] = String(effective[f.key]);
+      if (src && src[f.key] !== undefined && src[f.key] !== null) {
+        s[f.key] = String(src[f.key]);
       } else {
         s[f.key] = "";
       }
@@ -639,7 +641,7 @@ function ResourceLimitsEditor({
     return s;
   };
 
-  const [formState, setFormState] = useState(seed);
+  const [formState, setFormState] = useState(() => seedFrom(effective));
   const [showAdvanced, setShowAdvanced] = useState(() => {
     // Open Advanced section by default if the override already uses
     // any of the non-primary fields — otherwise the user would be
@@ -667,7 +669,7 @@ function ResourceLimitsEditor({
   // "Revert" discards any unsaved form edits and re-seeds from the
   // current effective state. Does NOT touch the server.
   const doRevert = () => {
-    setFormState(seed());
+    setFormState(seedFrom(effective));
     setResult(null);
   };
 
@@ -678,10 +680,16 @@ function ResourceLimitsEditor({
       const payload = buildLimitsPayload(formState);
       const res = await onApply(payload);
       setResult(res);
-      // On success, re-seed the form from the new effective state
-      // via the parent (which will pass updated `effective` prop).
-      // We don't clear formState here — the user can see what they
-      // just applied.
+      // Re-seed the form from the server's fresh effective state
+      // (returned in the Apply response). In the happy case this
+      // equals what the user submitted, so the form is unchanged.
+      // In the unhappy case (e.g. minimize layer dropped a field,
+      // cgroup filter dropped a field, etc.) the form snaps to the
+      // actual applied state. This prevents the form from drifting
+      // away from server truth and matches the behavior after Reset.
+      if (res && res.effective) {
+        setFormState(seedFrom(res.effective));
+      }
     } catch (err) {
       setResult({ error: err.message || String(err) });
     }
@@ -707,6 +715,17 @@ function ResourceLimitsEditor({
     try {
       const res = await onResetToDefault();
       setResult(res);
+      // Re-seed the form from the server's post-Reset effective
+      // state. This is the Bug W fix: without it, the form would
+      // keep the user's pre-Reset values, so clicking Apply right
+      // after Reset would silently re-submit them and re-establish
+      // the override. Now the form reflects the plugin defaults
+      // that were just applied, and Apply-after-Reset becomes a
+      // no-op (submits the current plugin default, minimize layer
+      // drops to {}, no override stored).
+      if (res && res.effective) {
+        setFormState(seedFrom(res.effective));
+      }
     } catch (err) {
       setResult({ error: err.message || String(err) });
     }
@@ -1089,6 +1108,13 @@ export default function PluginConfigurationPanel({ configuration, save }) {
     return {
       method: data.method,
       warnings: data.warnings,
+      // Include the fresh effective state so the editor can re-seed
+      // its form inputs from server truth after Apply. Defensive: in
+      // the happy case Apply submits what's already in the form, so
+      // re-seeding is a no-op; but if the server dropped a field (via
+      // the cgroup filter) or rejected something, the form now
+      // reflects what actually got applied.
+      effective: data.effective,
     };
   };
 
@@ -1168,6 +1194,11 @@ export default function PluginConfigurationPanel({ configuration, save }) {
     return {
       method: data.method,
       warnings: data.warnings,
+      // Include the fresh effective state in the return so the editor
+      // can re-seed its form inputs from server truth after a Reset.
+      // Without this, the editor would keep the pre-Reset form values
+      // and a subsequent Apply would silently re-submit them (Bug W).
+      effective: data.effective,
     };
   };
 
