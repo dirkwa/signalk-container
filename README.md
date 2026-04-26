@@ -73,7 +73,7 @@ await containers.ensureRunning("my-service", {
   image: "myorg/myimage",
   tag: "latest",
   ports: { "8080/tcp": "127.0.0.1:8080" },
-  volumes: { "/data": app.getDataDirPath() },
+  signalkDataMount: "/data", // resolves to the SignalK data dir, regardless of deployment
   env: { MY_VAR: "value" },
   restart: "unless-stopped",
 });
@@ -92,31 +92,31 @@ See [doc/plugin-developer-guide.md](doc/plugin-developer-guide.md) for the full 
 
 ## API
 
-| Method                                  | Description                                                  |
-| --------------------------------------- | ------------------------------------------------------------ |
-| `getRuntime()`                          | Returns `{ runtime, version, isPodmanDockerShim }` or `null` |
-| `pullImage(image, onProgress?)`         | Pull a container image (auto-qualifies for Podman)           |
-| `imageExists(image)`                    | Check if image exists locally                                |
-| `getImageDigest(imageOrContainer)`      | Local image ID (sha256) for an image:tag or container        |
-| `ensureRunning(name, config, options?)` | Create and start container if not running                    |
-| `start(name)`                           | Start a stopped container                                    |
-| `stop(name)`                            | Stop a running container                                     |
-| `remove(name)`                          | Stop and remove a container                                  |
-| `getState(name)`                        | Returns `running`, `stopped`, `missing`, or `no-runtime`     |
-| `runJob(config)`                        | Execute a one-shot container job                             |
-| `prune()`                               | Remove dangling images                                       |
-| `listContainers()`                      | List all `sk-` prefixed containers                           |
-| `execInContainer(name, command)`        | Run a command inside a running container                     |
-| `ensureNetwork(name)`                   | Create a Podman/Docker network if it doesn't exist           |
-| `removeNetwork(name)`                   | Remove a network                                             |
-| `connectToNetwork(container, network)`  | Add a container to a network (bridge mode only)              |
-| `disconnectFromNetwork(container, net)` | Remove a container from a network                            |
-| `updates.register(reg)`                 | Register a container for update detection                    |
-| `updates.unregister(pluginId)`          | Stop tracking updates for a plugin                           |
-| `updates.checkOne(pluginId)`            | Force a fresh update check (or coalesce with in-flight)      |
-| `updates.getLastResult(pluginId)`       | Cached last result, no network                               |
-| `updateResources(name, limits)`         | Apply new resource limits live, fall back to recreate        |
-| `getResources(name)`                    | Currently effective limits (plugin defaults ⊕ user override) |
+| Method                                  | Description                                                                                                                                            |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `getRuntime()`                          | Returns `{ runtime, version, isPodmanDockerShim }` or `null`                                                                                           |
+| `pullImage(image, onProgress?)`         | Pull a container image (auto-qualifies for Podman)                                                                                                     |
+| `imageExists(image)`                    | Check if image exists locally                                                                                                                          |
+| `getImageDigest(imageOrContainer)`      | Local image ID (sha256) for an image:tag or container                                                                                                  |
+| `ensureRunning(name, config, options?)` | Create and start container if not running                                                                                                              |
+| `start(name)`                           | Start a stopped container                                                                                                                              |
+| `stop(name)`                            | Stop a running container                                                                                                                               |
+| `remove(name)`                          | Stop and remove a container                                                                                                                            |
+| `getState(name)`                        | Returns `running`, `stopped`, `missing`, or `no-runtime`                                                                                               |
+| `runJob(config)`                        | Execute a one-shot container job                                                                                                                       |
+| `prune()`                               | Remove dangling images                                                                                                                                 |
+| `listContainers()`                      | List all `sk-` prefixed containers                                                                                                                     |
+| `execInContainer(name, command)`        | Run a command inside a running container                                                                                                               |
+| `ensureNetwork(name)`                   | Create a Podman/Docker network if it doesn't exist                                                                                                     |
+| `removeNetwork(name)`                   | Remove a network                                                                                                                                       |
+| `connectToNetwork(container, network)`  | Add a container to a network (bridge mode only)                                                                                                        |
+| `disconnectFromNetwork(container, net)` | Remove a container from a network                                                                                                                      |
+| `updates.register(reg)`                 | Register a container for update detection                                                                                                              |
+| `updates.unregister(pluginId)`          | Stop tracking updates for a plugin                                                                                                                     |
+| `updates.checkOne(pluginId)`            | Force a fresh update check (or coalesce with in-flight)                                                                                                |
+| `updates.getLastResult(pluginId)`       | Cached last result, no network                                                                                                                         |
+| `updateResources(name, limits)`         | Apply new resource limits live, fall back to recreate                                                                                                  |
+| `getResources(name)`                    | Currently effective limits (plugin defaults ⊕ user override)                                                                                           |
 | `resolveSignalkDataMount()`             | Resolve the volume name or host path that backs `app.getDataDirPath()` in the current deployment; returns `null` if the runtime is not yet initialised |
 
 ## REST Endpoints
@@ -160,28 +160,28 @@ const SK_MOUNT = "/signalk-data";
 await containers.ensureRunning("my-worker", {
   image: "myorg/myworker",
   tag: "latest",
-  signalkDataMount: SK_MOUNT,   // ← mount the SignalK data dir here
-  command: [
-    "--output",
-    path.join(SK_MOUNT, "my-plugin/output/result.bin"),
-  ],
+  signalkDataMount: SK_MOUNT, // ← mount the SignalK data dir here
+  command: ["--output", path.join(SK_MOUNT, "my-plugin/output/result.bin")],
 });
 ```
 
 signalk-container resolves the correct source automatically:
 
-| Deployment | What gets mounted |
-| --- | --- |
-| Bare-metal Signal K | `app.getDataDirPath()` as a bind mount (already a host path) |
-| Docker, volume-backed data dir | the named volume (e.g. `mystack_signalk-data`) |
-| Docker, bind-backed data dir | the exact host path, even when a parent directory is bind-mounted |
-| Podman (rootless or root) | same logic; named volumes receive no `:Z` flag |
+| Deployment                     | What gets mounted                                                 |
+| ------------------------------ | ----------------------------------------------------------------- |
+| Bare-metal Signal K            | `app.getDataDirPath()` as a bind mount (already a host path)      |
+| Docker, volume-backed data dir | the named volume (e.g. `mystack_signalk-data`)                    |
+| Docker, bind-backed data dir   | the exact host path, even when a parent directory is bind-mounted |
+| Podman (rootless or root)      | same logic; named volumes receive no `:Z` flag                    |
 
 The content at `SK_MOUNT` inside the managed container always corresponds to the root of `app.getDataDirPath()`. Build paths using `path.join`:
 
 ```typescript
 // Path inside managed container that corresponds to an absolute SignalK path:
-const containerPath = path.join(SK_MOUNT, path.relative(app.getDataDirPath(), absSignalkPath));
+const containerPath = path.join(
+  SK_MOUNT,
+  path.relative(app.getDataDirPath(), absSignalkPath),
+);
 ```
 
 > [!note]

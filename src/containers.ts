@@ -302,7 +302,8 @@ function buildRunArgs(
       // is for SELinux relabelling of bind-mount host paths only.
       // Applying :Z to a named volume causes Podman to error with
       // "invalid option z for named volume".
-      const isNamedVolume = !hostPath.startsWith("/") && !hostPath.startsWith(".");
+      const isNamedVolume =
+        !hostPath.startsWith("/") && !hostPath.startsWith(".");
       const suffix = runtime.runtime === "podman" && !isNamedVolume ? ":Z" : "";
       args.push("-v", `${hostPath}:${containerPath}${suffix}`);
     }
@@ -587,6 +588,7 @@ export async function disconnectFromNetwork(
 export async function resolveSignalkDataSource(
   dataDir: string,
   runtime: ContainerRuntimeInfo,
+  debug: (msg: string) => void = () => {},
 ): Promise<string> {
   if (!isContainerized()) {
     // Running bare-metal: dataDir is already a host filesystem path.
@@ -596,7 +598,12 @@ export async function resolveSignalkDataSource(
   // Running inside a container. Docker/Podman set HOSTNAME to the
   // (short) container ID, which is enough for `inspect`.
   const selfId = process.env.HOSTNAME ?? "";
-  if (!selfId) return dataDir;
+  if (!selfId) {
+    debug(
+      `resolveSignalkDataSource: HOSTNAME unset, falling back to dataDir=${dataDir}`,
+    );
+    return dataDir;
+  }
 
   const result = await execRuntime(runtime, [
     "inspect",
@@ -604,7 +611,20 @@ export async function resolveSignalkDataSource(
     "{{range .Mounts}}{{.Type}}|{{.Name}}|{{.Source}}|{{.Destination}}\n{{end}}",
     selfId,
   ]);
-  if (result.exitCode !== 0) return dataDir;
+  if (result.exitCode !== 0) {
+    debug(
+      `resolveSignalkDataSource: inspect ${selfId} failed (exit=${result.exitCode}): ${result.stderr.trim()}; falling back to dataDir=${dataDir}`,
+    );
+    return dataDir;
+  }
+
+  const mounts = result.stdout
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => {
+      const [type, name, source, dest] = line.split("|");
+      return { type, name, source, dest };
+    });
 
   // Find the mount whose Destination is the longest prefix of dataDir
   // (handles both exact matches and parent-directory bind mounts).
@@ -614,17 +634,20 @@ export async function resolveSignalkDataSource(
     source: string;
     dest: string;
   } | null = null;
-
-  for (const line of result.stdout.split("\n").filter(Boolean)) {
-    const [type, name, source, dest] = line.split("|");
-    if (dataDir === dest || dataDir.startsWith(dest + "/")) {
-      if (!best || dest.length > best.dest.length) {
-        best = { type, name, source, dest };
+  for (const m of mounts) {
+    if (dataDir === m.dest || dataDir.startsWith(m.dest + "/")) {
+      if (!best || m.dest.length > best.dest.length) {
+        best = m;
       }
     }
   }
 
-  if (!best) return dataDir;
+  if (!best) {
+    debug(
+      `resolveSignalkDataSource: no mount covers dataDir=${dataDir}; mounts=${JSON.stringify(mounts)}; falling back to dataDir`,
+    );
+    return dataDir;
+  }
 
   if (best.type === "volume") {
     // Named volume. Docker doesn't support subpath mounts on volumes,
