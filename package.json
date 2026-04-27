@@ -7,7 +7,8 @@
     "signalk-plugin-configurator"
   ],
   "signalk": {
-    "displayName": "Container Manager"
+    "displayName": "Container Manager",
+    "appIcon": "./icon.svg"
   },
   "signalk-plugin-enabled-by-default": true,
   "main": "dist/index.js",

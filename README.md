@@ -385,3 +385,9 @@ ecosystem (signalk-questdb, signalk-grafana) are designed for this case.
 ## License
 
 MIT
+
+## Acknowledgements
+
+The plugin icon (`icon.svg`) is the **container** glyph from
+[Lucide Icons](https://lucide.dev), used under the ISC License. See
+[`NOTICE`](NOTICE) for the full attribution.
