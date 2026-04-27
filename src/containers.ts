@@ -5,7 +5,7 @@ import {
   ContainerState,
   HealthCheckOptions,
 } from "./types";
-import { execRuntime, execRuntimeLong } from "./runtime";
+import { execRuntime, execRuntimeLong, isContainerized } from "./runtime";
 import { resourceFlagsForRun } from "./resources";
 
 const CONTAINER_PREFIX = "sk-";
@@ -14,6 +14,31 @@ function prefixedName(name: string): string {
   return name.startsWith(CONTAINER_PREFIX)
     ? name
     : `${CONTAINER_PREFIX}${name}`;
+}
+
+/**
+ * Build the value for a `-v <source>:<dest>[:flags]` argument with the
+ * correct SELinux relabel suffix for the runtime.
+ *
+ * `:Z` is for SELinux relabelling of bind-mount host paths under Podman
+ * on Fedora/RHEL. Named volumes (no leading '/' or '.') reject `:Z` with
+ * "invalid option z for named volume", so we omit the flag for them.
+ *
+ * Used by both ContainerConfig.volumes (containers.ts) and JobConfig
+ * inputs/outputs (jobs.ts) so the named-volume guard stays in one place.
+ */
+export function volumeArg(
+  hostPath: string,
+  containerPath: string,
+  runtime: ContainerRuntimeInfo,
+  readOnly: boolean = false,
+): string {
+  const isNamedVolume = !hostPath.startsWith("/") && !hostPath.startsWith(".");
+  const flags: string[] = [];
+  if (readOnly) flags.push("ro");
+  if (runtime.runtime === "podman" && !isNamedVolume) flags.push("Z");
+  const suffix = flags.length > 0 ? `:${flags.join(",")}` : "";
+  return `${hostPath}:${containerPath}${suffix}`;
 }
 
 export function qualifyImage(
@@ -298,8 +323,7 @@ function buildRunArgs(
 
   if (config.volumes) {
     for (const [containerPath, hostPath] of Object.entries(config.volumes)) {
-      const suffix = runtime.runtime === "podman" ? ":Z" : "";
-      args.push("-v", `${hostPath}:${containerPath}${suffix}`);
+      args.push("-v", volumeArg(hostPath, containerPath, runtime));
     }
   }
 
@@ -561,6 +585,101 @@ export async function disconnectFromNetwork(
       `Failed to disconnect ${fullName} from ${networkName}: ${result.stderr}`,
     );
   }
+}
+
+/**
+ * Resolve what to mount in a managed container to give it access to
+ * the SignalK data directory, regardless of how SignalK itself is deployed.
+ *
+ * Returns the string to use as the LEFT side of a `-v <source>:<dest>` flag:
+ *   - Bare-metal SignalK: returns dataDir directly (it is already a host path).
+ *   - SignalK in Docker, volume-backed dataDir: returns the named volume.
+ *   - SignalK in Docker, bind-backed dataDir: returns the exact host path
+ *     (computing the subpath when a parent directory is bind-mounted).
+ *   - Fallback (mount not found): returns dataDir — the caller's `-v` will
+ *     fail gracefully at container-create time with a clear Docker error.
+ *
+ * The result can be used directly as `volumes: { [mountPoint]: source }` in
+ * a ContainerConfig.  The content visible at mountPoint inside the managed
+ * container will always correspond to the root of dataDir.
+ */
+export async function resolveSignalkDataSource(
+  dataDir: string,
+  runtime: ContainerRuntimeInfo,
+  debug: (msg: string) => void = () => {},
+): Promise<string> {
+  if (!isContainerized()) {
+    // Running bare-metal: dataDir is already a host filesystem path.
+    return dataDir;
+  }
+
+  // Running inside a container. Docker/Podman set HOSTNAME to the
+  // (short) container ID, which is enough for `inspect`.
+  const selfId = process.env.HOSTNAME ?? "";
+  if (!selfId) {
+    debug(
+      `resolveSignalkDataSource: HOSTNAME unset, falling back to dataDir=${dataDir}`,
+    );
+    return dataDir;
+  }
+
+  const result = await execRuntime(runtime, [
+    "inspect",
+    "--format",
+    "{{range .Mounts}}{{.Type}}|{{.Name}}|{{.Source}}|{{.Destination}}\n{{end}}",
+    selfId,
+  ]);
+  if (result.exitCode !== 0) {
+    debug(
+      `resolveSignalkDataSource: inspect ${selfId} failed (exit=${result.exitCode}): ${result.stderr.trim()}; falling back to dataDir=${dataDir}`,
+    );
+    return dataDir;
+  }
+
+  const mounts = result.stdout
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => {
+      const [type, name, source, dest] = line.split("|");
+      return { type, name, source, dest };
+    });
+
+  // Find the mount whose Destination is the longest prefix of dataDir
+  // (handles both exact matches and parent-directory bind mounts).
+  let best: {
+    type: string;
+    name: string;
+    source: string;
+    dest: string;
+  } | null = null;
+  for (const m of mounts) {
+    if (dataDir === m.dest || dataDir.startsWith(m.dest + "/")) {
+      if (!best || m.dest.length > best.dest.length) {
+        best = m;
+      }
+    }
+  }
+
+  if (!best) {
+    debug(
+      `resolveSignalkDataSource: no mount covers dataDir=${dataDir}; mounts=${JSON.stringify(mounts)}; falling back to dataDir`,
+    );
+    return dataDir;
+  }
+
+  if (best.type === "volume") {
+    // Named volume. Docker doesn't support subpath mounts on volumes,
+    // so we return the volume name as-is. The consumer's mount point
+    // will correspond to best.dest; if that equals dataDir (the common
+    // case) the consumer can use mountPoint directly. If best.dest is a
+    // parent of dataDir, the consumer must append the relative suffix —
+    // signalk-container surfaces this via ContainerManagerApi if needed.
+    return best.name;
+  }
+
+  // Bind mount. Compute the exact host path that corresponds to dataDir,
+  // even when the bind covers a parent directory.
+  return best.source + dataDir.slice(best.dest.length);
 }
 
 export async function waitForReady(

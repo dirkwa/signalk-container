@@ -39,6 +39,7 @@ import {
   qualifyImage as qualifyImageForRuntime,
   removeContainer,
   removeNetwork,
+  resolveSignalkDataSource,
   startContainer,
   stopContainer,
 } from "./containers";
@@ -87,6 +88,37 @@ module.exports = (app: App) => {
    */
   const lastConfigs = new Map<string, ContainerConfig>();
   let currentOverrides: Record<string, ContainerResourceLimits> = {};
+  // Cached result of resolveSignalkDataSource() — resolved once on first
+  // ensureRunning() call that uses signalkDataMount, then reused.
+  // `pendingDataSource` collapses concurrent resolutions onto one inspect.
+  let cachedDataSource: string | null = null;
+  let pendingDataSource: Promise<string> | null = null;
+  async function ensureCachedDataSource(): Promise<string> {
+    if (cachedDataSource) return cachedDataSource;
+    if (pendingDataSource) return pendingDataSource;
+    if (!runtimeInfo) throw new Error("No container runtime available");
+    if (!app.getDataDirPath) {
+      throw new Error(
+        "signalkDataMount requires app.getDataDirPath, which is unavailable",
+      );
+    }
+    const dataDir = app.getDataDirPath();
+    const inflight = resolveSignalkDataSource(dataDir, runtimeInfo, app.debug);
+    pendingDataSource = inflight;
+    try {
+      const resolved = await pendingDataSource;
+      // Only cache if the plugin wasn't stopped while we were awaiting:
+      // stop() sets pendingDataSource = null, so a different value here
+      // (or null) means another caller cleared it (or stop ran).
+      if (pendingDataSource === inflight) {
+        cachedDataSource = resolved;
+        app.debug(`signalkDataMount resolved: ${cachedDataSource}`);
+      }
+      return resolved;
+    } finally {
+      if (pendingDataSource === inflight) pendingDataSource = null;
+    }
+  }
   const effectiveResources = new Map<string, ContainerResourceLimits>();
   // Pristine plugin-default resource limits, captured at the top of the
   // `api.ensureRunning` wrapper BEFORE the override merge. Lets the
@@ -234,6 +266,27 @@ module.exports = (app: App) => {
     ) {
       if (!runtimeInfo) throw new Error("No container runtime available");
 
+      // Resolve signalkDataMount → inject into volumes before anything else.
+      // We strip the field from the config so containers.ts / buildRunArgs
+      // never sees it (it only knows about plain volumes).
+      if (config.signalkDataMount) {
+        const source = await ensureCachedDataSource();
+        const { signalkDataMount, ...rest } = config;
+        const existing = rest.volumes?.[signalkDataMount];
+        if (existing && existing !== source) {
+          app.debug(
+            `ensureRunning(${name}): signalkDataMount '${signalkDataMount}' overrides explicit volumes entry '${existing}' with resolved source '${source}'`,
+          );
+        }
+        config = {
+          ...rest,
+          volumes: {
+            ...rest.volumes,
+            [signalkDataMount]: source,
+          },
+        };
+      }
+
       // Capture the plugin's pristine default resource limits BEFORE
       // merging with the user override. This is the only place in the
       // system that sees the "default" as a separate input; lastConfigs
@@ -352,6 +405,16 @@ module.exports = (app: App) => {
         }, 60000);
         healthTimers.set(name, timer);
       }
+    },
+
+    async resolveSignalkDataMount(): Promise<string | null> {
+      // Honor the documented contract: return null when we cannot
+      // resolve, never throw. ensureCachedDataSource() throws when
+      // app.getDataDirPath is unavailable; that's appropriate for
+      // ensureRunning (the caller asked us to mount it) but not for
+      // this introspection method.
+      if (!runtimeInfo || !app.getDataDirPath) return null;
+      return ensureCachedDataSource();
     },
 
     async start(name: string) {
@@ -911,6 +974,8 @@ module.exports = (app: App) => {
       pluginDefaults.clear();
       currentOverrides = {};
       currentConfig = null;
+      cachedDataSource = null;
+      pendingDataSource = null;
       delete (globalThis as any).__signalk_containerManager;
     },
 

@@ -5,6 +5,7 @@ import {
   ContainerRuntimeInfo,
 } from "./types";
 import { execRuntime, execRuntimeLong } from "./runtime";
+import { volumeArg } from "./containers";
 
 export async function runJob(
   runtime: ContainerRuntimeInfo,
@@ -55,15 +56,13 @@ export async function runJob(
 
     if (config.inputs) {
       for (const [containerPath, hostPath] of Object.entries(config.inputs)) {
-        const suffix = runtime.runtime === "podman" ? ":ro,Z" : ":ro";
-        args.push("-v", `${hostPath}:${containerPath}${suffix}`);
+        args.push("-v", volumeArg(hostPath, containerPath, runtime, true));
       }
     }
 
     if (config.outputs) {
       for (const [containerPath, hostPath] of Object.entries(config.outputs)) {
-        const suffix = runtime.runtime === "podman" ? ":Z" : "";
-        args.push("-v", `${hostPath}:${containerPath}${suffix}`);
+        args.push("-v", volumeArg(hostPath, containerPath, runtime));
       }
     }
 

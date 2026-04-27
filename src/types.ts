@@ -25,7 +25,34 @@ export interface ContainerConfig {
   image: string;
   tag: string;
   ports?: Record<string, string>;
+  /**
+   * Explicit volume mounts. Keys are container paths, values are either:
+   *   - an absolute host path  (bind mount)
+   *   - a Docker/Podman named volume (no leading `/`)
+   * Example: `{ "/data": "/host/path" }` or `{ "/data": "my-volume" }`
+   */
   volumes?: Record<string, string>;
+  /**
+   * Mount the SignalK data directory at this container path, regardless
+   * of how SignalK itself is deployed (bare-metal, Docker with a named
+   * volume, Docker with a bind mount).
+   *
+   * signalk-container resolves the appropriate source automatically:
+   *   - bare-metal: binds `app.getDataDirPath()` directly
+   *   - in Docker:  inspects the current container to find the named
+   *     volume or host path backing `app.getDataDirPath()`, then
+   *     mounts that same source into the managed container
+   *
+   * The mounted path in the managed container will correspond to the
+   * root of `app.getDataDirPath()`.  Consumer plugins can compute paths
+   * inside the mount as:
+   *   `path.join(signalkDataMount, path.relative(app.getDataDirPath(), absPath))`
+   *
+   * Example:
+   *   `signalkDataMount: "/signalk-data"` → FFmpeg can write to
+   *   `/signalk-data/node_modules/my-plugin/public/out/stream.m3u8`
+   */
+  signalkDataMount?: string;
   env?: Record<string, string>;
   restart?: "no" | "unless-stopped" | "always";
   command?: string[];
@@ -157,6 +184,16 @@ export interface ContainerManagerApi {
     config: ContainerConfig,
     options?: HealthCheckOptions,
   ): Promise<void>;
+  /**
+   * Resolve the source (named volume or host path) that backs
+   * `app.getDataDirPath()` in the current deployment.  The return value
+   * is what signalk-container uses internally when a ContainerConfig
+   * carries `signalkDataMount`; expose it here so consumer plugins can
+   * log or inspect the resolved value if needed.
+   *
+   * Returns null if the runtime is not yet initialised.
+   */
+  resolveSignalkDataMount(): Promise<string | null>;
   start(name: string): Promise<void>;
   stop(name: string): Promise<void>;
   remove(name: string): Promise<void>;
