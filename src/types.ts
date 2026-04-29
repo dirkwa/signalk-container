@@ -53,6 +53,28 @@ export interface ContainerConfig {
    *   `/signalk-data/node_modules/my-plugin/public/out/stream.m3u8`
    */
   signalkDataMount?: string;
+  /**
+   * Container ports that the SignalK process needs to connect back to.
+   * signalk-container automatically configures networking and port
+   * allocation — no manual `ports` or `networkMode` needed.
+   *
+   * signalk-container resolves the appropriate strategy automatically:
+   *   - bare-metal / host-network SignalK: each port is bound to
+   *     127.0.0.1 on the host (first available port ≥ declared value).
+   *   - containerized SignalK with a user-defined network: the managed
+   *     container is attached to that same network — no host port is
+   *     exposed at all.
+   *   - containerized SignalK on the default bridge (no DNS): falls back
+   *     to sharing the SignalK container's network namespace.
+   *
+   * Use `resolveContainerAddress()` to get the actual host:port (or
+   * container-name:port) to connect to after `ensureRunning()`.
+   *
+   * Example:
+   *   `signalkAccessiblePorts: [8090]` → FFmpeg HTTP server on port 8090
+   *   is reachable at the address returned by `resolveContainerAddress()`.
+   */
+  signalkAccessiblePorts?: number[];
   env?: Record<string, string>;
   restart?: "no" | "unless-stopped" | "always";
   command?: string[];
@@ -194,6 +216,27 @@ export interface ContainerManagerApi {
    * Returns null if the runtime is not yet initialised.
    */
   resolveSignalkDataMount(): Promise<string | null>;
+  /**
+   * Returns the `host:port` string to reach `containerPort` on a managed
+   * container from the SignalK process. Call after `ensureRunning()` with
+   * `signalkAccessiblePorts` set.
+   *
+   * - bare-metal  → `'127.0.0.1:8091'`  (actual allocated host port)
+   * - containerized, user-defined network → `'sk-rtsp-to-fmp4:8090'`
+   * - containerized, default bridge fallback → `'127.0.0.1:8090'`
+   *
+   * Returns `null` if the runtime is not available or the port was never
+   * declared in `signalkAccessiblePorts`.
+   *
+   * @throws if the port was declared via `signalkAccessiblePorts` but
+   *   `ensureRunning()` has not yet been called — this indicates a plugin
+   *   author bug (calling `resolveContainerAddress` before the container
+   *   is started).
+   */
+  resolveContainerAddress(
+    containerName: string,
+    containerPort: number,
+  ): Promise<string | null>;
   start(name: string): Promise<void>;
   stop(name: string): Promise<void>;
   remove(name: string): Promise<void>;
