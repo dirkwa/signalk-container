@@ -1,3 +1,4 @@
+import * as net from "net";
 import {
   ContainerConfig,
   ContainerInfo,
@@ -680,6 +681,124 @@ export async function resolveSignalkDataSource(
   // Bind mount. Compute the exact host path that corresponds to dataDir,
   // even when the bind covers a parent directory.
   return best.source + dataDir.slice(best.dest.length);
+}
+
+/**
+ * Process-local set of ports that are currently reserved by an in-flight
+ * `findAvailablePort()` call.  Prevents two concurrent `ensureRunning()`
+ * calls from probing and claiming the same host port before either
+ * container has actually been created.
+ *
+ * Ports are added here just before `findAvailablePort()` resolves and
+ * removed via `releaseReservedPort()` once the container runtime holds the
+ * binding (successful create) or the attempt fails.
+ */
+const reservedPorts = new Set<number>();
+
+/**
+ * Release a port that was reserved by `findAvailablePort()`.
+ * Must be called after the container runtime has successfully bound the port
+ * (so the OS-level bind now prevents collisions), or when the container
+ * creation failed (so the next attempt can re-probe freely).
+ */
+export function releaseReservedPort(port: number): void {
+  reservedPorts.delete(port);
+}
+
+/**
+ * Test whether `port` is bindable on 127.0.0.1.
+ * Returns `true` if the socket can be opened and closed without error.
+ */
+function isPortAvailable(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    server.once("error", () => resolve(false));
+    server.once("listening", () => server.close(() => resolve(true)));
+    server.listen(port, "127.0.0.1");
+  });
+}
+
+/**
+ * Find the lowest available TCP port on 127.0.0.1 starting at `preferred`.
+ *
+ * Probes by briefly binding a server socket and also skips ports that are
+ * already reserved in-process by a concurrent `findAvailablePort()` call,
+ * eliminating the TOCTOU window between the probe and the container create.
+ *
+ * The chosen port is added to the process-local `reservedPorts` set before
+ * this function resolves.  The caller is responsible for releasing it via
+ * `releaseReservedPort()` once the runtime holds the binding or the attempt
+ * fails.
+ *
+ * Used by the `signalkAccessiblePorts` bare-metal path to prefer the
+ * declared port number while gracefully stepping over conflicts.
+ */
+export async function findAvailablePort(preferred: number): Promise<number> {
+  for (let port = preferred; port <= 65535; port++) {
+    if (reservedPorts.has(port)) continue;
+    if (await isPortAvailable(port)) {
+      reservedPorts.add(port);
+      return port;
+    }
+  }
+  throw new Error("No available port found in range 1024–65535");
+}
+
+/**
+ * Return the user-defined Docker/Podman networks that the current SignalK
+ * container is connected to (i.e. networks other than the default `bridge`,
+ * `host`, or `none`).
+ *
+ * Used by the `signalkAccessiblePorts` containerized path to attach a
+ * managed container to SignalK's own network so the two can communicate
+ * via DNS name without exposing any host port.
+ *
+ * Returns:
+ *   - `null`    when running bare-metal, HOSTNAME is unset, or `docker inspect`
+ *               fails (e.g. host-network mode where HOSTNAME is the machine
+ *               name, not a container ID).  Callers should treat this like
+ *               bare-metal and publish ports instead.
+ *   - `string[]` (possibly empty) when inspect succeeds.  An empty array means
+ *               SignalK is only on the default bridge — callers should fall
+ *               back to `networkMode: container:<HOSTNAME>`.  A non-empty
+ *               array contains the user-defined network names to attach to.
+ */
+export async function resolveSignalkNetworks(
+  runtime: ContainerRuntimeInfo,
+  debug: (msg: string) => void = () => {},
+): Promise<string[] | null> {
+  if (!isContainerized()) return null;
+
+  const selfId = process.env.HOSTNAME ?? "";
+  if (!selfId) {
+    debug("resolveSignalkNetworks: HOSTNAME unset, returning null");
+    return null;
+  }
+
+  const result = await execRuntime(runtime, [
+    "inspect",
+    "--format",
+    "{{range $k,$v := .NetworkSettings.Networks}}{{$k}}\n{{end}}",
+    selfId,
+  ]);
+
+  if (result.exitCode !== 0) {
+    debug(
+      `resolveSignalkNetworks: inspect ${selfId} failed (exit=${result.exitCode}): ${result.stderr.trim()} — treating as bare-metal`,
+    );
+    return null;
+  }
+
+  const all = result.stdout.split("\n").filter(Boolean);
+  // The default bridge network does not support container-name DNS
+  // resolution, so exclude it along with the virtual modes.
+  const userDefined = all.filter(
+    (n) => n !== "bridge" && n !== "host" && n !== "none",
+  );
+  debug(
+    `resolveSignalkNetworks: all=${all.join(",")} userDefined=${userDefined.join(",")}`,
+  );
+  return userDefined;
 }
 
 export async function waitForReady(
