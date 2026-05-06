@@ -303,6 +303,11 @@ const result = await containers.runJob({
   env: { FORMAT: "parquet" },
   timeout: 120, // seconds
   onProgress: (line) => console.log(line),
+  // Optional per-stream callbacks. Both fire alongside onProgress, so use
+  // them only when you need to distinguish stdout (e.g. structured progress
+  // markers) from stderr (e.g. tool diagnostics).
+  onStdoutLine: (line) => parseStructuredProgress(line),
+  onStderrLine: (line) => captureDiagnostic(line),
   label: "parquet-export",
 });
 
