@@ -153,16 +153,60 @@ export async function execRuntime(
   return exec(runtimeCmd(info), args, cleanEnv());
 }
 
+/**
+ * Buffered line splitter for stdout/stderr chunks.  Returns a function
+ * that takes raw chunk strings and emits complete lines, holding partial
+ * data across calls so a line split across two `data` events is not
+ * truncated.  Treats `\r\n`, bare `\n`, and bare `\r` as line terminators
+ * — tools like tippecanoe repaint a progress line in place using bare
+ * `\r`, and a naive `split("\n")` would silently swallow every update
+ * after the first.  Empty lines are dropped.  Call the returned `flush`
+ * helper after the stream ends to emit any trailing partial data.
+ */
+export function makeLineSplitter(emit: (line: string) => void): {
+  push: (chunk: string) => void;
+  flush: () => void;
+} {
+  let buffer = "";
+  return {
+    push(chunk: string) {
+      buffer += chunk;
+      const parts = buffer.split(/\r\n|\r|\n/);
+      buffer = parts.pop() ?? "";
+      for (const part of parts) {
+        if (part.length > 0) emit(part);
+      }
+    },
+    flush() {
+      if (buffer.length > 0) {
+        emit(buffer);
+        buffer = "";
+      }
+    },
+  };
+}
+
 export async function execRuntimeLong(
   info: ContainerRuntimeInfo,
   args: string[],
   onProgress?: (msg: string) => void,
   timeout?: number,
+  onStdoutLine?: (line: string) => void,
+  onStderrLine?: (line: string) => void,
 ): Promise<{ exitCode: number; log: string[] }> {
   const cmd = runtimeCmd(info);
   const env = cleanEnv();
   const log: string[] = [];
   const maxLogLines = 200;
+
+  const safeCall = (cb: ((line: string) => void) | undefined, line: string) => {
+    if (!cb) return;
+    try {
+      cb(line);
+    } catch {
+      /* plugin callback errors must not crash us */
+    }
+  };
 
   return new Promise((resolve, reject) => {
     const proc = execFile(cmd, args, {
@@ -171,33 +215,31 @@ export async function execRuntimeLong(
       maxBuffer: 10 * 1024 * 1024,
     });
 
+    const stdoutSplitter = makeLineSplitter((line) => {
+      if (log.length >= maxLogLines) log.shift();
+      log.push(line);
+      safeCall(onProgress, line);
+      safeCall(onStdoutLine, line);
+    });
+
+    const stderrSplitter = makeLineSplitter((line) => {
+      if (log.length >= maxLogLines) log.shift();
+      log.push(line);
+      safeCall(onProgress, line);
+      safeCall(onStderrLine, line);
+    });
+
     proc.stdout?.on("data", (data: Buffer | string) => {
-      const lines = data.toString().split("\n").filter(Boolean);
-      for (const line of lines) {
-        if (log.length >= maxLogLines) log.shift();
-        log.push(line);
-        try {
-          onProgress?.(line);
-        } catch {
-          /* plugin callback errors must not crash us */
-        }
-      }
+      stdoutSplitter.push(data.toString());
     });
 
     proc.stderr?.on("data", (data: Buffer | string) => {
-      const lines = data.toString().split("\n").filter(Boolean);
-      for (const line of lines) {
-        if (log.length >= maxLogLines) log.shift();
-        log.push(line);
-        try {
-          onProgress?.(line);
-        } catch {
-          /* plugin callback errors must not crash us */
-        }
-      }
+      stderrSplitter.push(data.toString());
     });
 
     proc.on("close", (code) => {
+      stdoutSplitter.flush();
+      stderrSplitter.flush();
       resolve({ exitCode: code ?? 1, log });
     });
 

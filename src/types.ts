@@ -137,7 +137,26 @@ export interface ContainerJobConfig {
   outputs?: Record<string, string>;
   env?: Record<string, string>;
   timeout?: number;
+  /**
+   * Called for every line on stdout *or* stderr — the historical single-stream
+   * progress callback.  Stays available for callers that don't care about
+   * which stream a line came from (image-pull progress, simple logging).
+   */
   onProgress?: (msg: string) => void;
+  /**
+   * Called for every line on the container's stdout.  Use this when stdout
+   * carries structured progress (e.g. tools that print `PROGRESS: ...` to
+   * stdout while writing diagnostics to stderr).  Fires alongside
+   * `onProgress` — both are invoked for the same line.
+   */
+  onStdoutLine?: (line: string) => void;
+  /**
+   * Called for every line on the container's stderr.  Use this to capture
+   * diagnostics (GDAL/ogr2ogr warnings, tool-internal errors) without
+   * mixing them into the stdout progress stream.  Fires alongside
+   * `onProgress` — both are invoked for the same line.
+   */
+  onStderrLine?: (line: string) => void;
   label?: string;
 }
 

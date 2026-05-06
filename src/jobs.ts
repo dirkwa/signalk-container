@@ -79,6 +79,8 @@ export async function runJob(
       args,
       config.onProgress,
       config.timeout ? config.timeout * 1000 : 600000,
+      config.onStdoutLine,
+      config.onStderrLine,
     );
 
     result.exitCode = runResult.exitCode;
