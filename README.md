@@ -14,6 +14,7 @@ Instead of each plugin implementing its own container orchestration, they delega
 - **Reset to plugin default** -- one-click restore of a container's original resource limits, clearing any user override.
 - **Image management** -- scheduled pruning of dangling images (weekly/monthly)
 - **Zero-config data dir sharing** -- `signalkDataMount` mounts the SignalK data directory into any managed container automatically, whether Signal K runs bare-metal, in Docker (named volume), or in Podman (named volume or bind mount). No host paths to configure.
+- **Zero-config container service connectivity** -- `signalkAccessiblePorts` lets the SignalK process connect back to a service running inside a managed container (e.g. an HTTP or TCP server). signalk-container picks the right networking strategy automatically — port binding on the host loopback for bare-metal deployments, or a shared Docker network with DNS for containerised ones. No host ports are exposed unnecessarily.
 - **SELinux support** -- `:Z` volume flags for Podman bind mounts on Fedora/RHEL; named volumes are handled correctly (`:Z` is not applied)
 - **Podman image qualification** -- automatically prefixes `docker.io/` for short image names
 - **Cross-plugin API** -- other plugins use `globalThis.__signalk_containerManager`
@@ -72,11 +73,18 @@ if (!containers) {
 await containers.ensureRunning("my-service", {
   image: "myorg/myimage",
   tag: "latest",
-  ports: { "8080/tcp": "127.0.0.1:8080" },
-  signalkDataMount: "/data", // resolves to the SignalK data dir, regardless of deployment
+  signalkDataMount: "/data",         // resolves to the SignalK data dir, regardless of deployment
+  signalkAccessiblePorts: [8080],    // port 8080 in the container must be reachable by SignalK
   env: { MY_VAR: "value" },
   restart: "unless-stopped",
 });
+
+// Get the actual address to connect to (resolved after ensureRunning)
+const addr = await containers.resolveContainerAddress("my-service", 8080);
+if (!addr) throw new Error("Container address not available");
+// bare-metal  → "127.0.0.1:8080"  (or "127.0.0.1:8081" if 8080 was taken)
+// containerised → "sk-my-service:8080"  (Docker DNS, no host port exposed)
+const response = await fetch(`http://${addr}/status`);
 
 // Run a one-shot job
 const result = await containers.runJob({
@@ -118,6 +126,7 @@ See [doc/plugin-developer-guide.md](doc/plugin-developer-guide.md) for the full 
 | `updateResources(name, limits)`         | Apply new resource limits live, fall back to recreate                                                                                                  |
 | `getResources(name)`                    | Currently effective limits (plugin defaults ⊕ user override)                                                                                           |
 | `resolveSignalkDataMount()`             | Resolve the volume name or host path that backs `app.getDataDirPath()` in the current deployment; returns `null` if the runtime is not yet initialised |
+| `resolveContainerAddress(name, port)`  | Return the `host:port` string to reach `port` on a managed container from the SignalK process; call after `ensureRunning()` with `signalkAccessiblePorts` set |
 
 ## REST Endpoints
 
@@ -192,6 +201,42 @@ const containerPath = path.join(
 > — those paths are not visible from inside the managed container.
 
 You can also call `containers.resolveSignalkDataMount()` if you need to inspect the resolved source at runtime (e.g. for logging).
+
+## Connecting back to a container service (`signalkAccessiblePorts`)
+
+When a managed container exposes an HTTP, TCP, or other service that the SignalK process itself needs to connect to (e.g. a video stream, a database, an inference engine), use `signalkAccessiblePorts` instead of hardcoding port bindings or writing deployment-detection logic in your plugin.
+
+```typescript
+const STREAM_PORT = 8090;
+
+await containers.ensureRunning("my-streamer", {
+  image: "myorg/streamer",
+  tag: "latest",
+  signalkAccessiblePorts: [STREAM_PORT],
+  restart: "unless-stopped",
+  command: ["--listen", String(STREAM_PORT)],
+});
+
+const addr = await containers.resolveContainerAddress("my-streamer", STREAM_PORT);
+if (!addr) throw new Error("Container address not available");
+// Connect from the SignalK process — addr is always the right host:port:
+http.get(`http://${addr}/stream`, handleResponse);
+```
+
+signalk-container resolves the correct networking strategy automatically:
+
+| Deployment | Strategy | Address returned |
+| --- | --- | --- |
+| Bare-metal Signal K | Port bound to `127.0.0.1` (first free port ≥ declared value) | `127.0.0.1:8090` (or `127.0.0.1:8091` if 8090 was taken) |
+| Containerised, user-defined network | Container attached to SignalK's own Docker/Podman network; no host port exposed | `sk-my-streamer:8090` (Docker DNS) |
+| Containerised, default bridge (no DNS) | Container shares SignalK's network namespace | `127.0.0.1:8090` |
+
+The allocated address is cached for the lifetime of the plugin session, so repeated `ensureRunning()` calls never trigger an unwanted container recreate due to a port number change.
+
+> [!note]
+> `signalkAccessiblePorts` sets up networking automatically. Do not combine it with
+> a manual `ports` or `networkMode` entry for the same container — the field takes
+> full ownership of those concerns.
 
 ## Setting Resource Limits
 

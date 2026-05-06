@@ -39,7 +39,10 @@ import {
   qualifyImage as qualifyImageForRuntime,
   removeContainer,
   removeNetwork,
+  findAvailablePort,
+  releaseReservedPort,
   resolveSignalkDataSource,
+  resolveSignalkNetworks,
   startContainer,
   stopContainer,
 } from "./containers";
@@ -93,6 +96,38 @@ module.exports = (app: App) => {
   // `pendingDataSource` collapses concurrent resolutions onto one inspect.
   let cachedDataSource: string | null = null;
   let pendingDataSource: Promise<string> | null = null;
+  // Cached SignalK user-defined networks (resolved once, cleared on stop).
+  // `pendingNetworks` collapses concurrent resolutions onto one inspect.
+  // `undefined` = not yet resolved; `null` = resolved but inspect failed
+  // (bare-metal or host-network); `string[]` = resolved successfully.
+  let cachedSignalkNetworks: string[] | null | undefined = undefined;
+  let pendingNetworks: Promise<string[] | null> | null = null;
+  async function ensureCachedSignalkNetworks(): Promise<string[] | null> {
+    if (cachedSignalkNetworks !== undefined) return cachedSignalkNetworks;
+    if (pendingNetworks) return pendingNetworks;
+    if (!runtimeInfo) return null;
+    const inflight = resolveSignalkNetworks(runtimeInfo, app.debug);
+    pendingNetworks = inflight;
+    try {
+      const resolved = await inflight;
+      if (pendingNetworks === inflight) {
+        cachedSignalkNetworks = resolved;
+      }
+      return resolved;
+    } finally {
+      if (pendingNetworks === inflight) pendingNetworks = null;
+    }
+  }
+  // Maps "containerName:containerPort" → "host:port" (or "ctrName:port").
+  // Populated by ensureRunning() when signalkAccessiblePorts is set.
+  // Cleared on stop()/remove() so ports are re-evaluated on the next start.
+  const portAddressMap = new Map<string, string>();
+
+  // Tracks every "containerName:containerPort" key that was ever registered
+  // via signalkAccessiblePorts.  Used by resolveContainerAddress() to
+  // distinguish "registered but ensureRunning() not called yet" (a plugin
+  // bug) from "port was never declared" (a legitimate null return).
+  const registeredPorts = new Set<string>();
   async function ensureCachedDataSource(): Promise<string> {
     if (cachedDataSource) return cachedDataSource;
     if (pendingDataSource) return pendingDataSource;
@@ -119,6 +154,31 @@ module.exports = (app: App) => {
       if (pendingDataSource === inflight) pendingDataSource = null;
     }
   }
+  /**
+   * Remove all portAddressMap and registeredPorts entries for `name`, and
+   * release any process-local port reservations that were backed by a
+   * loopback (`127.0.0.1:PORT`) address.
+   *
+   * Called by api.stop(), api.remove(), and plugin.stop() to ensure that
+   * resolveContainerAddress() never returns a stale endpoint after a
+   * container has been taken down, and that the next bare-metal
+   * ensureRunning() call re-probes for an available host port.
+   */
+  function evictContainerAddresses(name: string): void {
+    for (const key of portAddressMap.keys()) {
+      if (key.startsWith(`${name}:`)) {
+        const addr = portAddressMap.get(key)!;
+        if (addr.startsWith("127.0.0.1:")) {
+          releaseReservedPort(Number(addr.split(":")[1]));
+        }
+        portAddressMap.delete(key);
+      }
+    }
+    for (const key of registeredPorts) {
+      if (key.startsWith(`${name}:`)) registeredPorts.delete(key);
+    }
+  }
+
   const effectiveResources = new Map<string, ContainerResourceLimits>();
   // Pristine plugin-default resource limits, captured at the top of the
   // `api.ensureRunning` wrapper BEFORE the override merge. Lets the
@@ -287,6 +347,157 @@ module.exports = (app: App) => {
         };
       }
 
+      // Resolve signalkAccessiblePorts → configure networking so the
+      // SignalK process can connect back to services in the container.
+      // We strip the field from config so containers.ts never sees it.
+      //
+      // pendingPortMap collects the address entries that should be written
+      // to portAddressMap, but only AFTER ensureRunning() succeeds below.
+      // This prevents stale mappings from surviving a failed container create.
+      const pendingPortMap = new Map<string, string>();
+
+      if (config.signalkAccessiblePorts?.length) {
+        // Destructure to strip the three fields we take ownership of so they
+        // cannot accidentally leak into the wrong Docker config branch.
+        const {
+          signalkAccessiblePorts,
+          networkMode: _callerNetworkMode,
+          ports: _callerPorts,
+          ...cleanRest
+        } = config;
+
+        // Warn early if the caller is mixing signalkAccessiblePorts with
+        // fields that we will override.  Doing both is almost certainly a
+        // mistake and the result would otherwise be a silent surprise.
+        if (_callerNetworkMode) {
+          app.error(
+            `ensureRunning(${name}): signalkAccessiblePorts and networkMode are both set — ` +
+              `'${_callerNetworkMode}' will be discarded. ` +
+              `Do not combine signalkAccessiblePorts with explicit networkMode.`,
+          );
+        }
+        if (_callerPorts && Object.keys(_callerPorts).length > 0) {
+          app.error(
+            `ensureRunning(${name}): signalkAccessiblePorts and ports are both set — ` +
+              `manual port bindings are preserved but may be overwritten by signalkAccessiblePorts entries. ` +
+              `Do not combine signalkAccessiblePorts with explicit ports.`,
+          );
+        }
+
+        // Register every requested port so resolveContainerAddress() can
+        // distinguish "not yet available" from "never declared".
+        for (const containerPort of signalkAccessiblePorts) {
+          registeredPorts.add(`${name}:${containerPort}`);
+        }
+
+        // resolveSignalkNetworks returns null when running bare-metal OR when
+        // docker inspect fails (e.g. host-network mode where HOSTNAME is the
+        // machine name, not a container ID). In both cases we fall back to
+        // publishing ports on 127.0.0.1 — the SignalK process can reach them
+        // on the loopback whether it is bare-metal or on the host network.
+        const networks = isContainerized()
+          ? await ensureCachedSignalkNetworks()
+          : null;
+        const targetNetwork = networks?.[0] ?? null;
+
+        if (networks === null) {
+          // ── Bare-metal OR host-network container ──────────────────────
+          // Bind each port to 127.0.0.1. Prefer the declared port number;
+          // step over it if already in use.
+          const portMappings: Record<string, string> = {};
+          for (const containerPort of signalkAccessiblePorts) {
+            // Reuse a previously COMMITTED host port for this container+port
+            // so that idempotent ensureRunning() calls don't trigger a
+            // config change (and therefore an unwanted container recreate).
+            const cacheKey = `${name}:${containerPort}`;
+            let address = portAddressMap.get(cacheKey);
+            if (!address) {
+              const hostPort = await findAvailablePort(containerPort);
+              address = `127.0.0.1:${hostPort}`;
+              pendingPortMap.set(cacheKey, address);
+              if (hostPort !== containerPort) {
+                app.debug(
+                  `signalkAccessiblePorts(${name}): port ${containerPort} was taken, allocated ${hostPort}`,
+                );
+              }
+            }
+            const [, hostPort] = address.split(":");
+            portMappings[String(containerPort)] = `127.0.0.1:${hostPort}`;
+          }
+          // Preserve any explicitly configured ports and merge ours on top.
+          // networkMode is intentionally excluded — port bindings and
+          // networkMode are mutually exclusive in Docker/Podman.
+          config = {
+            ...cleanRest,
+            ports: { ..._callerPorts, ...portMappings },
+          } as ContainerConfig;
+        } else if (targetNetwork) {
+          // ── Containerized, user-defined network ───────────────────────
+          // Attach the managed container to SignalK's own user-defined
+          // network. Docker's embedded DNS resolves the container name,
+          // so no host port needs to be exposed.
+          if (_callerNetworkMode && _callerNetworkMode !== targetNetwork) {
+            app.debug(
+              `signalkAccessiblePorts(${name}): overriding explicit networkMode '${_callerNetworkMode}' with SignalK network '${targetNetwork}'`,
+            );
+          }
+          const prefixed = name.startsWith("sk-") ? name : `sk-${name}`;
+          for (const containerPort of signalkAccessiblePorts) {
+            pendingPortMap.set(
+              `${name}:${containerPort}`,
+              `${prefixed}:${containerPort}`,
+            );
+          }
+          // networkMode takes full ownership — no port bindings or leftover
+          // networkMode from the caller.
+          config = {
+            ...cleanRest,
+            networkMode: targetNetwork,
+          } as ContainerConfig;
+        } else {
+          // ── Containerized, default bridge only ────────────────────────
+          // No user-defined network: share SignalK's network namespace so
+          // the managed container's bound ports appear on SignalK's loopback.
+          //
+          // All containers using this strategy share the same network
+          // namespace, so containerPort is global — two containers listening
+          // on the same port would collide at the OS level inside the
+          // namespace.  We use findAvailablePort() as a collision probe: it
+          // both checks whether the port is free and reserves it in-process
+          // so concurrent ensureRunning() calls cannot race on the same port.
+          // If it probes and the first available port ≠ containerPort the
+          // port is already taken, and we cannot remap it (the container
+          // image listens on a fixed port), so we fail fast with a clear
+          // message instead of silently starting a container that cannot bind.
+          const selfId = process.env.HOSTNAME ?? "";
+          app.debug(
+            `signalkAccessiblePorts(${name}): only default bridge found, falling back to container:${selfId}`,
+          );
+          for (const containerPort of signalkAccessiblePorts) {
+            const cacheKey = `${name}:${containerPort}`;
+            if (!portAddressMap.has(cacheKey)) {
+              const probed = await findAvailablePort(containerPort);
+              if (probed !== containerPort) {
+                // Release the unintended reservation before throwing.
+                releaseReservedPort(probed);
+                throw new Error(
+                  `signalkAccessiblePorts(${name}): port ${containerPort} is already in use ` +
+                    `in the shared network namespace (container:${selfId}). ` +
+                    `Each container must use a unique port.`,
+                );
+              }
+              pendingPortMap.set(cacheKey, `127.0.0.1:${containerPort}`);
+            }
+          }
+          // container:HOSTNAME shares the network namespace — port bindings
+          // are meaningless and must not be carried over.
+          config = {
+            ...cleanRest,
+            networkMode: `container:${selfId}`,
+          } as ContainerConfig;
+        }
+      }
+
       // Capture the plugin's pristine default resource limits BEFORE
       // merging with the user override. This is the only place in the
       // system that sees the "default" as a separate input; lastConfigs
@@ -332,13 +543,36 @@ module.exports = (app: App) => {
       // getLiveResources returns {} and the diff won't trigger.
       const preLimits = await getLiveResources(runtimeInfo, name);
 
-      await ensureRunning(
-        runtimeInfo,
-        name,
-        effectiveConfig,
-        (msg) => app.debug(msg),
-        options,
-      );
+      try {
+        await ensureRunning(
+          runtimeInfo,
+          name,
+          effectiveConfig,
+          (msg) => app.debug(msg),
+          options,
+        );
+      } catch (err) {
+        // Release any process-local port reservations so the next attempt
+        // can re-probe freely instead of skipping ports we failed to claim.
+        for (const addr of pendingPortMap.values()) {
+          if (addr.startsWith("127.0.0.1:")) {
+            releaseReservedPort(Number(addr.split(":")[1]));
+          }
+        }
+        throw err;
+      }
+
+      // Commit port-address mappings only after the container has been
+      // successfully started.  Populating portAddressMap before this
+      // point would leave stale entries if ensureRunning() throws.
+      // Release the process-local reservations: Docker now holds the actual
+      // OS-level binding, making the in-flight reservation redundant.
+      for (const [key, addr] of pendingPortMap) {
+        portAddressMap.set(key, addr);
+        if (addr.startsWith("127.0.0.1:")) {
+          releaseReservedPort(Number(addr.split(":")[1]));
+        }
+      }
 
       // Bug D: if ensureRunning was a no-op (container was already
       // running) AND the requested limits differ from the live state,
@@ -407,6 +641,24 @@ module.exports = (app: App) => {
       }
     },
 
+    async resolveContainerAddress(
+      containerName: string,
+      containerPort: number,
+    ): Promise<string | null> {
+      if (!runtimeInfo) return null;
+      const key = `${containerName}:${containerPort}`;
+      const addr = portAddressMap.get(key);
+      if (addr !== undefined) return addr;
+      if (registeredPorts.has(key)) {
+        throw new Error(
+          `resolveContainerAddress(${containerName}, ${containerPort}): ` +
+            `port was declared in signalkAccessiblePorts but the address is not yet available — ` +
+            `call ensureRunning() before resolveContainerAddress().`,
+        );
+      }
+      return null;
+    },
+
     async resolveSignalkDataMount(): Promise<string | null> {
       // Honor the documented contract: return null when we cannot
       // resolve, never throw. ensureCachedDataSource() throws when
@@ -425,11 +677,13 @@ module.exports = (app: App) => {
     async stop(name: string) {
       if (!runtimeInfo) throw new Error("No container runtime available");
       await stopContainer(runtimeInfo, name);
+      evictContainerAddresses(name);
     },
 
     async remove(name: string) {
       if (!runtimeInfo) throw new Error("No container runtime available");
       await removeContainer(runtimeInfo, name);
+      evictContainerAddresses(name);
     },
 
     async getState(name: string): Promise<ContainerState> {
@@ -976,6 +1230,10 @@ module.exports = (app: App) => {
       currentConfig = null;
       cachedDataSource = null;
       pendingDataSource = null;
+      cachedSignalkNetworks = undefined;
+      pendingNetworks = null;
+      portAddressMap.clear();
+      registeredPorts.clear();
       delete (globalThis as any).__signalk_containerManager;
     },
 
