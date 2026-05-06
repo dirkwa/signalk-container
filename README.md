@@ -73,8 +73,8 @@ if (!containers) {
 await containers.ensureRunning("my-service", {
   image: "myorg/myimage",
   tag: "latest",
-  signalkDataMount: "/data",         // resolves to the SignalK data dir, regardless of deployment
-  signalkAccessiblePorts: [8080],    // port 8080 in the container must be reachable by SignalK
+  signalkDataMount: "/data", // resolves to the SignalK data dir, regardless of deployment
+  signalkAccessiblePorts: [8080], // port 8080 in the container must be reachable by SignalK
   env: { MY_VAR: "value" },
   restart: "unless-stopped",
 });
@@ -100,33 +100,33 @@ See [doc/plugin-developer-guide.md](doc/plugin-developer-guide.md) for the full 
 
 ## API
 
-| Method                                  | Description                                                                                                                                            |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `getRuntime()`                          | Returns `{ runtime, version, isPodmanDockerShim }` or `null`                                                                                           |
-| `pullImage(image, onProgress?)`         | Pull a container image (auto-qualifies for Podman)                                                                                                     |
-| `imageExists(image)`                    | Check if image exists locally                                                                                                                          |
-| `getImageDigest(imageOrContainer)`      | Local image ID (sha256) for an image:tag or container                                                                                                  |
-| `ensureRunning(name, config, options?)` | Create and start container if not running                                                                                                              |
-| `start(name)`                           | Start a stopped container                                                                                                                              |
-| `stop(name)`                            | Stop a running container                                                                                                                               |
-| `remove(name)`                          | Stop and remove a container                                                                                                                            |
-| `getState(name)`                        | Returns `running`, `stopped`, `missing`, or `no-runtime`                                                                                               |
-| `runJob(config)`                        | Execute a one-shot container job                                                                                                                       |
-| `prune()`                               | Remove dangling images                                                                                                                                 |
-| `listContainers()`                      | List all `sk-` prefixed containers                                                                                                                     |
-| `execInContainer(name, command)`        | Run a command inside a running container                                                                                                               |
-| `ensureNetwork(name)`                   | Create a Podman/Docker network if it doesn't exist                                                                                                     |
-| `removeNetwork(name)`                   | Remove a network                                                                                                                                       |
-| `connectToNetwork(container, network)`  | Add a container to a network (bridge mode only)                                                                                                        |
-| `disconnectFromNetwork(container, net)` | Remove a container from a network                                                                                                                      |
-| `updates.register(reg)`                 | Register a container for update detection                                                                                                              |
-| `updates.unregister(pluginId)`          | Stop tracking updates for a plugin                                                                                                                     |
-| `updates.checkOne(pluginId)`            | Force a fresh update check (or coalesce with in-flight)                                                                                                |
-| `updates.getLastResult(pluginId)`       | Cached last result, no network                                                                                                                         |
-| `updateResources(name, limits)`         | Apply new resource limits live, fall back to recreate                                                                                                  |
-| `getResources(name)`                    | Currently effective limits (plugin defaults ⊕ user override)                                                                                           |
-| `resolveSignalkDataMount()`             | Resolve the volume name or host path that backs `app.getDataDirPath()` in the current deployment; returns `null` if the runtime is not yet initialised |
-| `resolveContainerAddress(name, port)`  | Return the `host:port` string to reach `port` on a managed container from the SignalK process; call after `ensureRunning()` with `signalkAccessiblePorts` set |
+| Method                                  | Description                                                                                                                                                   |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `getRuntime()`                          | Returns `{ runtime, version, isPodmanDockerShim }` or `null`                                                                                                  |
+| `pullImage(image, onProgress?)`         | Pull a container image (auto-qualifies for Podman)                                                                                                            |
+| `imageExists(image)`                    | Check if image exists locally                                                                                                                                 |
+| `getImageDigest(imageOrContainer)`      | Local image ID (sha256) for an image:tag or container                                                                                                         |
+| `ensureRunning(name, config, options?)` | Create and start container if not running                                                                                                                     |
+| `start(name)`                           | Start a stopped container                                                                                                                                     |
+| `stop(name)`                            | Stop a running container                                                                                                                                      |
+| `remove(name)`                          | Stop and remove a container                                                                                                                                   |
+| `getState(name)`                        | Returns `running`, `stopped`, `missing`, or `no-runtime`                                                                                                      |
+| `runJob(config)`                        | Execute a one-shot container job                                                                                                                              |
+| `prune()`                               | Remove dangling images                                                                                                                                        |
+| `listContainers()`                      | List all `sk-` prefixed containers                                                                                                                            |
+| `execInContainer(name, command)`        | Run a command inside a running container                                                                                                                      |
+| `ensureNetwork(name)`                   | Create a Podman/Docker network if it doesn't exist                                                                                                            |
+| `removeNetwork(name)`                   | Remove a network                                                                                                                                              |
+| `connectToNetwork(container, network)`  | Add a container to a network (bridge mode only)                                                                                                               |
+| `disconnectFromNetwork(container, net)` | Remove a container from a network                                                                                                                             |
+| `updates.register(reg)`                 | Register a container for update detection                                                                                                                     |
+| `updates.unregister(pluginId)`          | Stop tracking updates for a plugin                                                                                                                            |
+| `updates.checkOne(pluginId)`            | Force a fresh update check (or coalesce with in-flight)                                                                                                       |
+| `updates.getLastResult(pluginId)`       | Cached last result, no network                                                                                                                                |
+| `updateResources(name, limits)`         | Apply new resource limits live, fall back to recreate                                                                                                         |
+| `getResources(name)`                    | Currently effective limits (plugin defaults ⊕ user override)                                                                                                  |
+| `resolveSignalkDataMount()`             | Resolve the volume name or host path that backs `app.getDataDirPath()` in the current deployment; returns `null` if the runtime is not yet initialised        |
+| `resolveContainerAddress(name, port)`   | Return the `host:port` string to reach `port` on a managed container from the SignalK process; call after `ensureRunning()` with `signalkAccessiblePorts` set |
 
 ## REST Endpoints
 
@@ -217,7 +217,10 @@ await containers.ensureRunning("my-streamer", {
   command: ["--listen", String(STREAM_PORT)],
 });
 
-const addr = await containers.resolveContainerAddress("my-streamer", STREAM_PORT);
+const addr = await containers.resolveContainerAddress(
+  "my-streamer",
+  STREAM_PORT,
+);
 if (!addr) throw new Error("Container address not available");
 // Connect from the SignalK process — addr is always the right host:port:
 http.get(`http://${addr}/stream`, handleResponse);
@@ -225,11 +228,11 @@ http.get(`http://${addr}/stream`, handleResponse);
 
 signalk-container resolves the correct networking strategy automatically:
 
-| Deployment | Strategy | Address returned |
-| --- | --- | --- |
-| Bare-metal Signal K | Port bound to `127.0.0.1` (first free port ≥ declared value) | `127.0.0.1:8090` (or `127.0.0.1:8091` if 8090 was taken) |
-| Containerised, user-defined network | Container attached to SignalK's own Docker/Podman network; no host port exposed | `sk-my-streamer:8090` (Docker DNS) |
-| Containerised, default bridge (no DNS) | Container shares SignalK's network namespace | `127.0.0.1:8090` |
+| Deployment                             | Strategy                                                                        | Address returned                                         |
+| -------------------------------------- | ------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| Bare-metal Signal K                    | Port bound to `127.0.0.1` (first free port ≥ declared value)                    | `127.0.0.1:8090` (or `127.0.0.1:8091` if 8090 was taken) |
+| Containerised, user-defined network    | Container attached to SignalK's own Docker/Podman network; no host port exposed | `sk-my-streamer:8090` (Docker DNS)                       |
+| Containerised, default bridge (no DNS) | Container shares SignalK's network namespace                                    | `127.0.0.1:8090`                                         |
 
 The allocated address is cached for the lifetime of the plugin session, so repeated `ensureRunning()` calls never trigger an unwanted container recreate due to a port number change.
 
