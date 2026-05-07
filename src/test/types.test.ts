@@ -56,7 +56,9 @@ describe("type contracts", () => {
       "runJob",
       "prune",
       "listContainers",
+      "resolveSignalkDataMount",
+      "resolveHostPath",
     ];
-    assert.equal(methods.length, 10);
+    assert.equal(methods.length, 12);
   });
 });

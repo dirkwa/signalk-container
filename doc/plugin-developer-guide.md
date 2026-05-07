@@ -333,6 +333,41 @@ Lists all `sk-` prefixed containers.
 
 Returns the local image ID (sha256 digest) for an image reference or container name. Returns `null` if not present locally. Used internally by the update detection service for floating-tag drift checks, but exposed to plugins that want to do their own digest comparison.
 
+### `resolveHostPath(absPath): Promise<{ source, subPath } | null>`
+
+Translates an arbitrary absolute path into the `(source, subPath)` pair you need to mount it into a managed container, regardless of how Signal K itself is deployed.
+
+Use this when a plugin needs to mount a path that is NOT `app.getDataDirPath()` — for example a chart directory, a download cache, or any user-configured location. `resolveSignalkDataMount()` handles the data dir specifically; this is its general-purpose counterpart.
+
+```typescript
+const r = await containers.resolveHostPath("/opt/signalk/charts");
+if (!r) {
+  app.setPluginError(
+    "Chart directory is not reachable from the container runtime. " +
+      "Move it under app.getDataDirPath() or bind it into the Signal K container.",
+  );
+  return;
+}
+
+await containers.runJob({
+  image: "myorg/converter",
+  command: [
+    "convert",
+    `/in/${r.subPath}/foo.zip`,
+    `/out/${r.subPath}/foo.mbtiles`,
+  ],
+  inputs: { "/in": r.source },
+  outputs: { "/out": r.source },
+});
+```
+
+Resolution rules:
+
+- **Bare-metal Signal K**: `{ source: absPath, subPath: "" }` — the absolute path is its own host path.
+- **Signal K in a container with a bind mount covering `absPath`** (or any of its parents): `{ source: <resolved host path>, subPath: "" }`. The runtime can subpath-bind the host filesystem, so we narrow the source as much as possible.
+- **Signal K in a container with a named volume covering `absPath`**: `{ source: <volume name>, subPath: <path inside the volume> }`. Named volumes can't be subpath-mounted, so the consumer mounts the whole volume and navigates to `subPath` inside.
+- **No mount covers `absPath`**: returns `null`. Surface an actionable error instead of passing `null` through to `runJob`.
+
 ### `getResources(name): ContainerResourceLimits`
 
 Returns the currently effective (merged plugin default + user override) resource limits for a managed container. Empty object `{}` if the container isn't tracked or has no limits.
