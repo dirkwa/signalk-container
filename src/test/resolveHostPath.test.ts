@@ -20,16 +20,16 @@ const volume = (name: string, dest: string): InspectedMount => ({
 describe("resolveHostPathFromMounts", () => {
   describe("bind mounts", () => {
     it("exact-match bind: host path = source, subPath = ''", () => {
-      const mounts = [bind("/opt/signalk", "/home/node/.signalk")];
-      const r = resolveHostPathFromMounts("/home/node/.signalk", mounts);
+      const mounts = [bind("/opt/signalk", "/example/data")];
+      const r = resolveHostPathFromMounts("/example/data", mounts);
       assert.deepEqual(r, { source: "/opt/signalk", subPath: "" });
     });
 
     it("parent-bind: host path = source + relative, subPath = ''", () => {
-      // Typical: -v /opt/signalk:/home/node/.signalk, asking for a child
-      const mounts = [bind("/opt/signalk", "/home/node/.signalk")];
+      // Typical: -v /opt/signalk:/example/data, asking for a child
+      const mounts = [bind("/opt/signalk", "/example/data")];
       const r = resolveHostPathFromMounts(
-        "/home/node/.signalk/charts/foo.zip",
+        "/example/data/charts/foo.zip",
         mounts,
       );
       assert.deepEqual(r, {
@@ -39,14 +39,14 @@ describe("resolveHostPathFromMounts", () => {
     });
 
     it("longest-prefix wins when nested binds overlap", () => {
-      // -v /opt/signalk:/home/node/.signalk
-      // -v /custom/charts:/home/node/.signalk/charts
+      // -v /opt/signalk:/example/data
+      // -v /custom/charts:/example/data/charts
       const mounts = [
-        bind("/opt/signalk", "/home/node/.signalk"),
-        bind("/custom/charts", "/home/node/.signalk/charts"),
+        bind("/opt/signalk", "/example/data"),
+        bind("/custom/charts", "/example/data/charts"),
       ];
       const r = resolveHostPathFromMounts(
-        "/home/node/.signalk/charts/foo.zip",
+        "/example/data/charts/foo.zip",
         mounts,
       );
       assert.deepEqual(r, { source: "/custom/charts/foo.zip", subPath: "" });
@@ -61,17 +61,17 @@ describe("resolveHostPathFromMounts", () => {
 
   describe("named volumes", () => {
     it("exact-match volume: source = volume name, subPath = ''", () => {
-      const mounts = [volume("signalk-data", "/home/node/.signalk")];
-      const r = resolveHostPathFromMounts("/home/node/.signalk", mounts);
+      const mounts = [volume("signalk-data", "/example/data")];
+      const r = resolveHostPathFromMounts("/example/data", mounts);
       assert.deepEqual(r, { source: "signalk-data", subPath: "" });
     });
 
     it("parent-volume: source = volume name, subPath = relative", () => {
       // Volumes can't be subpath-bound, so consumer mounts the whole
       // volume and navigates to subPath inside it.
-      const mounts = [volume("signalk-data", "/home/node/.signalk")];
+      const mounts = [volume("signalk-data", "/example/data")];
       const r = resolveHostPathFromMounts(
-        "/home/node/.signalk/charts/foo.zip",
+        "/example/data/charts/foo.zip",
         mounts,
       );
       assert.deepEqual(r, {
@@ -83,7 +83,7 @@ describe("resolveHostPathFromMounts", () => {
 
   describe("no coverage", () => {
     it("returns null when no mount covers the path", () => {
-      const mounts = [bind("/opt/signalk", "/home/node/.signalk")];
+      const mounts = [bind("/opt/signalk", "/example/data")];
       const r = resolveHostPathFromMounts("/tmp/somewhere-else", mounts);
       assert.equal(r, null);
     });
@@ -99,11 +99,11 @@ describe("resolveHostPathFromMounts", () => {
       // Bind covers a parent, volume covers the exact child.
       // Longest-prefix should pick the volume.
       const mounts = [
-        bind("/opt/signalk", "/home/node/.signalk"),
-        volume("charts-vol", "/home/node/.signalk/charts"),
+        bind("/opt/signalk", "/example/data"),
+        volume("charts-vol", "/example/data/charts"),
       ];
       const r = resolveHostPathFromMounts(
-        "/home/node/.signalk/charts/foo.zip",
+        "/example/data/charts/foo.zip",
         mounts,
       );
       assert.deepEqual(r, {
