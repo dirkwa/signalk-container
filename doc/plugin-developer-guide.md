@@ -313,6 +313,11 @@ const result = await containers.runJob({
   // any in-process thread cap the caller may have set via env.
   resources: { cpus: 2, memory: "1g" },
   label: "parquet-export",
+  // Strongly recommended for any long-running job. Tags the container
+  // with `sk-job-owner=<id>` so cleanupOrphanedJobs() can find and reap
+  // it after a Signal K crash. Use your plugin's `id` from package.json.
+  // Available in signalk-container >= 1.3.0.
+  ownerPluginId: "signalk-charts-provider-simple",
 });
 
 if (result.status === "completed") {
@@ -320,6 +325,44 @@ if (result.status === "completed") {
   console.log("Output:", result.log);
 }
 ```
+
+### `cleanupOrphanedJobs(filter): Promise<CleanupOrphansResult>`
+
+Reap `sk-job-*` containers leaked by a previous server lifecycle (Signal K crashed or restarted mid-job, the helper container kept running with no parent listener). Stops and removes each matching container with `--force` and returns a record of what was reaped, so the plugin can scrub any persistent state it had associated with those jobs (a "currently converting" flag, an install record that was written before the conversion ran, etc.).
+
+Filters by the `sk-job-owner` label written by `runJob` when the caller provided `ContainerJobConfig.ownerPluginId`. Plugins that omit `ownerPluginId` on their job configs cannot be reaped by this API — there is no safe way for one plugin to claim another's containers.
+
+Idempotent: if there are no orphans, returns `{ reaped: [] }`. Available in signalk-container >= 1.3.0.
+
+Typical wiring in the consumer plugin's `start()`, after the manager has been resolved via the polling pattern shown in the "Startup order" section above:
+
+```typescript
+const containers = (globalThis as any).__signalk_containerManager;
+if (!containers || !containers.getRuntime()) {
+  return; // signalk-container not available; normal degraded path
+}
+
+// Reap any helper containers leaked by a previous Signal K crash mid-job.
+// Each entry in `reaped` is one orphan we just stopped + removed.
+const cleanup = await containers.cleanupOrphanedJobs({
+  ownerPluginId: "signalk-charts-provider-simple",
+});
+for (const orphan of cleanup.reaped) {
+  app.debug(
+    `Reaped orphan job: ${orphan.name} (${orphan.label ?? "no label"})`,
+  );
+  // Plugin-specific rollback: clear the converting flag, drop the install
+  // record we wrote before the job ran, etc. The runtime layer can't know
+  // what semantic state your plugin attached to the job. Guard against
+  // an orphan that wasn't tagged with a label — without one there's
+  // nothing to identify which install record to roll back.
+  if (orphan.label) {
+    removeStaleInstallByJobLabel(orphan.label);
+  }
+}
+```
+
+The label that comes back on each `OrphanJobInfo.label` is whatever the caller passed in `runJob({ label: "..." })`. A common pattern is to encode the entity the job operated on (`label: \`tippecanoe-${chartNumber}\``) so the cleanup pass can identify which install record to roll back.
 
 ### `prune(): Promise<PruneResult>`
 
@@ -748,6 +791,14 @@ interface ContainerManagerApi {
   runJob: (
     config: unknown,
   ) => Promise<{ status: string; exitCode?: number; log: string[] }>;
+  cleanupOrphanedJobs: (filter: { ownerPluginId: string }) => Promise<{
+    reaped: Array<{
+      name: string;
+      image: string;
+      ownerPluginId: string;
+      label?: string;
+    }>;
+  }>;
   prune: () => Promise<{ imagesRemoved: number; spaceReclaimed: string }>;
   listContainers: () => Promise<unknown[]>;
   updates: {

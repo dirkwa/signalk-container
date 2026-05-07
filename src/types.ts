@@ -174,6 +174,23 @@ export interface ContainerJobConfig {
    */
   resources?: ContainerResourceLimits;
   label?: string;
+  /**
+   * Owning plugin's `id` from its package.json (e.g.
+   * `"signalk-charts-provider-simple"`).  When set, the job container
+   * carries an `sk-job-owner=<id>` label, which is what
+   * `cleanupOrphanedJobs({ ownerPluginId })` uses to find and reap
+   * containers leaked by a previous server lifecycle (Signal K
+   * crashed mid-job, the conversion container kept running, the
+   * plugin's listener was lost).
+   *
+   * Optional but strongly recommended for any long-running job —
+   * without it, leaked containers from a prior crash will keep
+   * running until the host reboots, and the plugin can't tell which
+   * orphans belong to it.
+   *
+   * Available in signalk-container >= 1.3.0.
+   */
+  ownerPluginId?: string;
 }
 
 export type ContainerJobStatus =
@@ -201,6 +218,28 @@ export interface ContainerJobResult {
 export interface PruneResult {
   imagesRemoved: number;
   spaceReclaimed: string;
+}
+
+/**
+ * Per-orphan record returned by `cleanupOrphanedJobs`.  One entry per
+ * stale `sk-job-*` container that was found running and has been
+ * stopped + removed.  The plugin uses this to roll back any
+ * persistent state it had associated with the job (e.g. a
+ * "currently converting" flag, an install record).
+ */
+export interface OrphanJobInfo {
+  /** Container name as the runtime saw it (e.g. `sk-job-7d4839a9`). */
+  name: string;
+  /** Image the container was running. */
+  image: string;
+  /** Owning plugin's id, copied from the `sk-job-owner` label. */
+  ownerPluginId: string;
+  /** Free-form label set on the original `runJob` config. */
+  label?: string;
+}
+
+export interface CleanupOrphansResult {
+  reaped: OrphanJobInfo[];
 }
 
 export interface HealthCheckOptions {
@@ -308,6 +347,28 @@ export interface ContainerManagerApi {
   remove(name: string): Promise<void>;
   getState(name: string): Promise<ContainerState>;
   runJob(config: ContainerJobConfig): Promise<ContainerJobResult>;
+  /**
+   * Reap `sk-job-*` containers leaked by a previous server lifecycle
+   * (Signal K crashed or restarted mid-job, the helper container kept
+   * running, the plugin's job listener was lost).  Stops and removes
+   * each matching container with `--force` and returns a record of
+   * what was reaped so the plugin can scrub any persistent state it
+   * had associated with those jobs (a "currently converting" flag,
+   * an install record that was written before the conversion ran,
+   * etc.).
+   *
+   * Filters by the `ownerPluginId` label written by `runJob` when
+   * the caller provided `ContainerJobConfig.ownerPluginId`.  Plugins
+   * that omit `ownerPluginId` on their job configs cannot be reaped
+   * by this API — there's no safe way for one plugin to claim
+   * another's containers.
+   *
+   * Idempotent: if there are no orphans, returns `{ reaped: [] }`.
+   * Available in signalk-container >= 1.3.0.
+   */
+  cleanupOrphanedJobs(filter: {
+    ownerPluginId: string;
+  }): Promise<CleanupOrphansResult>;
   prune(): Promise<PruneResult>;
   listContainers(): Promise<ContainerInfo[]>;
   ensureNetwork(name: string): Promise<void>;

@@ -1,6 +1,7 @@
 import { IRouter } from "express";
 import path from "path";
 import {
+  CleanupOrphansResult,
   ContainerConfig,
   ContainerInfo,
   ContainerJobConfig,
@@ -47,7 +48,7 @@ import {
   startContainer,
   stopContainer,
 } from "./containers";
-import { runJob } from "./jobs";
+import { runJob, cleanupOrphanedJobs } from "./jobs";
 import { UpdateService } from "./updates/service";
 import { FileUpdateCache } from "./updates/cache";
 import { registerUpdateRoutes } from "./updates/routes";
@@ -700,6 +701,15 @@ module.exports = (app: App) => {
     async runJob(config: ContainerJobConfig): Promise<ContainerJobResult> {
       if (!runtimeInfo) throw new Error("No container runtime available");
       return runJob(runtimeInfo, config);
+    },
+
+    async cleanupOrphanedJobs(filter: {
+      ownerPluginId: string;
+    }): Promise<CleanupOrphansResult> {
+      if (!runtimeInfo) {
+        return { reaped: [] };
+      }
+      return cleanupOrphanedJobs(runtimeInfo, filter.ownerPluginId);
     },
 
     async prune(): Promise<PruneResult> {
