@@ -236,6 +236,37 @@ export interface ContainerManagerApi {
    */
   resolveSignalkDataMount(): Promise<string | null>;
   /**
+   * Translate an arbitrary absolute path into the `(source, subPath)`
+   * pair that lets a managed container reach that path on the host,
+   * regardless of how SignalK itself is deployed (bare-metal, Docker
+   * with a bind, Docker with a named volume, parent-directory binds,
+   * etc.).
+   *
+   * Use this when a consumer plugin needs to mount a path that is NOT
+   * `app.getDataDirPath()` but still lives somewhere reachable from
+   * SignalK's host filesystem — for example a chart directory, a
+   * download cache, or any user-configured location.
+   *
+   *     const r = await containers.resolveHostPath("/opt/signalk/charts");
+   *     await containers.runJob({
+   *       inputs: { "/in": r.source },
+   *       command: ["tool", `/in/${r.subPath}/foo`],
+   *     });
+   *
+   * `source` plugs straight into ContainerJobConfig.inputs / outputs;
+   * `subPath` is the path INSIDE that mount where the requested abs
+   * path lives (empty string when the source already corresponds to
+   * absPath).
+   *
+   * Returns null when running inside a container and no mount covers
+   * absPath (i.e. the host runtime physically cannot see it) — the
+   * consumer should surface an actionable error rather than passing
+   * null through to `runJob`.  Bare-metal callers always get a result.
+   */
+  resolveHostPath(
+    absPath: string,
+  ): Promise<{ source: string; subPath: string } | null>;
+  /**
    * Returns the `host:port` string to reach `containerPort` on a managed
    * container from the SignalK process. Call after `ensureRunning()` with
    * `signalkAccessiblePorts` set.

@@ -126,6 +126,7 @@ See [doc/plugin-developer-guide.md](doc/plugin-developer-guide.md) for the full 
 | `updateResources(name, limits)`         | Apply new resource limits live, fall back to recreate                                                                                                         |
 | `getResources(name)`                    | Currently effective limits (plugin defaults ⊕ user override)                                                                                                  |
 | `resolveSignalkDataMount()`             | Resolve the volume name or host path that backs `app.getDataDirPath()` in the current deployment; returns `null` if the runtime is not yet initialised        |
+| `resolveHostPath(absPath)`              | Translate an arbitrary absolute path into the `{ source, subPath }` pair the runtime needs to mount it; handles bare-metal, bind, and named-volume topologies |
 | `resolveContainerAddress(name, port)`   | Return the `host:port` string to reach `port` on a managed container from the SignalK process; call after `ensureRunning()` with `signalkAccessiblePorts` set |
 
 ## REST Endpoints

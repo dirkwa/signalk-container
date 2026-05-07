@@ -684,6 +684,154 @@ export async function resolveSignalkDataSource(
 }
 
 /**
+ * Mount entry as parsed from `podman inspect --format '{{range .Mounts}}...'`.
+ * Exposed so tests can drive `resolveHostPathFromMounts` directly without
+ * touching a real runtime.
+ */
+export interface InspectedMount {
+  type: string;
+  name: string;
+  source: string;
+  dest: string;
+}
+
+/**
+ * Pure (source, subPath) resolution given a list of mounts and an
+ * absolute path.  Factored out of `resolveHostPath` so the matching
+ * logic can be unit-tested independently of the runtime.  Returns null
+ * when no mount covers `absPath`.
+ */
+export function resolveHostPathFromMounts(
+  absPath: string,
+  mounts: InspectedMount[],
+): ContainerMountResolution | null {
+  // Longest-prefix match.  Same logic as resolveSignalkDataSource — handles
+  // exact matches and parent-directory mounts uniformly.
+  let best: InspectedMount | null = null;
+  for (const m of mounts) {
+    if (absPath === m.dest || absPath.startsWith(m.dest + "/")) {
+      if (!best || m.dest.length > best.dest.length) {
+        best = m;
+      }
+    }
+  }
+  if (!best) return null;
+
+  // Subpath inside the mount (relative to its Destination).  Empty when
+  // the mount covers absPath exactly.
+  const subPath =
+    absPath === best.dest ? "" : absPath.slice(best.dest.length + 1);
+
+  if (best.type === "volume") {
+    // Named volume.  The runtime cannot subpath-mount volumes (Docker
+    // and Podman both reject `-v vol/sub:/dest`), so we return the
+    // volume name as the source and let the consumer navigate to
+    // subPath from inside the mounted volume root.
+    return { source: best.name, subPath };
+  }
+
+  // Bind mount.  We CAN subpath-bind the host filesystem — and doing so
+  // gives the helper container the narrowest possible view of the host.
+  // Return the exact host path corresponding to absPath as the source,
+  // with subPath empty (the consumer's mount destination IS the absPath).
+  const hostPath = subPath === "" ? best.source : `${best.source}/${subPath}`;
+  return { source: hostPath, subPath: "" };
+}
+
+/**
+ * Result shape for `resolveHostPath`.
+ *
+ * `source` is the LEFT side of a `-v <source>:<dest>` flag, suitable for
+ * dropping into ContainerJobConfig.inputs / outputs as the value:
+ *
+ *     runJob({ inputs: { "/in": resolution.source }, ... })
+ *
+ * `subPath` is the path INSIDE the mount where the original absolute
+ * path lives.  Empty string when the source already corresponds to
+ * the absolute path (no further indirection needed).  Otherwise the
+ * consumer must navigate to it from the mount root, e.g.:
+ *
+ *     command: ["gdal_translate", `/in/${resolution.subPath}/file.000`, ...]
+ *
+ * The slash-prefix discipline is the consumer's: `subPath` itself never
+ * has a leading slash.
+ */
+export interface ContainerMountResolution {
+  source: string;
+  subPath: string;
+}
+
+/**
+ * Translate an arbitrary absolute path into the `(source, subPath)` pair
+ * that lets a managed container reach that path on the host, regardless
+ * of how SignalK itself is deployed.  Generalises
+ * `resolveSignalkDataSource` to paths outside `app.getDataDirPath()`.
+ *
+ * Use cases:
+ *   - SignalK in a container with a bind mount that covers a *parent*
+ *     directory (typical: `-v /opt/signalk:/home/node/.signalk`).
+ *     Both the data dir and any sibling chart directory under `/opt/signalk`
+ *     are reachable through the same mount.
+ *   - SignalK in a container with a named volume that covers a parent
+ *     directory.  The same volume name is returned and the consumer
+ *     mounts it whole — the runtime cannot subpath-mount volumes.
+ *   - Bare-metal SignalK: any absolute path is its own host path.
+ *
+ * Returns `null` when:
+ *   - The runtime can't be inspected (we couldn't determine our own
+ *     mounts, e.g. HOSTNAME unset, inspect failed).
+ *   - We're inside a container but no mount covers `absPath` — meaning
+ *     the host runtime physically cannot see this path.  The consumer
+ *     should surface an actionable error (not silently fall through, as
+ *     `resolveSignalkDataSource` does for backwards-compat).
+ */
+export async function resolveHostPath(
+  absPath: string,
+  runtime: ContainerRuntimeInfo,
+  debug: (msg: string) => void = () => {},
+): Promise<ContainerMountResolution | null> {
+  if (!isContainerized()) {
+    // Bare-metal: the absolute path IS the host path.  No subpath needed.
+    return { source: absPath, subPath: "" };
+  }
+
+  const selfId = process.env.HOSTNAME ?? "";
+  if (!selfId) {
+    debug(`resolveHostPath: HOSTNAME unset, cannot resolve ${absPath}`);
+    return null;
+  }
+
+  const result = await execRuntime(runtime, [
+    "inspect",
+    "--format",
+    "{{range .Mounts}}{{.Type}}|{{.Name}}|{{.Source}}|{{.Destination}}\n{{end}}",
+    selfId,
+  ]);
+  if (result.exitCode !== 0) {
+    debug(
+      `resolveHostPath: inspect ${selfId} failed (exit=${result.exitCode}): ${result.stderr.trim()}`,
+    );
+    return null;
+  }
+
+  const mounts: InspectedMount[] = result.stdout
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => {
+      const [type, name, source, dest] = line.split("|");
+      return { type, name, source, dest };
+    });
+
+  const resolved = resolveHostPathFromMounts(absPath, mounts);
+  if (!resolved) {
+    debug(
+      `resolveHostPath: no mount covers ${absPath}; mounts=${JSON.stringify(mounts)}`,
+    );
+  }
+  return resolved;
+}
+
+/**
  * Process-local set of ports that are currently reserved by an in-flight
  * `findAvailablePort()` call.  Prevents two concurrent `ensureRunning()`
  * calls from probing and claiming the same host port before either

@@ -41,6 +41,7 @@ import {
   removeNetwork,
   findAvailablePort,
   releaseReservedPort,
+  resolveHostPath,
   resolveSignalkDataSource,
   resolveSignalkNetworks,
   startContainer,
@@ -667,6 +668,11 @@ module.exports = (app: App) => {
       // this introspection method.
       if (!runtimeInfo || !app.getDataDirPath) return null;
       return ensureCachedDataSource();
+    },
+
+    async resolveHostPath(absPath: string) {
+      if (!runtimeInfo) return null;
+      return resolveHostPath(absPath, runtimeInfo, app.debug);
     },
 
     async start(name: string) {
