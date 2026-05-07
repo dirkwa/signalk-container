@@ -209,10 +209,19 @@ export async function execRuntimeLong(
   };
 
   return new Promise((resolve, reject) => {
+    // No default timeout: long-running container jobs (chart conversions,
+    // big GDAL/tippecanoe runs) can legitimately take hours.  Imposing a
+    // surprise 10-minute default cap turned ENC bundles approaching 100%
+    // into "command exited 126 with empty log" failures.  Callers that
+    // actually want a wall-clock ceiling pass `timeout` explicitly (image
+    // pulls, lightweight probes); everyone else gets to run to completion.
+    //
+    // child_process treats timeout=0 as "no timeout", so we forward it
+    // when the caller didn't supply one.
     const proc = execFile(cmd, args, {
       env,
-      timeout: timeout ?? 600000,
       maxBuffer: 10 * 1024 * 1024,
+      timeout: timeout ?? 0,
     });
 
     const stdoutSplitter = makeLineSplitter((line) => {
