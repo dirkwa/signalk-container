@@ -157,6 +157,22 @@ export interface ContainerJobConfig {
    * `onProgress` — both are invoked for the same line.
    */
   onStderrLine?: (line: string) => void;
+  /**
+   * Optional cgroup resource limits applied to the helper container —
+   * `--cpus`, `--memory`, `--pids-limit`, etc.  Same shape as
+   * `ContainerConfig.resources`, same `resourceFlagsForRun` translator.
+   *
+   * Without this, runJob containers run with no kernel-enforced ceiling,
+   * which is fine for most one-shot helpers but lets CPU-bound workloads
+   * (tippecanoe, GDAL parallel exports) saturate every core regardless
+   * of any in-process thread limit the caller may have configured via
+   * env.  Set `cpus` here to keep the helper to a fraction of the host.
+   *
+   * Fields whose backing controller is not delegated to the runtime
+   * (typically `cpuset` on rootless podman) are silently dropped — same
+   * behaviour as `ensureRunning`.
+   */
+  resources?: ContainerResourceLimits;
   label?: string;
 }
 

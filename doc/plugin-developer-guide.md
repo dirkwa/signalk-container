@@ -308,6 +308,10 @@ const result = await containers.runJob({
   // markers) from stderr (e.g. tool diagnostics).
   onStdoutLine: (line) => parseStructuredProgress(line),
   onStderrLine: (line) => captureDiagnostic(line),
+  // Optional cgroup limits applied via --cpus / --memory / --pids-limit etc.
+  // Without this, a CPU-bound helper can saturate every core regardless of
+  // any in-process thread cap the caller may have set via env.
+  resources: { cpus: 2, memory: "1g" },
   label: "parquet-export",
 });
 
