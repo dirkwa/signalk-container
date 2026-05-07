@@ -6,6 +6,7 @@ import {
 } from "./types";
 import { execRuntime, execRuntimeLong } from "./runtime";
 import { volumeArg } from "./containers";
+import { resourceFlagsForRun } from "./resources";
 
 export async function runJob(
   runtime: ContainerRuntimeInfo,
@@ -70,6 +71,13 @@ export async function runJob(
       for (const [key, value] of Object.entries(config.env)) {
         args.push("-e", `${key}=${value}`);
       }
+    }
+
+    // Cgroup resource limits (--cpus, --memory, --pids-limit, etc.).
+    // Fields whose backing controller is unavailable on the runtime are
+    // silently dropped — same behaviour as ensureRunning.
+    if (config.resources) {
+      args.push(...resourceFlagsForRun(config.resources, runtime));
     }
 
     args.push(config.image, ...config.command);
