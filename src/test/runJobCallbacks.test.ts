@@ -170,3 +170,40 @@ describe("runJob resource limits", () => {
     assert.ok(lines.length > 0, `expected output but got nothing`);
   });
 });
+
+describe("runJob default timeout", () => {
+  it("does not impose a default timeout when caller omits one", async (t) => {
+    const runtime = await hasContainerRuntime();
+    if (!runtime) {
+      t.skip("no container runtime available");
+      return;
+    }
+    // Regression: runJob used to impose a 10-minute default cap, which
+    // silently killed long-running tippecanoe jobs at 97.9% ("exit 126,
+    // empty log").  Confirm a 5-second sleep completes cleanly without
+    // config.timeout set — that's the practical signal that no default
+    // timeout is being applied.
+    //
+    // Pre-warm the image so the wall-clock measurement isn't skewed by
+    // a first-run pull on CI.
+    const warmup = await runJob(runtime, {
+      image: "docker.io/library/alpine:3.19",
+      command: ["true"],
+    });
+    assert.equal(
+      warmup.exitCode,
+      0,
+      `image pre-warm failed: ${warmup.error ?? ""}`,
+    );
+    const start = Date.now();
+    const result = await runJob(runtime, {
+      image: "docker.io/library/alpine:3.19",
+      command: ["sh", "-c", "sleep 5; echo ok"],
+    });
+    assert.equal(result.exitCode, 0, `job failed: ${result.error ?? ""}`);
+    assert.ok(
+      Date.now() - start >= 4500,
+      "expected ~5s wall time, got too fast — sleep got cut?",
+    );
+  });
+});

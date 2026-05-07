@@ -36,6 +36,10 @@ export async function runJob(
     if (inspectResult.exitCode !== 0) {
       result.status = "pulling";
       config.onProgress?.(`Pulling ${config.image}...`);
+      // Pull gets a 5-minute cap by default — image pulls hang sometimes
+      // and a stuck pull is worth surfacing as a failure rather than
+      // letting it block the job indefinitely.  Caller can override
+      // via `config.timeout` (in seconds) for slow links.
       const pullResult = await execRuntimeLong(
         runtime,
         ["pull", config.image],
@@ -82,11 +86,14 @@ export async function runJob(
 
     args.push(config.image, ...config.command);
 
+    // No default timeout for the run phase: chart conversions and other
+    // legitimate workloads can take hours.  Caller passes `config.timeout`
+    // (in seconds) explicitly when they want a cap.
     const runResult = await execRuntimeLong(
       runtime,
       args,
       config.onProgress,
-      config.timeout ? config.timeout * 1000 : 600000,
+      config.timeout ? config.timeout * 1000 : undefined,
       config.onStdoutLine,
       config.onStderrLine,
     );
