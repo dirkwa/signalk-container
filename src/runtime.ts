@@ -69,13 +69,44 @@ async function tryRuntime(
 
   const realRuntime: RuntimeName = isPodmanDockerShim ? "podman" : name;
   const cgroupControllers = await probeCgroupControllers(realRuntime, env);
+  const isRootless = await probeRootless(realRuntime, env);
 
   return {
     runtime: realRuntime,
     version,
     isPodmanDockerShim,
     cgroupControllers,
+    isRootless,
   };
+}
+
+/**
+ * Detect rootless mode.  Matters for Podman because `--userns=keep-id`
+ * (used by `jobs.ts` to align bind-mount file ownership) is rootless-
+ * only — emitting it under rootful Podman errors out at container
+ * create time.  Docker is left as `false` regardless: rootless Docker
+ * accepts the same `--user` flag form as rootful, so the distinction
+ * doesn't change our flag-emission logic.
+ */
+async function probeRootless(
+  runtime: RuntimeName,
+  env: NodeJS.ProcessEnv,
+): Promise<boolean | null> {
+  if (runtime !== "podman") {
+    return false;
+  }
+  const result = await exec(
+    "podman",
+    ["info", "--format", "{{.Host.Security.Rootless}}"],
+    env,
+  );
+  if (result.exitCode !== 0) {
+    return null;
+  }
+  const trimmed = result.stdout.trim();
+  if (trimmed === "true") return true;
+  if (trimmed === "false") return false;
+  return null;
 }
 
 /**
