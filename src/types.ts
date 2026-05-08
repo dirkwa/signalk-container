@@ -17,6 +17,20 @@ export interface ContainerRuntimeInfo {
    * the runtime fail at container-create time.
    */
   cgroupControllers?: string[] | null;
+  /**
+   * Whether the runtime is operating in rootless mode.  Probed once
+   * at detection time via `podman info --format
+   * '{{.Host.Security.Rootless}}'` for Podman; assumed `false` for
+   * Docker (rootless Docker accepts the same `--user` flag form as
+   * rootful, so the distinction doesn't matter for our flag-emission
+   * logic).  `null` means "not probed" — treat as not rootless.
+   *
+   * Used by `jobs.ts` to pick the right UID-mapping flag form for
+   * `runJob` containers: `--userns=keep-id:uid=N,gid=N` is rootless-
+   * Podman-only and errors out under rootful, so we have to detect
+   * before emitting it.
+   */
+  isRootless?: boolean | null;
 }
 
 export type ContainerState = "running" | "stopped" | "missing" | "no-runtime";
@@ -191,6 +205,42 @@ export interface ContainerJobConfig {
    * Available in signalk-container >= 1.3.0.
    */
   ownerPluginId?: string;
+  /**
+   * Align the in-container UID/GID with the host caller's UID/GID so
+   * files written into bind-mounted output dirs land owned by the
+   * host signalk-server process, not by an unrelated container UID.
+   *
+   * The auto path emits the right flag form per runtime:
+   *   - Docker (any flavour) and rootful Podman: `--user <hostUID>:<hostGID>`
+   *   - Rootless Podman:                          `--userns=keep-id:uid=<inImageUID>,gid=<inImageGID>`
+   *
+   * (The two forms achieve the same end via different mechanisms.
+   * `--userns=keep-id` is rootless-Podman-only — it errors out under
+   * rootful — which is why the runtime detection matters.)
+   *
+   * - Default (`undefined`): auto-align using `process.getuid()` /
+   *   `process.getgid()`, assuming the image's USER directive is
+   *   root (UID 0).  This matches the behaviour of the helper images
+   *   shipped before this field existed (osgeo/gdal, the legacy
+   *   tippecanoe image, …).
+   * - `{ inImageUid, inImageGid }`: image declares a non-root USER.
+   *   Required for rootless-Podman + non-root images so `keep-id`
+   *   maps the in-image UID back to the host caller.  The new
+   *   `charts-toolbox` image with `USER toolbox` (UID/GID 1001)
+   *   passes `{ inImageUid: 1001, inImageGid: 1001 }`.
+   * - `false`: opt out entirely.  Container runs as whatever the
+   *   image's USER directive specifies, with no host-UID mapping.
+   *   Useful only for debugging or for callers that don't need the
+   *   container to write into a host-owned bind mount.
+   *
+   * Earlier signalk-container versions silently ignored the field;
+   * newly-enabled flag emission means existing root-default helper
+   * images keep working (they're now also UID-aligned, which is
+   * strictly an improvement) without any caller change.  Consumer
+   * plugins relying on the flag emission should bump their declared
+   * `signalk-container` peer-dep to the version that introduced it.
+   */
+  user?: { inImageUid?: number; inImageGid?: number } | false;
 }
 
 export type ContainerJobStatus =
