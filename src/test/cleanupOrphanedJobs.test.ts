@@ -73,6 +73,15 @@ describe("parseOrphanLine", () => {
     assert.equal(parseOrphanLine(line, "owner-x"), null);
   });
 
+  it("returns null when the row has more than three columns", () => {
+    // An extra tab somewhere (image name with a stray tab, a runtime
+    // version that emits a different format) shifts the column
+    // structure — refuse to claim, same as the missing-column case.
+    const line =
+      "sk-job-x\timg:latest\tsk-charts-job=1,sk-job-owner=plugin\textra";
+    assert.equal(parseOrphanLine(line, "plugin"), null);
+  });
+
   it("decodes percent-encoded labels back to the original value", () => {
     // The labels column from `podman ps` is comma-delimited. runJob
     // percent-encodes value text on write so a comma inside a label
