@@ -158,11 +158,12 @@ export function parseOrphanLine(
   if (!/\S/.test(line)) {
     return null;
   }
-  // Require the full three-column format the `ps --format` template
-  // produces. A truncated row (no labels column at all) means the
-  // emitter shifted shape — refuse to claim it without proof.
+  // Require the exact three-column format the `ps --format` template
+  // produces. Fewer columns means a truncated row; more means an
+  // unexpected tab somewhere — both signal that the emitter shifted
+  // shape, so refuse to claim the row without proof.
   const parts = line.split("\t");
-  if (parts.length < 3) {
+  if (parts.length !== 3) {
     return null;
   }
   const [name, image, labels] = parts;
