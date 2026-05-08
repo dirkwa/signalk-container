@@ -158,7 +158,14 @@ export function parseOrphanLine(
   if (!/\S/.test(line)) {
     return null;
   }
-  const [name, image, labels] = line.split("\t");
+  // Require the full three-column format the `ps --format` template
+  // produces. A truncated row (no labels column at all) means the
+  // emitter shifted shape — refuse to claim it without proof.
+  const parts = line.split("\t");
+  if (parts.length < 3) {
+    return null;
+  }
+  const [name, image, labels] = parts;
   if (!name || !image) {
     return null;
   }
@@ -182,14 +189,13 @@ export function parseOrphanLine(
       }
     }
   }
-  // Defense in depth: the runtime's `--filter label=sk-job-owner=...`
-  // query already restricts the input set, so a mismatch here would
-  // indicate a runtime regression. Refuse to claim a row that isn't
-  // labelled with the owner the caller is looking for; surfacing the
-  // mismatch via a null return is safer than reaping someone else's
-  // container.
+  // Require a positive owner-label match. The runtime's
+  // `--filter label=sk-job-owner=...` query should already restrict
+  // the input set, but never trust filter output enough to send `rm
+  // --force` to a row that doesn't actively claim our owner — a row
+  // with no `sk-job-owner` label, or a different owner, is not ours.
   const labelOwner = labelMap.get("sk-job-owner");
-  if (labelOwner !== undefined && labelOwner !== ownerPluginId) {
+  if (labelOwner !== ownerPluginId) {
     return null;
   }
 
@@ -233,7 +239,18 @@ export async function cleanupOrphanedJobs(
     "{{.Names}}\t{{.Image}}\t{{.Labels}}",
   ]);
 
-  if (psResult.exitCode !== 0 || !psResult.stdout) {
+  // A non-zero `ps` exit means cleanup never inspected the runtime —
+  // not that there were zero leaked jobs. Returning `{ reaped: [] }`
+  // there would make the caller skip rollback while orphan helpers
+  // may still be alive. Surface the failure so the caller's catch can
+  // log it; an empty stdout on a successful exit means there really
+  // are no orphans and that's the only "no orphans" case.
+  if (psResult.exitCode !== 0) {
+    throw new Error(
+      `cleanupOrphanedJobs: ps failed: ${psResult.stderr.trim() || "unknown error"}`,
+    );
+  }
+  if (!psResult.stdout) {
     return { reaped: [] };
   }
 
@@ -245,22 +262,24 @@ export async function cleanupOrphanedJobs(
     }
 
     // `rm --force` stops a running container before removing it, so
-    // one call covers both states. The TOCTOU case where the
-    // container exited between `ps` and `rm` produces a non-zero
-    // exit but is harmless — the container is still gone and the
-    // caller's rollback is still the right thing. A genuine daemon
-    // failure (permissions, broken socket) is rare; surface it via
-    // stderr so an operator who's debugging a stuck conversion has
-    // a hint, then keep going so we reap as many as possible.
-    const rmResult = await execRuntime(runtime, [
-      "rm",
-      "--force",
-      parsed.name,
-    ]).catch(() => ({
-      exitCode: 1,
-      stdout: "",
-      stderr: "execRuntime threw",
-    }));
+    // one call covers both states. A non-zero exit code is the
+    // TOCTOU case where the container exited between `ps` and `rm`
+    // — harmless, the container is gone and rollback is correct.
+    // A thrown failure is different: execRuntime never finished, so
+    // the helper might still be alive. In that case skip the entry
+    // (don't claim a successful reap) and log; the next start() call
+    // will pick the orphan up again.
+    let rmResult;
+    try {
+      rmResult = await execRuntime(runtime, ["rm", "--force", parsed.name]);
+    } catch (err) {
+      console.warn(
+        `[signalk-container] cleanupOrphanedJobs: rm --force ${parsed.name} threw: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      continue;
+    }
     if (rmResult.exitCode !== 0) {
       console.warn(
         `[signalk-container] cleanupOrphanedJobs: rm --force ${parsed.name} exited ${rmResult.exitCode}: ${rmResult.stderr.trim()}`,
