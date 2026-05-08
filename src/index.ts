@@ -1284,15 +1284,35 @@ module.exports = (app: App) => {
         }
       });
 
-      router.get("/api/containers/:name/resources", (req, res) => {
+      router.get("/api/containers/:name/resources", async (req, res) => {
         if (!runtimeInfo) {
           res.status(503).json({ error: "No container runtime available" });
           return;
         }
         const name = String(req.params.name);
+        // For containers we manage via ensureRunning, return the
+        // declared/merged effective limits — these are authoritative
+        // and round-trip with the override editor below.
+        let effective = api.getResources(name);
+        // For one-shot job containers (`sk-job-*`), `effectiveResources`
+        // has no entry — runJob applies `--cpus N` etc. at run-time and
+        // never registers the container with the manager. Read the live
+        // cgroup state straight from `podman inspect` so the UI can
+        // show "1 CPU" / "512m" instead of "No resource limits set".
+        // This is read-only by design; a job container is destined to
+        // exit on its own and editing limits on it makes no sense.
+        if (Object.keys(effective).length === 0 && name.startsWith("job-")) {
+          try {
+            effective = await getLiveResources(runtimeInfo, name);
+          } catch {
+            // Best-effort. Falling back to {} keeps the existing
+            // "No resource limits set" empty state for unreachable
+            // containers, which is the prior behaviour.
+          }
+        }
         res.json({
           name,
-          effective: api.getResources(name),
+          effective,
           override: currentOverrides[name] ?? null,
         });
       });

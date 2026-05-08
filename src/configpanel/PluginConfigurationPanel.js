@@ -1473,6 +1473,12 @@ export default function PluginConfigurationPanel({ configuration, save }) {
           const hasOverride =
             serverOverride && Object.keys(serverOverride).length > 0;
           const isExpanded = expandedLimits.has(un);
+          // One-shot job containers (sk-job-*) are read-only here —
+          // their limits come from runJob's --cpus/--memory flags and
+          // editing them would have no useful effect (the container
+          // exits as soon as the job finishes). The backend still
+          // returns live cgroup state so the badges show real values.
+          const isJobContainer = un.startsWith("job-");
           const badges = RESOURCE_FIELDS.map((f) =>
             formatLimitBadge(f.key, eff[f.key]),
           ).filter(Boolean);
@@ -1555,7 +1561,7 @@ export default function PluginConfigurationPanel({ configuration, save }) {
                     Override active
                   </span>
                 )}
-                {ct.state === "running" && (
+                {ct.state === "running" && !isJobContainer && (
                   <button
                     type="button"
                     style={S.editLimitsBtn}
