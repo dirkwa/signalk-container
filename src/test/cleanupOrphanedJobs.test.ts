@@ -57,14 +57,20 @@ describe("parseOrphanLine", () => {
     assert.equal(parseOrphanLine(line, "plugin-b"), null);
   });
 
-  it("survives an empty labels column", () => {
-    // Some runtimes will emit a trailing empty string for unlabelled
-    // containers. We're filtering by label so this shouldn't happen
-    // for our jobs in practice, but the parser must not throw.
+  it("returns null when the labels column is empty", () => {
+    // Without a `sk-job-owner` label the parser refuses to claim the
+    // row — `rm --force` requires positive ownership proof. The
+    // runtime's ps filter should never let an unlabelled row through,
+    // but defense in depth.
     const line = "sk-job-x\timg:latest\t";
-    const parsed = parseOrphanLine(line, "owner-x");
-    assert.equal(parsed?.label, undefined);
-    assert.equal(parsed?.name, "sk-job-x");
+    assert.equal(parseOrphanLine(line, "owner-x"), null);
+  });
+
+  it("returns null when the row is missing the labels column entirely", () => {
+    // Two-column rows (no third tab) mean the ps emitter shifted
+    // shape; refuse to claim them rather than invent data.
+    const line = "sk-job-x\timg:latest";
+    assert.equal(parseOrphanLine(line, "owner-x"), null);
   });
 
   it("decodes percent-encoded labels back to the original value", () => {
