@@ -1304,10 +1304,17 @@ module.exports = (app: App) => {
         if (Object.keys(effective).length === 0 && name.startsWith("job-")) {
           try {
             effective = await getLiveResources(runtimeInfo, name);
-          } catch {
+          } catch (err) {
             // Best-effort. Falling back to {} keeps the existing
             // "No resource limits set" empty state for unreachable
-            // containers, which is the prior behaviour.
+            // containers, which is the prior behaviour. Log so a
+            // recurring inspect failure is at least visible in
+            // server debug output rather than silently invisible.
+            app.debug(
+              `getResources(${name}) job fallback failed (runtime=${runtimeInfo.runtime} ${runtimeInfo.version}): ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
           }
         }
         res.json({
