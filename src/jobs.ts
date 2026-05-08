@@ -81,11 +81,27 @@ export function userMappingFlags(
   }
   const inImageUid = user?.inImageUid ?? 0;
   const inImageGid = user?.inImageGid ?? 0;
+  // Reject negatives, NaN, and non-integers.  The TS shape says
+  // `number` but JS callers can still pass garbage — emitting
+  // `--userns=keep-id:uid=NaN,gid=-1` would let podman/docker
+  // produce an obscure runtime error far from the call site.
+  // Throw here so the consumer plugin's promise rejects with a
+  // clear message before the container even starts.
+  assertNonNegativeInt("inImageUid", inImageUid);
+  assertNonNegativeInt("inImageGid", inImageGid);
 
   if (runtime.runtime === "podman" && runtime.isRootless === true) {
     return ["--userns", `keep-id:uid=${inImageUid},gid=${inImageGid}`];
   }
   return ["--user", `${host.uid}:${host.gid}`];
+}
+
+function assertNonNegativeInt(field: string, value: number): void {
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error(
+      `ContainerJobConfig.user.${field} must be a non-negative integer, got ${String(value)}`,
+    );
+  }
 }
 
 export async function runJob(

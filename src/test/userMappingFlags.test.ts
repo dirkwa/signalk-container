@@ -128,4 +128,64 @@ describe("userMappingFlags", () => {
       "0:0",
     ]);
   });
+
+  describe("input validation", () => {
+    // The TS shape says `number` but a plain-JS caller (or a future
+    // refactor that lets a string slip through) can still pass
+    // garbage.  Emitting `--userns=keep-id:uid=NaN,gid=-1` would let
+    // the runtime fail far from the call site with an obscure
+    // message; we throw at flag-build time with a clear pointer to
+    // the offending field.
+    it("throws on a negative inImageUid", () => {
+      assert.throws(
+        () =>
+          userMappingFlags(podmanRootlessRuntime, { inImageUid: -1 }, linuxIds),
+        /inImageUid must be a non-negative integer, got -1/,
+      );
+    });
+
+    it("throws on a negative inImageGid", () => {
+      assert.throws(
+        () =>
+          userMappingFlags(
+            podmanRootlessRuntime,
+            { inImageUid: 1001, inImageGid: -42 },
+            linuxIds,
+          ),
+        /inImageGid must be a non-negative integer, got -42/,
+      );
+    });
+
+    it("throws on a non-integer inImageUid", () => {
+      assert.throws(
+        () =>
+          userMappingFlags(
+            podmanRootlessRuntime,
+            { inImageUid: 1.5 },
+            linuxIds,
+          ),
+        /inImageUid must be a non-negative integer, got 1.5/,
+      );
+    });
+
+    it("throws on NaN", () => {
+      assert.throws(
+        () =>
+          userMappingFlags(dockerRuntime, { inImageUid: Number.NaN }, linuxIds),
+        /inImageUid must be a non-negative integer, got NaN/,
+      );
+    });
+
+    it("throws on Infinity", () => {
+      assert.throws(
+        () =>
+          userMappingFlags(
+            dockerRuntime,
+            { inImageUid: Number.POSITIVE_INFINITY },
+            linuxIds,
+          ),
+        /inImageUid must be a non-negative integer, got Infinity/,
+      );
+    });
+  });
 });
