@@ -21,26 +21,26 @@ export default defineConfig({
         find: /^react\/jsx-(dev-)?runtime$/,
         replacement: path.resolve(
           here,
-          "src/configpanel/host-shim/react-jsx-runtime.js",
+          "src/configpanel/host-shim/react-jsx-runtime.ts",
         ),
       },
       {
         find: "react-dom/client",
         replacement: path.resolve(
           here,
-          "src/configpanel/host-shim/react-dom-client.js",
+          "src/configpanel/host-shim/react-dom-client.ts",
         ),
       },
       {
         find: /^react-dom$/,
         replacement: path.resolve(
           here,
-          "src/configpanel/host-shim/react-dom.js",
+          "src/configpanel/host-shim/react-dom.ts",
         ),
       },
       {
         find: /^react$/,
-        replacement: path.resolve(here, "src/configpanel/host-shim/react.js"),
+        replacement: path.resolve(here, "src/configpanel/host-shim/react.ts"),
       },
     ],
   },

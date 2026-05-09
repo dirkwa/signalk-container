@@ -36,10 +36,13 @@ function rewriteRequires(content, fromCjs) {
         path.resolve(baseDir, rel + ".cjs"),
         path.resolve(baseDir, rel + "/index.cjs"),
       ];
-      for (const c of candidates) {
+      // candidates is fixed-order: index 0 is the sibling .cjs file,
+      // index 1 is the directory's index.cjs. Use the index rather
+      // than path.endsWith("/index.cjs") so the check survives Windows
+      // backslash-separated absolute paths returned by path.resolve.
+      for (const [idx, c] of candidates.entries()) {
         if (renamed.has(c)) {
-          const newRel =
-            rel + (c.endsWith("/index.cjs") ? "/index.cjs" : ".cjs");
+          const newRel = idx === 1 ? `${rel}/index.cjs` : `${rel}.cjs`;
           return `require(${quote}${newRel}${quote})`;
         }
       }
@@ -52,6 +55,13 @@ for (const js of jsFiles) {
   const cjs = js.replace(/\.js$/, ".cjs");
   let content = fs.readFileSync(js, "utf8");
   content = rewriteRequires(content, cjs);
+  // tsc emits a //# sourceMappingURL=foo.js.map trailer; once we
+  // rename the map file to foo.cjs.map, the in-file pointer needs to
+  // match or devtools can't resolve the map.
+  content = content.replace(
+    /\/\/# sourceMappingURL=(.+)\.js\.map\b/g,
+    "//# sourceMappingURL=$1.cjs.map",
+  );
   fs.writeFileSync(cjs, content);
   fs.unlinkSync(js);
   const mapFile = js + ".map";
