@@ -1,4 +1,5 @@
 import * as net from "net";
+import { readFileSync } from "node:fs";
 import {
   ContainerConfig,
   ContainerInfo,
@@ -589,6 +590,151 @@ export async function disconnectFromNetwork(
 }
 
 /**
+ * Extract a container ID from a `/proc/self/cgroup` line, if present.
+ * Exposed for unit tests; production callers go through
+ * `findSelfContainerId`.
+ *
+ * Handles the formats we see in the wild:
+ *
+ *   cgroup v1 + Docker:
+ *     12:cpuset:/docker/0123abc...def
+ *
+ *   cgroup v2 + Docker on systemd:
+ *     0::/system.slice/docker-0123abc...def.scope
+ *
+ *   cgroup v2 + Podman rootless on systemd:
+ *     0::/user.slice/user-1000.slice/.../libpod-0123abc...def.scope
+ *
+ *   Kubernetes / containerd (best-effort):
+ *     0::/kubepods.slice/.../cri-containerd-0123abc...def.scope
+ *
+ * Returns null when no recognisable container-id token is found —
+ * callers fall through to the next cascade step.  We accept any
+ * 12+ hex char run; `docker inspect` will reject false positives
+ * (e.g. systemd slice names that happen to be hex).
+ */
+export function parseSelfContainerIdFromCgroup(line: string): string | null {
+  // 1) cgroup v1 path: `/<runtime>/<id>` where runtime is `docker`,
+  //    `kubepods/...`, etc.
+  const v1 = line.match(/[/]([0-9a-f]{12,64})(?:[/.]|$)/i);
+  if (v1) return v1[1];
+  // 2) cgroup v2 systemd slice: `<prefix>-<id>.scope`
+  const v2 = line.match(
+    /(?:docker|libpod|crio|cri-containerd|kubepods.*pod[^-]*)-([0-9a-f]{12,64})\.scope/i,
+  );
+  if (v2) return v2[1];
+  return null;
+}
+
+/**
+ * Read `/proc/self/cgroup` (cgroup v1: many lines, v2: single
+ * `0::/...` line) and extract the first recognisable container ID.
+ * Returns null when not in a container, when the file isn't
+ * readable, or when no parseable id is present.
+ *
+ * Exposed for tests via `_testInternals`.  Skipped in production
+ * paths when `isContainerized()` is false.
+ */
+export function readSelfContainerIdFromCgroup(): string | null {
+  let content: string;
+  try {
+    content = readFileSync("/proc/self/cgroup", "utf8");
+  } catch {
+    return null;
+  }
+  for (const line of content.split("\n")) {
+    const id = parseSelfContainerIdFromCgroup(line);
+    if (id) return id;
+  }
+  return null;
+}
+
+/**
+ * Validate that `candidateId` is a real container by trying
+ * `<runtime> inspect <candidateId>`.  Returns the same `candidateId`
+ * on success, null otherwise.  Used by `findSelfContainerId` to
+ * filter out HOSTNAME values that aren't actually our container
+ * (the bug from issue #23: under `network_mode: host`, HOSTNAME is
+ * the machine name, not a container id).
+ */
+async function tryInspect(
+  runtime: ContainerRuntimeInfo,
+  candidateId: string,
+  debug: (msg: string) => void,
+  source: string,
+): Promise<string | null> {
+  if (!candidateId) return null;
+  const result = await execRuntime(runtime, [
+    "inspect",
+    "--format",
+    "{{.Id}}",
+    candidateId,
+  ]);
+  if (result.exitCode === 0 && result.stdout.trim()) {
+    return candidateId;
+  }
+  debug(
+    `findSelfContainerId(${source}): inspect '${candidateId}' failed (exit=${result.exitCode}): ${result.stderr.trim()}`,
+  );
+  return null;
+}
+
+/**
+ * Find this signalk-server's own container id, cascading across the
+ * known-reliable signals to the brittle ones:
+ *
+ *   1. `SIGNALK_CONTAINER_ID` env var — explicit override.  Doc-ed
+ *      escape hatch for any deployment where automatic detection
+ *      proves unreliable.
+ *   2. `HOSTNAME` env var — works in default-network deployments
+ *      where Docker/Podman set HOSTNAME to the (short) container id.
+ *      Validated via `inspect`: under `network_mode: host` the
+ *      container inherits the host's hostname (e.g. "halos") and
+ *      `inspect` fails — we fall through to the next step.  This
+ *      is the bug fixed by this helper (issue #23).
+ *   3. `/proc/self/cgroup` — robust against host-network mode and
+ *      any other case where HOSTNAME is wrong.  The id we extract
+ *      gets the same `inspect`-validation treatment.
+ *
+ * Returns null when none of the cascade steps yield a valid id.
+ * Callers should treat this exactly like the previous "HOSTNAME
+ * unset" behaviour — fall back to bare-metal-style handling, or
+ * return null to the caller (depends on the consumer).
+ */
+export async function findSelfContainerId(
+  runtime: ContainerRuntimeInfo,
+  debug: (msg: string) => void = () => {},
+): Promise<string | null> {
+  // 1. Explicit override — no `inspect` validation needed since the
+  //    operator chose this deliberately.  An invalid value here
+  //    surfaces as the same downstream error the user would have
+  //    seen without the env var.
+  const envOverride = process.env.SIGNALK_CONTAINER_ID;
+  if (envOverride && envOverride.trim()) {
+    return envOverride.trim();
+  }
+
+  // 2. HOSTNAME, validated by `inspect`.
+  const hostname = process.env.HOSTNAME ?? "";
+  const fromHostname = await tryInspect(runtime, hostname, debug, "HOSTNAME");
+  if (fromHostname) return fromHostname;
+
+  // 3. /proc/self/cgroup, also validated by `inspect`.
+  const fromCgroup = readSelfContainerIdFromCgroup();
+  if (fromCgroup) {
+    const validated = await tryInspect(
+      runtime,
+      fromCgroup,
+      debug,
+      "/proc/self/cgroup",
+    );
+    if (validated) return validated;
+  }
+
+  return null;
+}
+
+/**
  * Resolve what to mount in a managed container to give it access to
  * the SignalK data directory, regardless of how SignalK itself is deployed.
  *
@@ -614,12 +760,14 @@ export async function resolveSignalkDataSource(
     return dataDir;
   }
 
-  // Running inside a container. Docker/Podman set HOSTNAME to the
-  // (short) container ID, which is enough for `inspect`.
-  const selfId = process.env.HOSTNAME ?? "";
+  // Running inside a container.  `findSelfContainerId` cascades
+  // SIGNALK_CONTAINER_ID -> HOSTNAME -> /proc/self/cgroup so that
+  // network_mode: host deployments (where HOSTNAME is the host
+  // machine name, not a container id) still resolve correctly.
+  const selfId = await findSelfContainerId(runtime, debug);
   if (!selfId) {
     debug(
-      `resolveSignalkDataSource: HOSTNAME unset, falling back to dataDir=${dataDir}`,
+      `resolveSignalkDataSource: could not detect self container id; falling back to dataDir=${dataDir}`,
     );
     return dataDir;
   }
@@ -795,9 +943,14 @@ export async function resolveHostPath(
     return { source: absPath, subPath: "" };
   }
 
-  const selfId = process.env.HOSTNAME ?? "";
+  // Cascade SIGNALK_CONTAINER_ID -> HOSTNAME -> /proc/self/cgroup
+  // so `network_mode: host` deployments (where HOSTNAME is the host
+  // machine name, not a container id) still resolve correctly.
+  const selfId = await findSelfContainerId(runtime, debug);
   if (!selfId) {
-    debug(`resolveHostPath: HOSTNAME unset, cannot resolve ${absPath}`);
+    debug(
+      `resolveHostPath: could not detect self container id; cannot resolve ${absPath}`,
+    );
     return null;
   }
 
@@ -902,13 +1055,14 @@ export async function findAvailablePort(preferred: number): Promise<number> {
  * via DNS name without exposing any host port.
  *
  * Returns:
- *   - `null`    when running bare-metal, HOSTNAME is unset, or `docker inspect`
- *               fails (e.g. host-network mode where HOSTNAME is the machine
- *               name, not a container ID).  Callers should treat this like
- *               bare-metal and publish ports instead.
+ *   - `null`    when running bare-metal, or when self-container detection
+ *               fails (`SIGNALK_CONTAINER_ID` unset, HOSTNAME unusable
+ *               under `network_mode: host`, and `/proc/self/cgroup` not
+ *               parseable).  Callers should treat this like bare-metal
+ *               and publish ports instead.
  *   - `string[]` (possibly empty) when inspect succeeds.  An empty array means
  *               SignalK is only on the default bridge — callers should fall
- *               back to `networkMode: container:<HOSTNAME>`.  A non-empty
+ *               back to `networkMode: container:<self-container-id>`.  A non-empty
  *               array contains the user-defined network names to attach to.
  */
 export async function resolveSignalkNetworks(
@@ -917,9 +1071,14 @@ export async function resolveSignalkNetworks(
 ): Promise<string[] | null> {
   if (!isContainerized()) return null;
 
-  const selfId = process.env.HOSTNAME ?? "";
+  // Cascade detection — see `findSelfContainerId`.  Critically this fixes
+  // `network_mode: host` deployments where HOSTNAME is the host machine
+  // name (e.g. "halos") rather than the container id.
+  const selfId = await findSelfContainerId(runtime, debug);
   if (!selfId) {
-    debug("resolveSignalkNetworks: HOSTNAME unset, returning null");
+    debug(
+      "resolveSignalkNetworks: could not detect self container id, returning null",
+    );
     return null;
   }
 

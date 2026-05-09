@@ -203,6 +203,31 @@ const containerPath = path.join(
 
 You can also call `containers.resolveSignalkDataMount()` if you need to inspect the resolved source at runtime (e.g. for logging).
 
+### When SignalK runs in a container: self-container detection
+
+`signalkDataMount`, `signalkAccessiblePorts`, and `resolveHostPath` all need to know **which container** SignalK itself is running in (so they can read its mount list and join its network). signalk-container detects this automatically by cascading three signals — most reliable first:
+
+1. **`SIGNALK_CONTAINER_ID` environment variable** (explicit override)
+2. **`HOSTNAME`** — the default in container deployments where the runtime sets `HOSTNAME=<container-id>`
+3. **`/proc/self/cgroup`** — extracts the container ID from the cgroup path (works for cgroup v1/v2, Docker, Podman rootless and rootful, and Kubernetes)
+
+The cascade is robust against the **`network_mode: host`** case where `HOSTNAME` is the host machine name (e.g. `halos`) rather than the container ID — the cgroup-based step picks up the real ID and `docker inspect` succeeds.
+
+**When automatic detection fails** (custom deployment, unusual cgroup layout, or a future runtime we don't recognise), set `SIGNALK_CONTAINER_ID` to the container's name or ID in your compose file:
+
+```yaml
+services:
+  signalk:
+    image: signalk/signalk-server
+    container_name: signalk
+    environment:
+      - SIGNALK_CONTAINER_ID=signalk   # ← matches container_name above
+    network_mode: host                  # only required if you use host networking
+    # ... volumes, etc.
+```
+
+You'll see "could not detect self container id" in the SignalK log when the cascade has failed; the override resolves it without code changes.
+
 ## Connecting back to a container service (`signalkAccessiblePorts`)
 
 When a managed container exposes an HTTP, TCP, or other service that the SignalK process itself needs to connect to (e.g. a video stream, a database, an inference engine), use `signalkAccessiblePorts` instead of hardcoding port bindings or writing deployment-detection logic in your plugin.

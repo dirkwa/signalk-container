@@ -35,6 +35,7 @@ import {
   getLiveResources,
   imageExists,
   listContainers,
+  findSelfContainerId,
   pruneImages,
   pullImage,
   qualifyImage as qualifyImageForRuntime,
@@ -471,7 +472,18 @@ module.exports = (app: App) => {
           // port is already taken, and we cannot remap it (the container
           // image listens on a fixed port), so we fail fast with a clear
           // message instead of silently starting a container that cannot bind.
-          const selfId = process.env.HOSTNAME ?? "";
+          // Cascade detection so `network_mode: host` deployments don't
+          // construct `container:<host-machine-name>` — the same bug
+          // resolveSignalkNetworks/resolveHostPath have been fixed for
+          // (issue #23).
+          const selfId = await findSelfContainerId(runtimeInfo, app.debug);
+          if (!selfId) {
+            throw new Error(
+              `signalkAccessiblePorts(${name}): could not detect SignalK's own container id ` +
+                `(SIGNALK_CONTAINER_ID unset, HOSTNAME unusable, /proc/self/cgroup unparseable). ` +
+                `Set SIGNALK_CONTAINER_ID to the container name as a workaround.`,
+            );
+          }
           app.debug(
             `signalkAccessiblePorts(${name}): only default bridge found, falling back to container:${selfId}`,
           );
@@ -491,7 +503,7 @@ module.exports = (app: App) => {
               pendingPortMap.set(cacheKey, `127.0.0.1:${containerPort}`);
             }
           }
-          // container:HOSTNAME shares the network namespace — port bindings
+          // container:<self-id> shares the network namespace — port bindings
           // are meaningless and must not be carried over.
           config = {
             ...cleanRest,
