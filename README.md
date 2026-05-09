@@ -221,8 +221,8 @@ services:
     image: signalk/signalk-server
     container_name: signalk
     environment:
-      - SIGNALK_CONTAINER_ID=signalk   # ← matches container_name above
-    network_mode: host                  # only required if you use host networking
+      - SIGNALK_CONTAINER_ID=signalk # ← matches container_name above
+    network_mode: host # only required if you use host networking
     # ... volumes, etc.
 ```
 

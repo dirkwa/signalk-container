@@ -627,26 +627,52 @@ export function parseSelfContainerIdFromCgroup(line: string): string | null {
 }
 
 /**
- * Read `/proc/self/cgroup` (cgroup v1: many lines, v2: single
- * `0::/...` line) and extract the first recognisable container ID.
- * Returns null when not in a container, when the file isn't
- * readable, or when no parseable id is present.
+ * Pure: extract every parseable container-ID candidate from a multi-
+ * line cgroup file content, in source-line order, deduplicated.
+ * Returns an empty array when no line yields a candidate.
  *
- * Exposed for tests via `_testInternals`.  Skipped in production
- * paths when `isContainerized()` is false.
+ * Exists separately from `readSelfContainerIdsFromCgroup` so unit
+ * tests can drive the multi-line / dedup logic without touching
+ * `/proc/self/cgroup` (which varies across test hosts).
  */
-export function readSelfContainerIdFromCgroup(): string | null {
+export function parseSelfContainerIdsFromCgroupFile(content: string): string[] {
+  const seen = new Set<string>();
+  const ids: string[] = [];
+  for (const line of content.split("\n")) {
+    const id = parseSelfContainerIdFromCgroup(line);
+    if (id && !seen.has(id)) {
+      seen.add(id);
+      ids.push(id);
+    }
+  }
+  return ids;
+}
+
+/**
+ * Read `/proc/self/cgroup` (cgroup v1: many lines, one per controller,
+ * all typically pointing at the same container; v2: single `0::/...`
+ * line) and extract every recognisable container-ID candidate.
+ * Returned in source-line order, deduplicated.  Empty array when not
+ * in a container, when the file isn't readable, or when no parseable
+ * id is present.
+ *
+ * Returning all candidates instead of just the first lets
+ * `findSelfContainerId` validate each via `inspect` and skip false
+ * positives — important because `parseSelfContainerIdFromCgroup`'s
+ * regex is permissive on purpose (matches short 12-char ids and
+ * various runtime prefixes), so a non-container path that happens
+ * to embed a 12+ hex run could otherwise short-circuit detection.
+ *
+ * Skipped in production paths when `isContainerized()` is false.
+ */
+export function readSelfContainerIdsFromCgroup(): string[] {
   let content: string;
   try {
     content = readFileSync("/proc/self/cgroup", "utf8");
   } catch {
-    return null;
+    return [];
   }
-  for (const line of content.split("\n")) {
-    const id = parseSelfContainerIdFromCgroup(line);
-    if (id) return id;
-  }
-  return null;
+  return parseSelfContainerIdsFromCgroupFile(content);
 }
 
 /**
@@ -719,15 +745,13 @@ export async function findSelfContainerId(
   const fromHostname = await tryInspect(runtime, hostname, debug, "HOSTNAME");
   if (fromHostname) return fromHostname;
 
-  // 3. /proc/self/cgroup, also validated by `inspect`.
-  const fromCgroup = readSelfContainerIdFromCgroup();
-  if (fromCgroup) {
-    const validated = await tryInspect(
-      runtime,
-      fromCgroup,
-      debug,
-      "/proc/self/cgroup",
-    );
+  // 3. /proc/self/cgroup, also validated by `inspect`.  Walk every
+  //    parseable candidate (cgroup v1 lists one per controller; v2
+  //    has only one) so a permissive regex match on an early line
+  //    that doesn't actually correspond to our container can't
+  //    short-circuit detection — we keep trying until one validates.
+  for (const id of readSelfContainerIdsFromCgroup()) {
+    const validated = await tryInspect(runtime, id, debug, "/proc/self/cgroup");
     if (validated) return validated;
   }
 
