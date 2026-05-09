@@ -6,7 +6,7 @@
 const host = /** @type {any} */ (globalThis).__SK_REACT__;
 if (!host) {
   throw new Error(
-    "signalk-container: window.__SK_REACT__ is not set. The host signalk-server admin UI must expose React for plugin federation. Update signalk-server to a version that ships PR #2552's host-React contract.",
+    "signalk-container: window.__SK_REACT__ is not set. The host signalk-server admin UI must expose React on window for plugin federation. Update signalk-server to a version that ships the host-React contract (SignalK/signalk-server#2669).",
   );
 }
 export default host.default ?? host;

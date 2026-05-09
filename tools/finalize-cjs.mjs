@@ -29,7 +29,8 @@ function rewriteRequires(content, fromCjs) {
   return content.replace(
     /require\((['"])(\.\.?\/[^'"]+?)\1\)/g,
     (match, quote, rel) => {
-      if (rel.endsWith(".cjs") || rel.endsWith(".json")) return match;
+      if (rel.endsWith(".cjs") || rel.endsWith(".js") || rel.endsWith(".json"))
+        return match;
       const baseDir = path.dirname(fromCjs);
       const candidates = [
         path.resolve(baseDir, rel + ".cjs"),
