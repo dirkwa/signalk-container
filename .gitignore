@@ -1,8 +1,10 @@
 node_modules/
 dist/
-public/*.js
-public/*.js.map
-public/*.txt
+# Webpack / vite / module-federation build output.  Nothing under
+# public/ is tracked in this repo — the whole tree is generated.
+# Cover *.js / *.txt / chunks/ / remoteEntry.js / etc. with a single
+# directory rule.
+public/
 *.tsbuildinfo
 .DS_Store
 *.log
