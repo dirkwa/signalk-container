@@ -431,7 +431,8 @@ module.exports = (app: App) => {
       // block below destructures and removes it from `config`. Used after
       // ensureRunning succeeds to re-validate the cache against the runtime's
       // actual binding (issue #27).
-      const requestedSignalkPorts: number[] = config.signalkAccessiblePorts ?? [];
+      const requestedSignalkPorts: number[] =
+        config.signalkAccessiblePorts ?? [];
 
       if (config.signalkAccessiblePorts?.length) {
         // Destructure to strip the three fields we take ownership of so they

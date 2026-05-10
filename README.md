@@ -206,7 +206,7 @@ You can also call `containers.resolveSignalkDataMount()` if you need to inspect 
 
 ## Mounting the SignalK config root (`signalkConfigRootMount`)
 
-`signalkDataMount` resolves to `app.getDataDirPath()`, which Signal K rewrites per-plugin to the plugin's *own* subdirectory (`<configRoot>/plugin-config-data/<pluginId>/`). That's right when a managed container needs a private writable area inside the SignalK data tree.
+`signalkDataMount` resolves to `app.getDataDirPath()`, which Signal K rewrites per-plugin to the plugin's _own_ subdirectory (`<configRoot>/plugin-config-data/<pluginId>/`). That's right when a managed container needs a private writable area inside the SignalK data tree.
 
 When a managed container needs the **entire SignalK installation config** (`settings.json`, `security.json`, `package.json`, the whole `plugin-config-data/` tree, etc.) — typical for backup, audit, or config-sync tools — use `signalkConfigRootMount` instead. It resolves through `app.config.configPath` (the actual top of the tree, typically `~/.signalk/`).
 
