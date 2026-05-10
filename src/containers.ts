@@ -299,6 +299,92 @@ function bytesToString(bytes: number): string {
   return `${bytes}b`;
 }
 
+/**
+ * One host-side endpoint for a single container port. Mirror of the
+ * `{ HostIp, HostPort }` shape that podman/docker emit under
+ * `NetworkSettings.Ports['<containerPort>/tcp']`.
+ */
+export interface PortBinding {
+  hostIp: string;
+  hostPort: number;
+}
+
+/**
+ * Parse the JSON returned by `docker/podman inspect --format '{{json .NetworkSettings.Ports}}'`
+ * into a Map keyed by integer container port. Pure function — used by both
+ * `getActualPortBindings()` (against a live runtime) and the regression tests
+ * (against synthetic JSON), so the parsing logic is covered without needing a
+ * real container.
+ *
+ * Both runtimes accept multiple bindings per container port (one per host IP);
+ * we keep all of them. UDP and SCTP entries are ignored — only `<port>/tcp` is
+ * relevant for `signalkAccessiblePorts`.
+ *
+ * Returns an empty map on null/empty input or when JSON is malformed; callers
+ * already handle "no binding found" so a parse error degrades gracefully into
+ * "leave the existing cache alone".
+ */
+export function parsePortBindings(json: string): Map<number, PortBinding[]> {
+  const out = new Map<number, PortBinding[]>();
+  if (!json || json === "null") return out;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return out;
+  }
+  if (!parsed || typeof parsed !== "object") return out;
+
+  for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+    const tcpMatch = key.match(/^(\d+)\/tcp$/);
+    if (!tcpMatch) continue;
+    const containerPort = Number(tcpMatch[1]);
+    if (!Array.isArray(value) || value.length === 0) continue;
+
+    const bindings: PortBinding[] = [];
+    for (const entry of value) {
+      if (!entry || typeof entry !== "object") continue;
+      const e = entry as Record<string, unknown>;
+      const hostIp = typeof e["HostIp"] === "string" ? e["HostIp"] : "";
+      const hostPortStr = typeof e["HostPort"] === "string" ? e["HostPort"] : "";
+      const hostPort = Number(hostPortStr);
+      if (!Number.isFinite(hostPort) || hostPort <= 0) continue;
+      bindings.push({ hostIp, hostPort });
+    }
+    if (bindings.length > 0) out.set(containerPort, bindings);
+  }
+  return out;
+}
+
+/**
+ * Read the live host-side port bindings for a managed container straight from
+ * the runtime, bypassing any in-process cache. Returns a Map keyed by the
+ * container's internal TCP port.
+ *
+ * Used by `ensureRunning` to validate `pendingPortMap` against reality just
+ * after the runtime has bound the ports — closes the TOCTOU window between
+ * `findAvailablePort()`'s in-process probe and `podman create`'s actual bind.
+ *
+ * Returns an empty map on inspect failure; callers fall back to whatever they
+ * had pre-validation.
+ */
+export async function getActualPortBindings(
+  runtime: ContainerRuntimeInfo,
+  name: string,
+  exec: ExecFn = execRuntime,
+): Promise<Map<number, PortBinding[]>> {
+  const fullName = prefixedName(name);
+  const result = await exec(runtime, [
+    "inspect",
+    "--format",
+    "{{json .NetworkSettings.Ports}}",
+    fullName,
+  ]);
+  if (result.exitCode !== 0) return new Map();
+  return parsePortBindings(result.stdout.trim());
+}
+
 function buildRunArgs(
   name: string,
   config: ContainerConfig,
