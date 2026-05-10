@@ -10,8 +10,12 @@ describe("parsePortBindings", () => {
     });
     const result = parsePortBindings(json);
     assert.equal(result.size, 2);
-    assert.deepEqual(result.get(3010), [{ hostIp: "127.0.0.1", hostPort: 3010 }]);
-    assert.deepEqual(result.get(53682), [{ hostIp: "127.0.0.1", hostPort: 53682 }]);
+    assert.deepEqual(result.get(3010), [
+      { hostIp: "127.0.0.1", hostPort: 3010 },
+    ]);
+    assert.deepEqual(result.get(53682), [
+      { hostIp: "127.0.0.1", hostPort: 53682 },
+    ]);
   });
 
   it("captures cache drift: actual host port differs from container port", () => {
@@ -81,7 +85,9 @@ describe("parsePortBindings", () => {
       ],
     });
     const result = parsePortBindings(json);
-    assert.deepEqual(result.get(3010), [{ hostIp: "127.0.0.1", hostPort: 3010 }]);
+    assert.deepEqual(result.get(3010), [
+      { hostIp: "127.0.0.1", hostPort: 3010 },
+    ]);
   });
 
   it("tolerates missing HostIp (defaults to empty string)", () => {

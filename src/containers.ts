@@ -336,7 +336,9 @@ export function parsePortBindings(json: string): Map<number, PortBinding[]> {
   }
   if (!parsed || typeof parsed !== "object") return out;
 
-  for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+  for (const [key, value] of Object.entries(
+    parsed as Record<string, unknown>,
+  )) {
     const tcpMatch = key.match(/^(\d+)\/tcp$/);
     if (!tcpMatch) continue;
     const containerPort = Number(tcpMatch[1]);
@@ -347,7 +349,8 @@ export function parsePortBindings(json: string): Map<number, PortBinding[]> {
       if (!entry || typeof entry !== "object") continue;
       const e = entry as Record<string, unknown>;
       const hostIp = typeof e["HostIp"] === "string" ? e["HostIp"] : "";
-      const hostPortStr = typeof e["HostPort"] === "string" ? e["HostPort"] : "";
+      const hostPortStr =
+        typeof e["HostPort"] === "string" ? e["HostPort"] : "";
       const hostPort = Number(hostPortStr);
       if (!Number.isFinite(hostPort) || hostPort <= 0) continue;
       bindings.push({ hostIp, hostPort });
