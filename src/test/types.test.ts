@@ -24,6 +24,18 @@ describe("type contracts", () => {
     assert.equal(config.restart, "unless-stopped");
   });
 
+  it("ContainerConfig accepts signalkDataMount and signalkConfigRootMount together", () => {
+    const config: ContainerConfig = {
+      image: "example/tool",
+      tag: "latest",
+      signalkDataMount: "/data",
+      signalkConfigRootMount: "/signalk",
+      signalkAccessiblePorts: [3010],
+    };
+    assert.equal(config.signalkDataMount, "/data");
+    assert.equal(config.signalkConfigRootMount, "/signalk");
+  });
+
   it("ContainerState enum values are correct", () => {
     const states: ContainerState[] = [
       "running",

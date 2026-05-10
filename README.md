@@ -14,6 +14,7 @@ Instead of each plugin implementing its own container orchestration, they delega
 - **Reset to plugin default** -- one-click restore of a container's original resource limits, clearing any user override.
 - **Image management** -- scheduled pruning of dangling images (weekly/monthly)
 - **Zero-config data dir sharing** -- `signalkDataMount` mounts the SignalK data directory into any managed container automatically, whether Signal K runs bare-metal, in Docker (named volume), or in Podman (named volume or bind mount). No host paths to configure.
+- **Zero-config config root sharing** -- `signalkConfigRootMount` mounts the entire SignalK installation config (`~/.signalk/`) — for backup, audit, or config-sync tools that need the whole tree, not the per-plugin subdirectory.
 - **Zero-config container service connectivity** -- `signalkAccessiblePorts` lets the SignalK process connect back to a service running inside a managed container (e.g. an HTTP or TCP server). signalk-container picks the right networking strategy automatically — port binding on the host loopback for bare-metal deployments, or a shared Docker network with DNS for containerised ones. No host ports are exposed unnecessarily.
 - **SELinux support** -- `:Z` volume flags for Podman bind mounts on Fedora/RHEL; named volumes are handled correctly (`:Z` is not applied)
 - **Podman image qualification** -- automatically prefixes `docker.io/` for short image names
@@ -202,6 +203,33 @@ const containerPath = path.join(
 > — those paths are not visible from inside the managed container.
 
 You can also call `containers.resolveSignalkDataMount()` if you need to inspect the resolved source at runtime (e.g. for logging).
+
+## Mounting the SignalK config root (`signalkConfigRootMount`)
+
+`signalkDataMount` resolves to `app.getDataDirPath()`, which Signal K rewrites per-plugin to the plugin's *own* subdirectory (`<configRoot>/plugin-config-data/<pluginId>/`). That's right when a managed container needs a private writable area inside the SignalK data tree.
+
+When a managed container needs the **entire SignalK installation config** (`settings.json`, `security.json`, `package.json`, the whole `plugin-config-data/` tree, etc.) — typical for backup, audit, or config-sync tools — use `signalkConfigRootMount` instead. It resolves through `app.config.configPath` (the actual top of the tree, typically `~/.signalk/`).
+
+```typescript
+const SK_MOUNT = "/signalk-data";
+
+await containers.ensureRunning("signalk-backup-server", {
+  image: "ghcr.io/dirkwa/signalk-backup-server",
+  tag: "latest",
+  signalkConfigRootMount: SK_MOUNT, // ← mount the SignalK config root
+});
+// Inside the container:
+//   /signalk-data/settings.json
+//   /signalk-data/security.json
+//   /signalk-data/plugin-config-data/<plugin>/...
+```
+
+The deployment-mode resolution is identical to `signalkDataMount`: bare-metal returns the host path directly, containerised SignalK gets resolved through the SignalK container's mount list (named volumes preserved, bind mounts walked correctly).
+
+`app.config.configPath` is provided by the SignalK server runtime. If the caller's `app` object lacks it (a non-standard host), `ensureRunning()` throws.
+
+> [!note]
+> The same named-volume subpath caveat applies — Docker doesn't support subpath mounts on volumes. If `app.config.configPath` happens to live under a parent-directory bind, signalk-container computes the exact host path so the container sees the right tree.
 
 ### When SignalK runs in a container: self-container detection
 
