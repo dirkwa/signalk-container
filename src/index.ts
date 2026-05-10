@@ -30,6 +30,7 @@ import {
   ensureNetwork,
   ensureRunning,
   execInContainer,
+  getActualPortBindings,
   getContainerState,
   getImageDigest,
   getLiveResources,
@@ -426,6 +427,12 @@ module.exports = (app: App) => {
       // This prevents stale mappings from surviving a failed container create.
       const pendingPortMap = new Map<string, string>();
 
+      // Capture the originally-requested signalkAccessiblePorts before the
+      // block below destructures and removes it from `config`. Used after
+      // ensureRunning succeeds to re-validate the cache against the runtime's
+      // actual binding (issue #27).
+      const requestedSignalkPorts: number[] = config.signalkAccessiblePorts ?? [];
+
       if (config.signalkAccessiblePorts?.length) {
         // Destructure to strip the three fields we take ownership of so they
         // cannot accidentally leak into the wrong Docker config branch.
@@ -652,6 +659,51 @@ module.exports = (app: App) => {
         portAddressMap.set(key, addr);
         if (addr.startsWith("127.0.0.1:")) {
           releaseReservedPort(Number(addr.split(":")[1]));
+        }
+      }
+
+      // Defence-in-depth: re-validate the cached port mappings against the
+      // runtime's actual binding.  `findAvailablePort()` probes by binding a
+      // TCP socket — there is a small TOCTOU window between that probe and
+      // the runtime's `podman create`, during which another process can
+      // release or claim the preferred port.  See issue #27.
+      //
+      // We only validate the bare-metal / loopback entries; containerised
+      // entries of the form `sk-<name>:<port>` go through DNS rather than a
+      // host port and cannot drift.  Any mismatch is corrected silently and
+      // logged at debug level so a future reproduction has breadcrumbs.
+      if (requestedSignalkPorts.length > 0) {
+        try {
+          const liveBindings = await getActualPortBindings(runtimeInfo, name);
+          for (const containerPort of requestedSignalkPorts) {
+            const cacheKey = `${name}:${containerPort}`;
+            const cached = portAddressMap.get(cacheKey);
+            if (!cached || !cached.startsWith("127.0.0.1:")) continue;
+            const live = liveBindings.get(containerPort);
+            if (!live || live.length === 0) continue;
+            // Prefer the binding on 127.0.0.1; fall back to the first one.
+            const loopback = live.find((b) => b.hostIp === "127.0.0.1");
+            const chosen = loopback ?? live[0];
+            if (!chosen) continue;
+            const truth = `127.0.0.1:${chosen.hostPort}`;
+            if (truth !== cached) {
+              app.debug(
+                `ensureRunning(${name}): cache drift detected for port ${containerPort} — ` +
+                  `cached '${cached}', actual '${truth}'. Overwriting with truth.`,
+              );
+              const cachedPort = Number(cached.split(":")[1]);
+              if (Number.isFinite(cachedPort)) {
+                releaseReservedPort(cachedPort);
+              }
+              portAddressMap.set(cacheKey, truth);
+            }
+          }
+        } catch (err) {
+          app.debug(
+            `ensureRunning(${name}): port-binding re-validation failed (non-fatal): ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
         }
       }
 
