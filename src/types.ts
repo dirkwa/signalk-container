@@ -68,6 +68,41 @@ export interface ContainerConfig {
    */
   signalkDataMount?: string;
   /**
+   * Mount the SignalK **server config root** at this container path,
+   * regardless of how SignalK itself is deployed.  Use this when the
+   * managed container needs to read or write the top-level SignalK
+   * config (`settings.json`, `security.json`, `package.json`, the
+   * whole `plugin-config-data/` tree, etc.) — for example a backup
+   * tool, an audit tool, or a config-sync tool.
+   *
+   * The difference vs `signalkDataMount`:
+   *
+   *   - `signalkDataMount` resolves to `app.getDataDirPath()`, which
+   *     SignalK rewrites per-plugin to the *plugin-private* subdirectory
+   *     `<configRoot>/plugin-config-data/<pluginId>/`.  A consumer
+   *     plugin asking for `signalkDataMount` therefore gets only the
+   *     *signalk-container* plugin's own state subdirectory — useful
+   *     for tools that just need a private writable area inside the
+   *     SignalK data tree.
+   *   - `signalkConfigRootMount` resolves to `app.config.configPath`,
+   *     i.e. the top of the tree (typically `~/.signalk/`) — the entire
+   *     SignalK installation config.
+   *
+   * signalk-container resolves the appropriate source automatically,
+   * the same way it does for `signalkDataMount` — it inspects the
+   * current container's mounts and finds the bind/volume that backs
+   * `app.config.configPath`, falling back to the path itself when
+   * SignalK runs bare-metal.
+   *
+   * `app.config` is provided by the SignalK server runtime; if the
+   * caller's `app` object lacks `config.configPath`, an error is thrown.
+   *
+   * Example (a backup plugin):
+   *   `signalkConfigRootMount: "/signalk-data"` → backup engine sees
+   *   `settings.json`, `security.json`, etc. at `/signalk-data/*`.
+   */
+  signalkConfigRootMount?: string;
+  /**
    * Container ports that the SignalK process needs to connect back to.
    * signalk-container automatically configures networking and port
    * allocation — no manual `ports` or `networkMode` needed.

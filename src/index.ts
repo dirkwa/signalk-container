@@ -60,6 +60,18 @@ interface App {
   setPluginStatus: (msg: string) => void;
   setPluginError: (msg: string) => void;
   getDataDirPath?: () => string;
+  /**
+   * SignalK server runtime config. `configPath` is the **top of the
+   * SignalK installation config tree** (typically `~/.signalk/`).
+   * Distinct from `app.getDataDirPath()` which SignalK rewrites
+   * per-plugin to a sub-directory.  Used by `signalkConfigRootMount`.
+   * Optional in this interface because the upstream `@signalk/server-api`
+   * type doesn't declare it; the actual server runtime always provides it.
+   */
+  config?: {
+    configPath?: string;
+    [key: string]: unknown;
+  };
   handleMessage?: (pluginId: string, delta: unknown) => void;
   /**
    * Persist the plugin's configuration to plugin-config-data/signalk-container.json.
@@ -99,6 +111,11 @@ module.exports = (app: App) => {
   // `pendingDataSource` collapses concurrent resolutions onto one inspect.
   let cachedDataSource: string | null = null;
   let pendingDataSource: Promise<string> | null = null;
+  // Same shape, but for `signalkConfigRootMount` → resolves the host
+  // backing of `app.config.configPath` (the SignalK config root),
+  // distinct from the plugin-private dataDir.
+  let cachedConfigRootSource: string | null = null;
+  let pendingConfigRootSource: Promise<string> | null = null;
   // Cached SignalK user-defined networks (resolved once, cleared on stop).
   // `pendingNetworks` collapses concurrent resolutions onto one inspect.
   // `undefined` = not yet resolved; `null` = resolved but inspect failed
@@ -155,6 +172,33 @@ module.exports = (app: App) => {
       return resolved;
     } finally {
       if (pendingDataSource === inflight) pendingDataSource = null;
+    }
+  }
+  async function ensureCachedConfigRootSource(): Promise<string> {
+    if (cachedConfigRootSource) return cachedConfigRootSource;
+    if (pendingConfigRootSource) return pendingConfigRootSource;
+    if (!runtimeInfo) throw new Error("No container runtime available");
+    const configPath = app.config?.configPath;
+    if (!configPath) {
+      throw new Error(
+        "signalkConfigRootMount requires app.config.configPath, which is unavailable",
+      );
+    }
+    const inflight = resolveSignalkDataSource(
+      configPath,
+      runtimeInfo,
+      app.debug,
+    );
+    pendingConfigRootSource = inflight;
+    try {
+      const resolved = await pendingConfigRootSource;
+      if (pendingConfigRootSource === inflight) {
+        cachedConfigRootSource = resolved;
+        app.debug(`signalkConfigRootMount resolved: ${cachedConfigRootSource}`);
+      }
+      return resolved;
+    } finally {
+      if (pendingConfigRootSource === inflight) pendingConfigRootSource = null;
     }
   }
   /**
@@ -346,6 +390,29 @@ module.exports = (app: App) => {
           volumes: {
             ...rest.volumes,
             [signalkDataMount]: source,
+          },
+        };
+      }
+
+      // Resolve signalkConfigRootMount → inject into volumes. Same pattern
+      // as signalkDataMount above, but resolves through app.config.configPath
+      // (the SignalK installation root) instead of app.getDataDirPath() (the
+      // plugin-private subdir). See the field's JSDoc in types.ts for when
+      // to use which.
+      if (config.signalkConfigRootMount) {
+        const source = await ensureCachedConfigRootSource();
+        const { signalkConfigRootMount, ...rest } = config;
+        const existing = rest.volumes?.[signalkConfigRootMount];
+        if (existing && existing !== source) {
+          app.debug(
+            `ensureRunning(${name}): signalkConfigRootMount '${signalkConfigRootMount}' overrides explicit volumes entry '${existing}' with resolved source '${source}'`,
+          );
+        }
+        config = {
+          ...rest,
+          volumes: {
+            ...rest.volumes,
+            [signalkConfigRootMount]: source,
           },
         };
       }
@@ -1258,6 +1325,8 @@ module.exports = (app: App) => {
       currentConfig = null;
       cachedDataSource = null;
       pendingDataSource = null;
+      cachedConfigRootSource = null;
+      pendingConfigRootSource = null;
       cachedSignalkNetworks = undefined;
       pendingNetworks = null;
       portAddressMap.clear();
