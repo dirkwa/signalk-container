@@ -35,6 +35,19 @@ export interface ContainerRuntimeInfo {
 
 export type ContainerState = "running" | "stopped" | "missing" | "no-runtime";
 
+/**
+ * Drop-in shape for a managed container. Pass the same `ContainerConfig`
+ * to `ensureRunning` on every plugin start; signalk-container compares
+ * the requested config against the live container's effective state and
+ * automatically removes + recreates when any of `image`, `tag`, `command`,
+ * `networkMode`, `env`, `volumes`, or `ports` differ. `resources` changes
+ * are applied live where possible (see `updateResources`); the hash-file
+ * pattern from earlier guides is no longer needed.
+ *
+ * One footgun: if you set `command`, set it consistently across calls.
+ * Toggling between an explicit `command` and `undefined` will compare
+ * `undefined` against the image's baked `CMD` and look like drift.
+ */
 export interface ContainerConfig {
   image: string;
   tag: string;
