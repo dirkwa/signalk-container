@@ -13,7 +13,8 @@
   "signalk-plugin-enabled-by-default": true,
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc && webpack",
+    "clean": "rm -rf dist",
+    "build": "npm run clean && tsc && webpack",
     "build:config": "webpack",
     "watch": "tsc --watch",
     "prettier": "prettier --write .",
