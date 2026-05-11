@@ -93,6 +93,14 @@ module.exports = (app: App) => {
   const healthTimers = new Map<string, NodeJS.Timeout>();
   let updateService: UpdateService | null = null;
 
+  // Resolved by start()'s IIFE once detectRuntime has settled (success or
+  // failure). Consumers `await api.whenReady()` to replace the manual
+  // "while (manager && !getRuntime()) await sleep(...)" polling pattern.
+  let resolveReady: () => void = () => {};
+  const readyPromise = new Promise<void>((r) => {
+    resolveReady = r;
+  });
+
   /**
    * Per-container state for resource limit management:
    *   lastConfigs        — the most recent ContainerConfig passed to
@@ -343,6 +351,10 @@ module.exports = (app: App) => {
   const api: ContainerManagerApi = {
     getRuntime() {
       return runtimeInfo;
+    },
+
+    whenReady() {
+      return readyPromise;
     },
 
     async pullImage(image: string, onProgress?: (msg: string) => void) {
@@ -1325,6 +1337,7 @@ module.exports = (app: App) => {
               "you must mount the host's docker socket and binary. See README."
             : "No container runtime found. Install Podman: sudo apt install podman";
           app.setPluginError(msg);
+          resolveReady();
           return;
         }
 
@@ -1351,10 +1364,12 @@ module.exports = (app: App) => {
         }
 
         app.debug("Container manager started");
+        resolveReady();
       })().catch((err) => {
         app.setPluginError(
           `Startup failed: ${err instanceof Error ? err.message : String(err)}`,
         );
+        resolveReady();
       });
     },
 
