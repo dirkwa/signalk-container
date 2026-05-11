@@ -88,6 +88,24 @@ describe("collectRecoveredVolumes — aborted → recovered", () => {
   });
 });
 
+describe("collectRecoveredVolumes — source is taken from current kept, not prior", () => {
+  it("reports the current source when the user changed it between calls", () => {
+    // User had /usb -> /media/USB-1 missing on last call; now the
+    // config has /usb -> /media/USB-2 and that path exists.
+    // Recovery should report /media/USB-2, not the stale /media/USB-1.
+    const r = collectRecoveredVolumes(
+      {
+        skipped: [{ containerPath: "/usb", source: "/media/USB-1" }],
+        aborted: [],
+      },
+      [],
+      [],
+      { "/usb": "/media/USB-2" },
+    );
+    assert.deepEqual(r, [{ containerPath: "/usb", source: "/media/USB-2" }]);
+  });
+});
+
 describe("collectRecoveredVolumes — mixed prior state", () => {
   it("recovers from both skipped and aborted in the same call", () => {
     const r = collectRecoveredVolumes(
