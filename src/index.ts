@@ -99,10 +99,13 @@ module.exports = (app: App) => {
   // start()'s IIFE once detectRuntime has settled (success or failure).
   // Consumers `await api.whenReady()` to replace the manual
   // "while (Date.now() < deadline && !getRuntime()) await sleep(1000)"
-  // polling pattern.
-  let resolveReady: () => void = () => {};
-  let readyPromise = new Promise<void>((r) => {
-    resolveReady = r;
+  // polling pattern. The resolver itself is a per-start local captured
+  // by the IIFE — see start() — so overlapping start() calls (in
+  // theory possible if SignalK ever re-enters) can't fire each
+  // other's promises.
+  let readyPromise = new Promise<void>(() => {
+    // initial placeholder — replaced before whenReady() ever resolves
+    // because start() reassigns readyPromise first thing.
   });
 
   /**
@@ -1258,9 +1261,13 @@ module.exports = (app: App) => {
       // Fresh whenReady() promise per start — see comment by the
       // declaration above. Reset before the async IIFE so any pending
       // readers either see the new promise or the resolved old one,
-      // never a stale promise pointing at the prior run.
+      // never a stale promise pointing at the prior run. The resolver
+      // is captured into `localResolveReady` (closed over by the IIFE
+      // below) so overlapping start() calls can't fire each other's
+      // promises.
+      let localResolveReady: () => void = () => {};
       readyPromise = new Promise<void>((r) => {
-        resolveReady = r;
+        localResolveReady = r;
       });
 
       // Cache the full config object so recordOverride() can rebuild it
@@ -1349,7 +1356,7 @@ module.exports = (app: App) => {
               "you must mount the host's docker socket and binary. See README."
             : "No container runtime found. Install Podman: sudo apt install podman";
           app.setPluginError(msg);
-          resolveReady();
+          localResolveReady();
           return;
         }
 
@@ -1376,12 +1383,12 @@ module.exports = (app: App) => {
         }
 
         app.debug("Container manager started");
-        resolveReady();
+        localResolveReady();
       })().catch((err) => {
         app.setPluginError(
           `Startup failed: ${err instanceof Error ? err.message : String(err)}`,
         );
-        resolveReady();
+        localResolveReady();
       });
     },
 
