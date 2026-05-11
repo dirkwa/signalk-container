@@ -6,7 +6,7 @@ Instead of each plugin implementing its own container orchestration, they delega
 
 ## Features
 
-- **Runtime detection** -- Podman preferred, Docker fallback, podman-shim aware
+- **Runtime detection** -- Podman preferred, Docker fallback, podman-shim aware. Consumer plugins `await containers.whenReady()` once instead of polling in a loop — resolves when the probe settles in either direction.
 - **Container lifecycle** -- pull, create, start, stop, remove with `sk-` prefix naming
 - **Automatic config-drift recreation** -- `ensureRunning` compares the requested `ContainerConfig` against the live container on every call. If `image`, `tag`, `command`, `networkMode`, `env`, `volumes`, or `ports` differ, the container is removed and recreated transparently. Consumer plugins no longer need a per-plugin hash file to detect "config changed since last start." See the [developer guide](doc/plugin-developer-guide.md#container-config-changes).
 - **One-shot jobs** -- run containers for batch tasks (export, conversion, etc.)
@@ -71,7 +71,16 @@ if (!containers) {
   return;
 }
 
-// Start a long-running service container
+// Wait for runtime detection to settle, then verify a runtime was found.
+await containers.whenReady();
+if (!containers.getRuntime()) {
+  app.setPluginError("No container runtime detected");
+  return;
+}
+
+// Start a long-running service container. ensureRunning compares this
+// config against the live container and recreates on drift — no per-
+// plugin hash file or remove() dance needed.
 await containers.ensureRunning("my-service", {
   image: "myorg/myimage",
   tag: "latest",
@@ -105,6 +114,7 @@ See [doc/plugin-developer-guide.md](doc/plugin-developer-guide.md) for the full 
 | Method                                  | Description                                                                                                                                                   |
 | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `getRuntime()`                          | Returns `{ runtime, version, isPodmanDockerShim }` or `null`                                                                                                  |
+| `whenReady()`                           | Resolves once runtime detection settles (success OR failure). Replaces the polling-loop pattern; check `getRuntime()` after the await                         |
 | `pullImage(image, onProgress?)`         | Pull a container image (auto-qualifies for Podman)                                                                                                            |
 | `imageExists(image)`                    | Check if image exists locally                                                                                                                                 |
 | `getImageDigest(imageOrContainer)`      | Local image ID (sha256) for an image:tag or container                                                                                                         |

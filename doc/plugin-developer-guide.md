@@ -12,6 +12,17 @@ if (!containers) {
   return;
 }
 
+// Wait for runtime detection to settle (podman vs docker probe is async).
+await containers.whenReady();
+if (!containers.getRuntime()) {
+  app.setPluginError("No container runtime detected");
+  return;
+}
+
+// ensureRunning is the only call you need on every plugin start.
+// signalk-container compares this config against the live container and
+// removes + recreates automatically when anything has drifted — no
+// hash-file dance required.
 await containers.ensureRunning("my-service", {
   image: "myorg/myimage",
   tag: "latest",
@@ -112,23 +123,23 @@ stop() {
 
 ### Startup order is not guaranteed
 
-Plugins start in parallel. Your plugin may start before signalk-container has finished detecting the runtime. You must poll and wait:
+Plugins start in parallel. signalk-container exposes the API object on `globalThis` **synchronously** in `start()`, but it then probes the host for podman vs docker asynchronously — so `getRuntime()` returns `null` for a short window after the manager appears. Wait for that probe to settle with `whenReady()`:
 
 ```typescript
 async function asyncStart(config) {
-  let containers;
-  const deadline = Date.now() + 30000;
-  while (Date.now() < deadline) {
-    containers = (globalThis as any).__signalk_containerManager;
-    // containerManager is exposed immediately, but runtime detection
-    // is async. Wait until getRuntime() returns non-null.
-    if (containers && containers.getRuntime()) break;
-    app.setPluginStatus("Waiting for container runtime...");
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+  const containers = (globalThis as any).__signalk_containerManager;
+  if (!containers) {
+    app.setPluginError("signalk-container plugin not available");
+    return;
   }
 
-  if (!containers || !containers.getRuntime()) {
-    app.setPluginError("signalk-container plugin not available");
+  app.setPluginStatus("Waiting for container runtime...");
+  await containers.whenReady();
+
+  // whenReady resolves once detection settles in either direction —
+  // success OR failure. Check getRuntime() to tell them apart.
+  if (!containers.getRuntime()) {
+    app.setPluginError("No container runtime detected (podman/docker missing)");
     return;
   }
 
@@ -136,7 +147,7 @@ async function asyncStart(config) {
 }
 ```
 
-The key insight: signalk-container exposes the API object on `globalThis` **synchronously** in `start()`, but `getRuntime()` returns `null` until the async runtime detection completes. Always check both.
+`whenReady()` replaces the older `while (Date.now() < deadline) { … }` polling pattern. Available in signalk-container 1.6.0 and later. If you need to support older versions of signalk-container, pin your `peerDependencies` to `>=1.6.0` rather than maintaining a fallback polling loop.
 
 ---
 
@@ -217,9 +228,24 @@ Returns detected runtime info or `null` if detection hasn't completed.
 { runtime: 'podman', version: '5.4.2', isPodmanDockerShim: false }
 ```
 
+### `whenReady(): Promise<void>`
+
+Resolves once runtime detection has settled, in either direction (success OR failure). Use this once at plugin start instead of polling `getRuntime()` in a `while` loop. After it resolves, call `getRuntime()` to distinguish "detection succeeded" from "no runtime found":
+
+```typescript
+await containers.whenReady();
+if (!containers.getRuntime()) {
+  app.setPluginError("No container runtime detected");
+  return;
+}
+// Safe to call ensureRunning / runJob / etc.
+```
+
+Available in signalk-container 1.6.0+.
+
 ### `ensureRunning(name, config, options?): Promise<void>`
 
-Creates and starts a container if not already running. No-op if already running.
+Creates and starts a container if missing; starts it if stopped. If the container is already running OR stopped with **drifted config** (image, tag, command, networkMode, env, volumes, or ports differ from the requested config), it is removed and recreated transparently. Resource limits changes are applied live where possible — see [Resource Limits](#resource-limits).
 
 ```typescript
 await containers.ensureRunning("my-db", {
@@ -312,7 +338,7 @@ Filters by the `sk-job-owner` label written by `runJob` when the caller provided
 
 Idempotent: if there are no orphans, returns `{ reaped: [] }`. Available in signalk-container >= 1.3.0.
 
-Typical wiring in the consumer plugin's `start()`, after the manager has been resolved via the polling pattern shown in the "Startup order" section above:
+Typical wiring in the consumer plugin's `start()`, after the manager has been resolved via the `whenReady()` pattern shown in the "Startup order" section above:
 
 ```typescript
 const containers = (globalThis as any).__signalk_containerManager;
@@ -543,7 +569,7 @@ When a check transitions from "up-to-date" to "update-available", the service em
 
 ### Critical rules
 
-1. **`register()` is safe to call before runtime is ready.** It's pure bookkeeping — the scheduler defers the first tick until `getRuntime()` returns non-null. Your plugin still must poll `getRuntime()` before doing other container operations, but the registration call itself is safe.
+1. **`register()` is safe to call before runtime is ready.** It's pure bookkeeping — the scheduler defers the first tick until `getRuntime()` returns non-null. Your plugin still must `await containers.whenReady()` before doing other container operations, but the registration call itself is safe.
 2. **`currentTag` MUST be a function**, not a captured value. The user can edit the version in plugin options without restarting your plugin, and `currentTag` is called fresh on every check.
 3. **You must `unregister()` in your plugin's `stop()`**. Otherwise stale registrations linger.
 4. **If signalk-container restarts, your registration is lost.** Your plugin must re-poll and re-register, just like with `ensureRunning`.
@@ -898,7 +924,7 @@ See the README's "Running Signal K in a Container" section for full details on s
 | `async start()` without catch                                   | Silent failure, no status                      | Sync `start()` + `asyncStart().catch()`                                                        |
 | `app.setPluginStatus(id, msg)`                                  | Status shows plugin id as message              | `app.setPluginStatus(msg)` (one arg)                                                           |
 | Setting property on `app`                                       | Other plugins can't see it                     | Use `globalThis.__signalk_xxx`                                                                 |
-| Not waiting for runtime detection                               | `getRuntime()` returns null                    | Poll until `getRuntime()` is non-null                                                          |
+| Not waiting for runtime detection                               | `getRuntime()` returns null                    | `await containers.whenReady()` then check `getRuntime()` (signalk-container 1.6.0+)            |
 | Short Docker image names with Podman                            | Pull fails with "short-name did not resolve"   | signalk-container handles this automatically                                                   |
 | `DEDUP ENABLED UPSERT KEYS` in QuestDB DDL                      | Table creation fails                           | `DEDUP UPSERT KEYS` (no ENABLED)                                                               |
 | Committing webpack `public/` output                             | CI fails with "untracked files"                | Add `public/*.js` to `.gitignore`                                                              |
