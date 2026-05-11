@@ -446,12 +446,16 @@ export interface EnsureRunningOptions extends HealthCheckOptions {
    *     to include the mount. Plugins can clear any
    *     "waiting for resource" status.
    *
-   * Handler errors are caught and logged at error level; they do
-   * not affect container lifecycle. Keep handlers fast and
-   * side-effect-only (set plugin status, log, etc.) — they are
-   * called synchronously in the lifecycle hot path.
+   * Synchronous and asynchronous handlers are both supported.
+   * `ensureRunning` does not await an async handler — the call fires
+   * and forgets, and its eventual return value is ignored. Both
+   * synchronous throws and rejected promises are caught and logged
+   * at error level; they do not affect container lifecycle.
+   *
+   * Keep handlers fast and side-effect-only (set plugin status, log,
+   * etc.) — they are invoked in the lifecycle hot path.
    */
-  onVolumeIssue?: (event: VolumeIssue) => void;
+  onVolumeIssue?: (event: VolumeIssue) => void | Promise<void>;
 }
 
 export interface ContainerManagerApi {

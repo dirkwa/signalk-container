@@ -234,7 +234,7 @@ await containers.ensureRunning(
 
 Named volumes (sources without a leading `/`) always pass through regardless of `ifMissing` — the runtime owns their lifecycle.
 
-`onVolumeIssue` handler errors are caught and logged at error level; they cannot break container lifecycle. Keep handlers fast and side-effect-only (set plugin status, log) — they are called synchronously in the lifecycle hot path.
+`onVolumeIssue` accepts either a synchronous handler or an `async` one. signalk-container fires the call but does not await it; both synchronous throws and rejected promises are caught and logged at error level so handler bugs cannot break container lifecycle. Keep handlers fast and side-effect-only (set plugin status, log).
 
 ---
 
@@ -831,7 +831,7 @@ interface VolumeIssue {
 interface EnsureRunningOptions {
   healthCheck?: () => Promise<boolean>;
   onUnhealthy?: (name: string, error: string) => void;
-  onVolumeIssue?: (event: VolumeIssue) => void;
+  onVolumeIssue?: (event: VolumeIssue) => void | Promise<void>;
 }
 interface ContainerManagerApi {
   getRuntime: () => { runtime: string; version: string } | null;
