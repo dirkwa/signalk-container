@@ -2,6 +2,11 @@ language: en-US
 
 reviews:
   profile: assertive
+  # dist/ is the TS+webpack build output; checked in for the App Store
+  # install path, but never authored. Exclude here so the review engine
+  # never opens it — the prose note below documents the same intent.
+  path_filters:
+    - "!dist/**"
   auto_review:
     enabled: true
     drafts: false
@@ -138,8 +143,6 @@ reviews:
         ## What NOT to flag
 
         Do not flag the following — they are intentional:
-        - The `dist/` directory is generated; do not request edits to
-          files under `dist/`.
         - Single-character variable names inside Go-template format
           strings (e.g. `{{.Config.Image}}`). These are runtime syntax,
           not JS code.
