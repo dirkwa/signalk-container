@@ -838,6 +838,38 @@ export async function ensureRunning(
   const fullName = prefixedName(name);
   const imageRef = qualifyImage(`${config.image}:${config.tag}`, runtime);
 
+  // Drift detection is needed for both "running" and "stopped" — a stopped
+  // container with stale env/volumes/ports/command would otherwise be
+  // re-started with the OLD config. Inspect works on both states.
+  const checkAndRecreateOnDrift = async (
+    contextLabel: string,
+  ): Promise<boolean> => {
+    const live = await getLiveContainerConfig(runtime, name, exec);
+    if (!live) {
+      debug(
+        `Container ${fullName} ${contextLabel} (could not inspect for drift)`,
+      );
+      return false;
+    }
+    const { drifted } = diffContainerConfig(config, live, runtime, prior);
+    if (drifted.length === 0) return false;
+    debug(
+      `Container ${fullName} config drift detected (${drifted.join(", ")}); recreating`,
+    );
+    await removeContainer(runtime, name, exec);
+    await ensureRunning(
+      runtime,
+      name,
+      config,
+      debug,
+      options,
+      exec,
+      prior,
+      true,
+    );
+    return true;
+  };
+
   switch (state) {
     case "running": {
       if (_postRecreate) {
@@ -848,35 +880,25 @@ export async function ensureRunning(
         );
         return;
       }
-      const live = await getLiveContainerConfig(runtime, name, exec);
-      if (!live) {
-        debug(
-          `Container ${fullName} already running (could not inspect for drift)`,
-        );
-        return;
-      }
-      const { drifted } = diffContainerConfig(config, live, runtime, prior);
-      if (drifted.length === 0) {
-        debug(`Container ${fullName} already running`);
-        return;
-      }
-      debug(
-        `Container ${fullName} config drift detected (${drifted.join(", ")}); recreating`,
-      );
-      await removeContainer(runtime, name, exec);
-      return ensureRunning(
-        runtime,
-        name,
-        config,
-        debug,
-        options,
-        exec,
-        prior,
-        true,
-      );
+      if (await checkAndRecreateOnDrift("already running")) return;
+      debug(`Container ${fullName} already running`);
+      return;
     }
 
     case "stopped": {
+      if (_postRecreate) {
+        // Post-removeContainer state came back as "stopped" — race or
+        // restart-policy interaction. Don't recurse; just start it.
+        debug(
+          `Container ${fullName} unexpectedly stopped after recreate; starting without diff`,
+        );
+        const startResult = await exec(runtime, ["start", fullName]);
+        if (startResult.exitCode !== 0) {
+          throw new Error(`Failed to start ${fullName}: ${startResult.stderr}`);
+        }
+        return;
+      }
+      if (await checkAndRecreateOnDrift("stopped")) return;
       debug(`Starting stopped container ${fullName}`);
       const startResult = await exec(runtime, ["start", fullName]);
       if (startResult.exitCode !== 0) {
