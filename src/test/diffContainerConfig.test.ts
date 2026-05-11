@@ -353,3 +353,87 @@ describe("diffContainerConfig — multi-field drift", () => {
     assert.ok(drifted.includes("volumes"));
   });
 });
+
+describe("diffContainerConfig — unset detection via prior config", () => {
+  it("flags command drift when prior had command and requested doesn't", () => {
+    const { drifted } = diffContainerConfig(
+      reqBase(), // command undefined
+      liveBase({ command: ["sleep", "60"] }), // image runs whatever was set last
+      docker,
+      reqBase({ command: ["sleep", "60"] }), // prior had explicit command
+    );
+    assert.ok(drifted.includes("command"));
+  });
+
+  it("does NOT flag command drift when neither prior nor requested set command", () => {
+    const { drifted } = diffContainerConfig(
+      reqBase(),
+      liveBase({ command: ["/app/bin/run.sh"] }), // image-baked CMD
+      docker,
+      reqBase(), // prior also unset
+    );
+    assert.ok(!drifted.includes("command"));
+  });
+
+  it("flags env drift when prior set a key that is now removed from requested", () => {
+    const { drifted } = diffContainerConfig(
+      reqBase({ env: { KEEP: "1" } }),
+      liveBase({
+        env: new Map([
+          ["KEEP", "1"],
+          ["DROPPED", "old"],
+        ]),
+      }),
+      docker,
+      reqBase({ env: { KEEP: "1", DROPPED: "old" } }),
+    );
+    assert.ok(drifted.includes("env"));
+  });
+
+  it("does NOT flag env drift when image-baked keys are absent from prior AND requested", () => {
+    const { drifted } = diffContainerConfig(
+      reqBase({ env: { MY_FLAG: "on" } }),
+      liveBase({
+        env: new Map([
+          ["MY_FLAG", "on"],
+          ["PATH", "/usr/bin"], // image-baked, never ours
+          ["JAVA_HOME", "/opt/java"], // image-baked, never ours
+        ]),
+      }),
+      docker,
+      reqBase({ env: { MY_FLAG: "on" } }), // prior matches requested
+    );
+    assert.ok(!drifted.includes("env"));
+  });
+
+  it("flags env drift via positive change AND unset in same call", () => {
+    const { drifted } = diffContainerConfig(
+      reqBase({ env: { CHANGED: "new" } }),
+      liveBase({
+        env: new Map([
+          ["CHANGED", "old"],
+          ["DROPPED", "x"],
+        ]),
+      }),
+      docker,
+      reqBase({ env: { CHANGED: "old", DROPPED: "x" } }),
+    );
+    assert.ok(drifted.includes("env"));
+  });
+
+  it("works without prior — undefined prior falls back to today's behavior", () => {
+    // No prior → only positive drift detectable. Removed env keys not flagged.
+    const { drifted } = diffContainerConfig(
+      reqBase({ env: { ONE: "1" } }),
+      liveBase({
+        env: new Map([
+          ["ONE", "1"],
+          ["GHOST", "x"], // never explicitly tracked, but no prior to compare
+        ]),
+      }),
+      docker,
+      // prior omitted
+    );
+    assert.ok(!drifted.includes("env"));
+  });
+});

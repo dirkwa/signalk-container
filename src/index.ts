@@ -641,6 +641,10 @@ module.exports = (app: App) => {
         resources: filteredMerged,
       };
 
+      // Capture the prior call's config before overwriting so the diff
+      // inside ensureRunning can detect "unset" drift (env key removed,
+      // command previously set and now undefined). undefined on first call.
+      const priorConfig = lastConfigs.get(name);
       // Cache for later updateResources() recreate-fallback path.
       lastConfigs.set(name, effectiveConfig);
       effectiveResources.set(name, filteredMerged);
@@ -652,6 +656,8 @@ module.exports = (app: App) => {
           effectiveConfig,
           (msg) => app.debug(msg),
           options,
+          undefined,
+          priorConfig,
         );
       } catch (err) {
         // Release any process-local port reservations so the next attempt

@@ -636,13 +636,20 @@ function bindingsEqual(a: PortBinding[], b: PortBinding[]): boolean {
  * Field semantics:
  *   - image+tag: tag-string equality only, never digest. Update detection
  *     for floating tags (`:latest` digest drift) is the update service's job.
- *   - command: skipped if `requested.command === undefined` — comparing
- *     against the image's baked `CMD` would falsely flag every container
- *     created without an explicit override.
+ *   - command: explicit drift when `requested.command` is set and differs
+ *     from `live.command`. When `requested.command` is undefined, drift is
+ *     reported only if a `prior.command` was set (i.e. the user is now
+ *     unsetting it). Without a `prior`, an undefined `requested.command`
+ *     can't be told apart from "image's baked CMD" so we skip — the
+ *     wrapper's prior-config cache (`lastConfigs`) closes that loop on the
+ *     second-and-later calls within a single signalk-container lifetime.
  *   - networkMode: runtime defaults (`bridge`, `slirp4netns`, etc.) are
  *     normalized to `""` and compared as equivalent to requested undefined.
- *   - env: only requested keys are checked. Image-baked env keys not in
- *     `requested.env` are ignored (they're not "drift" — they were never ours).
+ *   - env: requested keys must match live values. Additionally, any key
+ *     present in `prior.env` but absent from `requested.env` is treated
+ *     as drift (the user is unsetting it). Image-baked env keys not in
+ *     either `requested.env` or `prior.env` are ignored — they were never
+ *     ours.
  *   - volumes: trailing slashes stripped on both sides; `(host, container)`
  *     tuples compared as a Map keyed by container path. Live binds have
  *     their `:Z`/`:ro` flags already stripped by `getLiveContainerConfig`.
@@ -653,6 +660,7 @@ export function diffContainerConfig(
   requested: ContainerConfig,
   live: LiveContainerConfig,
   runtime: ContainerRuntimeInfo,
+  prior?: ContainerConfig,
 ): { drifted: string[] } {
   const drifted: string[] = [];
 
@@ -668,6 +676,10 @@ export function diffContainerConfig(
     if (JSON.stringify(requested.command) !== JSON.stringify(liveCmd)) {
       drifted.push("command");
     }
+  } else if (prior?.command !== undefined) {
+    // Unset detection: the user previously set command and now wants the
+    // image default back. Recreate so the runtime drops the override.
+    drifted.push("command");
   }
 
   if (
@@ -677,14 +689,27 @@ export function diffContainerConfig(
     drifted.push("networkMode");
   }
 
+  let envDrift = false;
   if (requested.env) {
     for (const [key, value] of Object.entries(requested.env)) {
       if (live.env.get(key) !== value) {
-        drifted.push("env");
+        envDrift = true;
         break;
       }
     }
   }
+  // Unset detection: any key we previously set that the user is now
+  // dropping should force a recreate so the runtime forgets the override.
+  // Image-baked keys (in live.env but never in prior.env) stay ignored.
+  if (!envDrift && prior?.env) {
+    for (const key of Object.keys(prior.env)) {
+      if (!requested.env || !(key in requested.env)) {
+        envDrift = true;
+        break;
+      }
+    }
+  }
+  if (envDrift) drifted.push("env");
 
   // Volumes: build canonical Map<containerPath, hostPath> for each side.
   const requestedVolumes = new Map<string, string>();
@@ -798,6 +823,15 @@ export async function ensureRunning(
 
   options?: HealthCheckOptions,
   exec: ExecFn = execRuntime,
+  /**
+   * Prior `ContainerConfig` from the previous `ensureRunning` call within
+   * this signalk-container lifetime, if any. Used to detect "unset" drift
+   * — env keys removed, `command` previously set and now undefined. The
+   * wrapper in `index.ts` reads from its `lastConfigs` cache before
+   * overwriting it; on the first call (or after a Signal K restart) this
+   * will be undefined and only positive drift is detected.
+   */
+  prior?: ContainerConfig,
   _postRecreate: boolean = false,
 ): Promise<void> {
   const state = await getContainerState(runtime, name, exec);
@@ -821,7 +855,7 @@ export async function ensureRunning(
         );
         return;
       }
-      const { drifted } = diffContainerConfig(config, live, runtime);
+      const { drifted } = diffContainerConfig(config, live, runtime, prior);
       if (drifted.length === 0) {
         debug(`Container ${fullName} already running`);
         return;
@@ -830,7 +864,16 @@ export async function ensureRunning(
         `Container ${fullName} config drift detected (${drifted.join(", ")}); recreating`,
       );
       await removeContainer(runtime, name, exec);
-      return ensureRunning(runtime, name, config, debug, options, exec, true);
+      return ensureRunning(
+        runtime,
+        name,
+        config,
+        debug,
+        options,
+        exec,
+        prior,
+        true,
+      );
     }
 
     case "stopped": {
