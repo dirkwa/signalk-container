@@ -334,6 +334,16 @@ export interface HealthCheckOptions {
 
 export interface ContainerManagerApi {
   getRuntime(): ContainerRuntimeInfo | null;
+  /**
+   * Resolves once runtime detection has settled (success OR failure).
+   * `getRuntime()` is guaranteed non-null only when this resolves AND
+   * runtime detection succeeded — callers should still re-check
+   * `getRuntime()` after the await to distinguish "detection failed" from
+   * "still in flight". Lets consumers replace the
+   * `while (... && getRuntime()) await sleep(1000)` polling pattern
+   * with a single `await containers.whenReady()`.
+   */
+  whenReady(): Promise<void>;
   pullImage(image: string, onProgress?: (msg: string) => void): Promise<void>;
   imageExists(image: string): Promise<boolean>;
   /**
