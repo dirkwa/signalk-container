@@ -4,7 +4,7 @@ reviews:
   profile: assertive
   # dist/ is the TS+webpack build output; checked in for the App Store
   # install path, but never authored. Exclude here so the review engine
-  # never opens it — the prose note below documents the same intent.
+  # never opens it.
   path_filters:
     - "!dist/**"
   auto_review:
