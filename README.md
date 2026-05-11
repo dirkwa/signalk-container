@@ -8,6 +8,7 @@ Instead of each plugin implementing its own container orchestration, they delega
 
 - **Runtime detection** -- Podman preferred, Docker fallback, podman-shim aware
 - **Container lifecycle** -- pull, create, start, stop, remove with `sk-` prefix naming
+- **Automatic config-drift recreation** -- `ensureRunning` compares the requested `ContainerConfig` against the live container on every call. If `image`, `tag`, `command`, `networkMode`, `env`, `volumes`, or `ports` differ, the container is removed and recreated transparently. Consumer plugins no longer need a per-plugin hash file to detect "config changed since last start." See the [developer guide](doc/plugin-developer-guide.md#container-config-changes).
 - **One-shot jobs** -- run containers for batch tasks (export, conversion, etc.)
 - **Update detection** -- centralized "is there a newer image?" service for all consumer plugins. Auto-detects semver vs floating tags (`:latest`, `:main`), offline-tolerant with persistent cache, emits Signal K notifications, visible inline in the config panel. See the [developer guide](doc/plugin-developer-guide.md#update-detection).
 - **Resource limits editor** -- interactive UI in the config panel for setting CPU/memory/PID caps per container. Values are applied live via `podman update` when possible (no downtime), falls back to recreate when needed. Stored overrides are minimized against the consumer plugin's defaults so a future default bump flows through automatically. See the [developer guide](doc/plugin-developer-guide.md#resource-limits).
@@ -107,7 +108,7 @@ See [doc/plugin-developer-guide.md](doc/plugin-developer-guide.md) for the full 
 | `pullImage(image, onProgress?)`         | Pull a container image (auto-qualifies for Podman)                                                                                                            |
 | `imageExists(image)`                    | Check if image exists locally                                                                                                                                 |
 | `getImageDigest(imageOrContainer)`      | Local image ID (sha256) for an image:tag or container                                                                                                         |
-| `ensureRunning(name, config, options?)` | Create and start container if not running                                                                                                                     |
+| `ensureRunning(name, config, options?)` | Create and start container if not running; auto-recreates on config drift across `image`, `tag`, `command`, `networkMode`, `env`, `volumes`, `ports`          |
 | `start(name)`                           | Start a stopped container                                                                                                                                     |
 | `stop(name)`                            | Stop a running container                                                                                                                                      |
 | `remove(name)`                          | Stop and remove a container                                                                                                                                   |

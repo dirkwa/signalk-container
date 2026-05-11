@@ -158,46 +158,24 @@ All containers are prefixed with `sk-` (e.g., `sk-signalk-questdb`). This avoids
 
 ## Container Config Changes
 
-When your plugin's configuration changes (compression, ports, image version, etc.), the container needs to be recreated because Docker/Podman env vars are set at container creation time.
-
-**Pattern: hash-based recreation**
+Just call `ensureRunning(name, config)` whenever your plugin starts or its configuration changes. signalk-container compares the requested config against the live container's effective state and automatically removes + recreates when any of `image`, `tag`, `command`, `networkMode`, `env`, `volumes`, or `ports` differ. `resources` changes are applied live where possible (see [Resource Limits](#resource-limits) below).
 
 ```typescript
-const containerConfig = {
+await containers.ensureRunning("my-service", {
   image: "questdb/questdb",
   tag: config.version,
   ports: { "9000/tcp": "127.0.0.1:9000" },
   volumes: { "/data": app.getDataDirPath() },
   env: { MY_COMPRESSION: config.compression },
   restart: "unless-stopped",
-};
-
-// Hash the config to detect changes
-const configHash = JSON.stringify({
-  tag: containerConfig.tag,
-  ports: containerConfig.ports,
-  env: containerConfig.env,
 });
-
-const hashFile = `${app.getDataDirPath()}/container-config-hash`;
-let lastHash = "";
-try {
-  lastHash = readFileSync(hashFile, "utf8");
-} catch {
-  /* first run */
-}
-
-const state = await containers.getState("my-service");
-if (state !== "missing" && configHash !== lastHash) {
-  // Config changed — remove and recreate
-  await containers.remove("my-service");
-}
-
-await containers.ensureRunning("my-service", containerConfig);
-writeFileSync(hashFile, configHash);
 ```
 
 Data is safe because volumes live on the host filesystem, not inside the container.
+
+> **One footgun:** if you set `command`, set it consistently across calls. Toggling between an explicit `command` and `undefined` would compare `undefined` against the image's baked `CMD` and look like drift on every call. Either always set `command`, or never set it.
+
+**Removed: hash-file pattern.** Earlier versions of this guide instructed plugins to maintain a `${dataDir}.container-hash` file and call `containers.remove()` themselves on mismatch. That pattern is no longer needed — and was easy to get wrong (each consumer plugin used a different field subset, missing fields the others included). Delete any `container-hash` reads/writes and any `state !== "missing" && hash differs` recreate logic. Restart the consumer plugin once and the central diff will reconcile any drift on the next `ensureRunning` call.
 
 ---
 

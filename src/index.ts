@@ -645,12 +645,6 @@ module.exports = (app: App) => {
       lastConfigs.set(name, effectiveConfig);
       effectiveResources.set(name, filteredMerged);
 
-      // Capture the running container's existing resources BEFORE
-      // calling ensureRunning, so we can detect "already running but
-      // limits differ" (Bug D). If the container is missing,
-      // getLiveResources returns {} and the diff won't trigger.
-      const preLimits = await getLiveResources(runtimeInfo, name);
-
       try {
         await ensureRunning(
           runtimeInfo,
@@ -732,7 +726,13 @@ module.exports = (app: App) => {
       // fire a live update to bring them in line. This is what makes
       // user `containerOverrides` config changes take effect on the
       // next consumer-plugin restart without forcing a recreate.
-      if (!resourceLimitsEqual(preLimits, filteredMerged)) {
+      //
+      // Capture limits AFTER ensureRunning so an internal recreate (drift
+      // detection in ensureRunning recreates the container with
+      // filteredMerged already applied) does not trigger a spurious
+      // tryLiveUpdate against an already-correct container.
+      const postLimits = await getLiveResources(runtimeInfo, name);
+      if (!resourceLimitsEqual(postLimits, filteredMerged)) {
         const fullName = name.startsWith("sk-") ? name : `sk-${name}`;
 
         // Bug E: if any field is being UNSET and it can't be unset
@@ -742,7 +742,7 @@ module.exports = (app: App) => {
         // surprise the consumer plugin. Instead, log a clear warning
         // pointing the user to the explicit recreate path.
         const cannotUnset = fieldsRequiringRecreateForUnset(
-          preLimits,
+          postLimits,
           filteredMerged,
         );
         if (cannotUnset.length > 0) {

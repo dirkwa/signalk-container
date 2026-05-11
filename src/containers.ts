@@ -67,8 +67,9 @@ export function qualifyImage(
 export async function imageExists(
   runtime: ContainerRuntimeInfo,
   image: string,
+  exec: ExecFn = execRuntime,
 ): Promise<boolean> {
-  const result = await execRuntime(runtime, ["image", "inspect", image]);
+  const result = await exec(runtime, ["image", "inspect", image]);
   return result.exitCode === 0;
 }
 
@@ -388,6 +389,357 @@ export async function getActualPortBindings(
   return parsePortBindings(result.stdout.trim());
 }
 
+/**
+ * The recreate-requiring half of a live container's effective config, parsed
+ * from a single `inspect` call. Mirror of the recreate-requiring fields on
+ * `ContainerConfig` after `buildRunArgs` would have rendered them. Resources
+ * have their own `getLiveResources` reader and live-update path.
+ *
+ * `image+tag` come from `.Config.Image` (the as-passed reference like
+ * `questdb/questdb:latest`), not `.Image` (the resolved sha256 digest) —
+ * digest-drift detection is the update service's job (`src/updates/`).
+ */
+export interface LiveContainerConfig {
+  image: string;
+  tag: string;
+  command: string[] | null;
+  networkMode: string;
+  env: Map<string, string>;
+  binds: Array<{ host: string; container: string }>;
+  portBindings: Map<string, PortBinding[]>;
+}
+
+/**
+ * Read the live equivalent of `ContainerConfig`'s recreate-requiring fields
+ * for an already-running container. Returns `null` on inspect failure (the
+ * caller treats that as "can't diff, fall back to early-return" — fail-safe).
+ *
+ * Used by `ensureRunning` to detect drift between the requested config and
+ * what the container was actually created with, so a recreate can fire
+ * automatically instead of silently ignoring the new config until restart.
+ */
+export async function getLiveContainerConfig(
+  runtime: ContainerRuntimeInfo,
+  name: string,
+  exec: ExecFn = execRuntime,
+): Promise<LiveContainerConfig | null> {
+  const fullName = prefixedName(name);
+  // Sentinel between sections — `\x1f` (ASCII unit separator) avoids any
+  // collision with shell-meta or path characters that might appear inside
+  // image refs, network mode names, or JSON payloads.
+  const SEP = "\x1f";
+  const fmt =
+    "{{.Config.Image}}" +
+    SEP +
+    "{{json .Config.Cmd}}" +
+    SEP +
+    "{{.HostConfig.NetworkMode}}" +
+    SEP +
+    "{{json .HostConfig.Binds}}" +
+    SEP +
+    "{{json .Config.Env}}" +
+    SEP +
+    "{{json .HostConfig.PortBindings}}";
+  const result = await exec(runtime, ["inspect", "--format", fmt, fullName]);
+  if (result.exitCode !== 0) return null;
+
+  const parts = result.stdout.split(SEP);
+  if (parts.length !== 6) return null;
+
+  const [rawImage, rawCmd, rawNetworkMode, rawBinds, rawEnv, rawPortBindings] =
+    parts;
+
+  // Split image into image+tag on the LAST colon (registries can carry
+  // ports like `localhost:5000/foo:tag`). If no tag, default to "latest"
+  // — matches what `qualifyImage` would have produced.
+  const imageRef = rawImage.trim();
+  const lastColon = imageRef.lastIndexOf(":");
+  const lastSlash = imageRef.lastIndexOf("/");
+  let image: string;
+  let tag: string;
+  if (lastColon > lastSlash) {
+    image = imageRef.slice(0, lastColon);
+    tag = imageRef.slice(lastColon + 1);
+  } else {
+    image = imageRef;
+    tag = "latest";
+  }
+
+  let command: string[] | null = null;
+  try {
+    const parsed = JSON.parse(rawCmd);
+    if (Array.isArray(parsed)) command = parsed.map((s) => String(s));
+  } catch {
+    // leave null
+  }
+
+  const networkMode = (rawNetworkMode ?? "").trim();
+
+  const binds: Array<{ host: string; container: string }> = [];
+  try {
+    const parsed = JSON.parse(rawBinds);
+    if (Array.isArray(parsed)) {
+      for (const entry of parsed) {
+        if (typeof entry !== "string") continue;
+        // Bind format: `host:container[:flags]`. `volumeArg` adds `:Z` for
+        // podman binds and `:ro` for read-only mounts; strip trailing flags
+        // so the diff compares semantic (host, container) tuples only.
+        // Container path always begins with `/`, so the second-to-last `:`
+        // is the host/container boundary regardless of flags.
+        const segments = entry.split(":");
+        if (segments.length < 2) continue;
+        // Walk backward: keep stripping trailing segments that look like
+        // option flags (Z, z, ro, rw, etc.) until we have exactly host:container.
+        const FLAG_RE = /^[a-zA-Z,]+$/;
+        while (
+          segments.length > 2 &&
+          FLAG_RE.test(segments[segments.length - 1])
+        ) {
+          segments.pop();
+        }
+        if (segments.length < 2) continue;
+        const container = segments.pop() as string;
+        const host = segments.join(":");
+        binds.push({ host, container });
+      }
+    }
+  } catch {
+    // leave empty
+  }
+
+  const env = new Map<string, string>();
+  try {
+    const parsed = JSON.parse(rawEnv);
+    if (Array.isArray(parsed)) {
+      for (const entry of parsed) {
+        if (typeof entry !== "string") continue;
+        const eq = entry.indexOf("=");
+        if (eq < 0) continue;
+        env.set(entry.slice(0, eq), entry.slice(eq + 1));
+      }
+    }
+  } catch {
+    // leave empty
+  }
+
+  const portBindings = parsePortBindingsFromJsonString(rawPortBindings);
+
+  return { image, tag, command, networkMode, env, binds, portBindings };
+}
+
+/**
+ * Wrapper around `parsePortBindings` that keeps the container-port key as
+ * the runtime emits it (`"<port>/tcp"`, `"<port>/udp"`, …) rather than
+ * stripping the protocol. The diff compares full keys so a `9000/tcp` vs
+ * `9000/udp` change is detected.
+ */
+function parsePortBindingsFromJsonString(
+  json: string,
+): Map<string, PortBinding[]> {
+  const out = new Map<string, PortBinding[]>();
+  if (!json || json === "null") return out;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return out;
+  }
+  if (!parsed || typeof parsed !== "object") return out;
+  for (const [key, value] of Object.entries(
+    parsed as Record<string, unknown>,
+  )) {
+    if (!Array.isArray(value) || value.length === 0) continue;
+    const bindings: PortBinding[] = [];
+    for (const entry of value) {
+      if (!entry || typeof entry !== "object") continue;
+      const e = entry as Record<string, unknown>;
+      const hostIp = typeof e["HostIp"] === "string" ? e["HostIp"] : "";
+      const hostPortStr =
+        typeof e["HostPort"] === "string" ? e["HostPort"] : "";
+      const hostPort = Number(hostPortStr);
+      if (!Number.isFinite(hostPort) || hostPort <= 0) continue;
+      bindings.push({ hostIp, hostPort });
+    }
+    if (bindings.length > 0) out.set(key, bindings);
+  }
+  return out;
+}
+
+/**
+ * Network-mode strings that the runtime reports for "no `--network` was
+ * passed". Treated as equivalent to a requested empty/undefined networkMode
+ * during diff. `bridge` is the docker default; `slirp4netns` and `pasta`
+ * are podman rootless defaults; `default` is what docker reports when
+ * `--network=default`.
+ */
+const RUNTIME_DEFAULT_NETWORK_MODES = new Set([
+  "",
+  "default",
+  "bridge",
+  "slirp4netns",
+  "pasta",
+]);
+
+function canonicalNetworkMode(mode: string | undefined): string {
+  const m = (mode ?? "").trim();
+  return RUNTIME_DEFAULT_NETWORK_MODES.has(m) ? "" : m;
+}
+
+function stripTrailingSlash(p: string): string {
+  return p.length > 1 && p.endsWith("/") ? p.slice(0, -1) : p;
+}
+
+function parseRequestedHostBinding(spec: string): {
+  hostIp: string;
+  hostPort: number;
+} | null {
+  // Accept `<port>` or `<host>:<port>` forms. We only diff TCP, matching
+  // `parsePortBindings`. Returns null on unparseable input.
+  const colon = spec.lastIndexOf(":");
+  if (colon < 0) {
+    const port = Number(spec);
+    if (!Number.isFinite(port) || port <= 0) return null;
+    return { hostIp: "", hostPort: port };
+  }
+  const hostIp = spec.slice(0, colon);
+  const port = Number(spec.slice(colon + 1));
+  if (!Number.isFinite(port) || port <= 0) return null;
+  return { hostIp, hostPort: port };
+}
+
+function sortBindings(bindings: PortBinding[]): PortBinding[] {
+  return [...bindings].sort((a, b) => {
+    if (a.hostPort !== b.hostPort) return a.hostPort - b.hostPort;
+    return a.hostIp.localeCompare(b.hostIp);
+  });
+}
+
+function bindingsEqual(a: PortBinding[], b: PortBinding[]): boolean {
+  if (a.length !== b.length) return false;
+  const sa = sortBindings(a);
+  const sb = sortBindings(b);
+  for (let i = 0; i < sa.length; i++) {
+    if (sa[i].hostPort !== sb[i].hostPort || sa[i].hostIp !== sb[i].hostIp) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Compare a requested `ContainerConfig` against the live container's
+ * effective config and return the list of fields that have drifted.
+ *
+ * Pure function — no I/O. The caller (`ensureRunning`) decides what to do
+ * with a non-empty drift list (today: log + remove + recreate).
+ *
+ * Field semantics:
+ *   - image+tag: tag-string equality only, never digest. Update detection
+ *     for floating tags (`:latest` digest drift) is the update service's job.
+ *   - command: skipped if `requested.command === undefined` — comparing
+ *     against the image's baked `CMD` would falsely flag every container
+ *     created without an explicit override.
+ *   - networkMode: runtime defaults (`bridge`, `slirp4netns`, etc.) are
+ *     normalized to `""` and compared as equivalent to requested undefined.
+ *   - env: only requested keys are checked. Image-baked env keys not in
+ *     `requested.env` are ignored (they're not "drift" — they were never ours).
+ *   - volumes: trailing slashes stripped on both sides; `(host, container)`
+ *     tuples compared as a Map keyed by container path. Live binds have
+ *     their `:Z`/`:ro` flags already stripped by `getLiveContainerConfig`.
+ *   - ports: container-port key compared as runtime-emitted (`9000/tcp`).
+ *     Multiple host bindings per container port compared as a sorted set.
+ */
+export function diffContainerConfig(
+  requested: ContainerConfig,
+  live: LiveContainerConfig,
+  runtime: ContainerRuntimeInfo,
+): { drifted: string[] } {
+  const drifted: string[] = [];
+
+  const requestedImageRef = qualifyImage(
+    `${requested.image}:${requested.tag}`,
+    runtime,
+  );
+  const liveImageRef = qualifyImage(`${live.image}:${live.tag}`, runtime);
+  if (requestedImageRef !== liveImageRef) drifted.push("image+tag");
+
+  if (requested.command !== undefined) {
+    const liveCmd = live.command ?? [];
+    if (JSON.stringify(requested.command) !== JSON.stringify(liveCmd)) {
+      drifted.push("command");
+    }
+  }
+
+  if (
+    canonicalNetworkMode(requested.networkMode) !==
+    canonicalNetworkMode(live.networkMode)
+  ) {
+    drifted.push("networkMode");
+  }
+
+  if (requested.env) {
+    for (const [key, value] of Object.entries(requested.env)) {
+      if (live.env.get(key) !== value) {
+        drifted.push("env");
+        break;
+      }
+    }
+  }
+
+  // Volumes: build canonical Map<containerPath, hostPath> for each side.
+  const requestedVolumes = new Map<string, string>();
+  if (requested.volumes) {
+    for (const [containerPath, hostPath] of Object.entries(requested.volumes)) {
+      requestedVolumes.set(
+        stripTrailingSlash(containerPath),
+        stripTrailingSlash(hostPath),
+      );
+    }
+  }
+  const liveVolumes = new Map<string, string>();
+  for (const { host, container } of live.binds) {
+    liveVolumes.set(stripTrailingSlash(container), stripTrailingSlash(host));
+  }
+  let volumesDrift = requestedVolumes.size !== liveVolumes.size;
+  if (!volumesDrift) {
+    for (const [container, host] of requestedVolumes) {
+      if (liveVolumes.get(container) !== host) {
+        volumesDrift = true;
+        break;
+      }
+    }
+  }
+  if (volumesDrift) drifted.push("volumes");
+
+  // Ports: build canonical Map<"<port>/<proto>", PortBinding[]> per side.
+  const requestedPorts = new Map<string, PortBinding[]>();
+  if (requested.ports) {
+    for (const [containerPort, hostBind] of Object.entries(requested.ports)) {
+      const key = containerPort.includes("/")
+        ? containerPort
+        : `${containerPort}/tcp`;
+      const parsed = parseRequestedHostBinding(hostBind);
+      if (!parsed) continue;
+      const existing = requestedPorts.get(key) ?? [];
+      existing.push(parsed);
+      requestedPorts.set(key, existing);
+    }
+  }
+  let portsDrift = requestedPorts.size !== live.portBindings.size;
+  if (!portsDrift) {
+    for (const [key, bindings] of requestedPorts) {
+      const liveBindings = live.portBindings.get(key);
+      if (!liveBindings || !bindingsEqual(bindings, liveBindings)) {
+        portsDrift = true;
+        break;
+      }
+    }
+  }
+  if (portsDrift) drifted.push("ports");
+
+  return { drifted };
+}
+
 function buildRunArgs(
   name: string,
   config: ContainerConfig,
@@ -443,21 +795,47 @@ export async function ensureRunning(
   name: string,
   config: ContainerConfig,
   debug: (msg: string) => void,
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+
   options?: HealthCheckOptions,
+  exec: ExecFn = execRuntime,
+  _postRecreate: boolean = false,
 ): Promise<void> {
-  const state = await getContainerState(runtime, name);
+  const state = await getContainerState(runtime, name, exec);
   const fullName = prefixedName(name);
   const imageRef = qualifyImage(`${config.image}:${config.tag}`, runtime);
 
   switch (state) {
-    case "running":
-      debug(`Container ${fullName} already running`);
-      return;
+    case "running": {
+      if (_postRecreate) {
+        // Post-removeContainer state came back as "running" — race or
+        // restart-policy interaction. Don't recurse; treat as a no-op.
+        debug(
+          `Container ${fullName} unexpectedly running after recreate; skipping diff`,
+        );
+        return;
+      }
+      const live = await getLiveContainerConfig(runtime, name, exec);
+      if (!live) {
+        debug(
+          `Container ${fullName} already running (could not inspect for drift)`,
+        );
+        return;
+      }
+      const { drifted } = diffContainerConfig(config, live, runtime);
+      if (drifted.length === 0) {
+        debug(`Container ${fullName} already running`);
+        return;
+      }
+      debug(
+        `Container ${fullName} config drift detected (${drifted.join(", ")}); recreating`,
+      );
+      await removeContainer(runtime, name, exec);
+      return ensureRunning(runtime, name, config, debug, options, exec, true);
+    }
 
     case "stopped": {
       debug(`Starting stopped container ${fullName}`);
-      const startResult = await execRuntime(runtime, ["start", fullName]);
+      const startResult = await exec(runtime, ["start", fullName]);
       if (startResult.exitCode !== 0) {
         throw new Error(`Failed to start ${fullName}: ${startResult.stderr}`);
       }
@@ -465,7 +843,7 @@ export async function ensureRunning(
     }
 
     case "missing": {
-      const hasImage = await imageExists(runtime, imageRef);
+      const hasImage = await imageExists(runtime, imageRef, exec);
       if (!hasImage) {
         debug(`Pulling ${imageRef}...`);
         await pullImage(runtime, imageRef, debug);
@@ -473,7 +851,7 @@ export async function ensureRunning(
 
       debug(`Creating container ${fullName}`);
       const runArgs = buildRunArgs(name, config, runtime);
-      const runResult = await execRuntime(runtime, runArgs);
+      const runResult = await exec(runtime, runArgs);
       if (runResult.exitCode !== 0) {
         throw new Error(`Failed to create ${fullName}: ${runResult.stderr}`);
       }
@@ -496,13 +874,14 @@ export async function startContainer(
 async function fixVolumePermissions(
   runtime: ContainerRuntimeInfo,
   name: string,
+  exec: ExecFn = execRuntime,
 ): Promise<void> {
   const fullName = prefixedName(name);
-  const state = await getContainerState(runtime, name);
+  const state = await getContainerState(runtime, name, exec);
   if (state !== "running") return;
 
   // Get bind-mounted volume destinations inside the container
-  const inspect = await execRuntime(runtime, [
+  const inspect = await exec(runtime, [
     "inspect",
     "--format",
     '{{range .Mounts}}{{if eq .Type "bind"}}{{.Destination}} {{end}}{{end}}',
@@ -515,14 +894,7 @@ async function fixVolumePermissions(
   // (which is "others" relative to the container's user namespace mapped
   // UID) can delete the files. Owner permissions stay unchanged. Falls
   // back silently if chmod isn't available in the image (distroless etc.).
-  await execRuntime(runtime, [
-    "exec",
-    fullName,
-    "chmod",
-    "-R",
-    "o+rwX",
-    ...mounts,
-  ]);
+  await exec(runtime, ["exec", fullName, "chmod", "-R", "o+rwX", ...mounts]);
 }
 
 export async function stopContainer(
@@ -543,11 +915,12 @@ export async function stopContainer(
 export async function removeContainer(
   runtime: ContainerRuntimeInfo,
   name: string,
+  exec: ExecFn = execRuntime,
 ): Promise<void> {
   const fullName = prefixedName(name);
-  await fixVolumePermissions(runtime, name).catch(() => {});
-  await execRuntime(runtime, ["stop", fullName]);
-  const result = await execRuntime(runtime, ["rm", "-f", fullName]);
+  await fixVolumePermissions(runtime, name, exec).catch(() => {});
+  await exec(runtime, ["stop", fullName]);
+  const result = await exec(runtime, ["rm", "-f", fullName]);
   if (result.exitCode !== 0) {
     throw new Error(`Failed to remove ${fullName}: ${result.stderr}`);
   }
