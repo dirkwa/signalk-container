@@ -1519,6 +1519,7 @@ module.exports = (app: App) => {
         updateService = null;
       }
       lastConfigs.clear();
+      lastVolumeIssues.clear();
       effectiveResources.clear();
       pluginDefaults.clear();
       currentOverrides = {};
