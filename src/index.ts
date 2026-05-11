@@ -704,9 +704,11 @@ module.exports = (app: App) => {
         app.debug(
           `ensureRunning(${name}): aborting — required host paths missing for volumes: ${list}`,
         );
-        // Don't write lastVolumeIssues here — we never reached the
-        // recreate-or-no-op decision; the previous state remains in
-        // effect (or there was none).
+        // Persist current missing state BEFORE throwing so a later
+        // successful call (once the source reappears) can emit
+        // action: "recovered" for these entries. Without this, the
+        // first-time abort would have no prior record to recover from.
+        lastVolumeIssues.set(name, { skipped, aborted });
         throw new Error(
           `ensureRunning(${name}): required host paths missing for volumes: ${list}`,
         );
@@ -736,7 +738,9 @@ module.exports = (app: App) => {
       // filter shape — drift detection sees consistent state across calls.
       lastConfigs.set(name, effectiveConfig);
       effectiveResources.set(name, filteredMerged);
-      lastVolumeIssues.set(name, { skipped, aborted: [] });
+      // `aborted` is always empty here — we'd have thrown above otherwise —
+      // but we store the variable verbatim for clarity.
+      lastVolumeIssues.set(name, { skipped, aborted });
 
       try {
         await ensureRunning(

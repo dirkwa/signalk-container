@@ -164,7 +164,14 @@ export function collectRecoveredVolumes(
   const recovered: Array<{ containerPath: string; source: string }> = [];
   for (const v of [...prior.skipped, ...prior.aborted]) {
     if (!stillMissing.has(v.containerPath) && v.containerPath in kept) {
-      recovered.push(v);
+      // Report the CURRENT source from `kept`, not the prior source.
+      // If the user changed the source between calls (e.g. moved the
+      // USB mount point), the recovered event should reflect what is
+      // now applied, not the path that used to be missing.
+      recovered.push({
+        containerPath: v.containerPath,
+        source: kept[v.containerPath],
+      });
     }
   }
   return recovered;

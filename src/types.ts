@@ -367,7 +367,8 @@ export interface VolumeSpec {
   source: string;
   /**
    * What signalk-container should do when `source` is a host path
-   * (starts with `/`) and the path does not exist:
+   * (absolute, starts with `/`; or relative, starts with `.`) and the
+   * path does not exist:
    *
    *   - `'create'` (default, same as a bare string): the volume is
    *     passed through to the runtime, which auto-creates the host
@@ -445,7 +446,7 @@ export interface EnsureRunningOptions extends HealthCheckOptions {
    *     to include the mount. Plugins can clear any
    *     "waiting for resource" status.
    *
-   * Handler errors are caught and logged at warn level; they do
+   * Handler errors are caught and logged at error level; they do
    * not affect container lifecycle. Keep handlers fast and
    * side-effect-only (set plugin status, log, etc.) — they are
    * called synchronously in the lifecycle hot path.
