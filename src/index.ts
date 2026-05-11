@@ -93,11 +93,15 @@ module.exports = (app: App) => {
   const healthTimers = new Map<string, NodeJS.Timeout>();
   let updateService: UpdateService | null = null;
 
-  // Resolved by start()'s IIFE once detectRuntime has settled (success or
-  // failure). Consumers `await api.whenReady()` to replace the manual
-  // "while (manager && !getRuntime()) await sleep(...)" polling pattern.
+  // Re-created on every start() so each plugin-lifecycle gets a fresh
+  // promise — without this, whenReady() would resolve immediately on
+  // any restart with the stale value from the prior run. Resolved by
+  // start()'s IIFE once detectRuntime has settled (success or failure).
+  // Consumers `await api.whenReady()` to replace the manual
+  // "while (Date.now() < deadline && !getRuntime()) await sleep(1000)"
+  // polling pattern.
   let resolveReady: () => void = () => {};
-  const readyPromise = new Promise<void>((r) => {
+  let readyPromise = new Promise<void>((r) => {
     resolveReady = r;
   });
 
@@ -1251,6 +1255,14 @@ module.exports = (app: App) => {
     },
 
     start(config: PluginConfig) {
+      // Fresh whenReady() promise per start — see comment by the
+      // declaration above. Reset before the async IIFE so any pending
+      // readers either see the new promise or the resolved old one,
+      // never a stale promise pointing at the prior run.
+      readyPromise = new Promise<void>((r) => {
+        resolveReady = r;
+      });
+
       // Cache the full config object so recordOverride() can rebuild it
       // when persisting a new override via savePluginOptions. Shallow
       // copy to avoid mutating the caller's object.
