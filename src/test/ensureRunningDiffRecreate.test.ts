@@ -261,3 +261,144 @@ describe("ensureRunning — config drift triggers automatic recreate", () => {
     assert.ok(!cmds.includes("run"));
   });
 });
+
+describe("ensureRunning — stopped-state drift detection", () => {
+  it("recreates a STOPPED container when its config has drifted (not just starts it)", async () => {
+    // Without the stopped-state diff, the old container would be `start`ed
+    // back up with stale env. This is the bug CodeRabbit caught on PR #30.
+    const drifted = buildLiveConfigStdout({
+      image: "questdb/questdb:9.0.0",
+      env: '["FOO=1"]', // live still has the OLD value
+    });
+    const { exec, calls } = makeRouterExec((args) => {
+      const cmd = args[0];
+      if (
+        cmd === "inspect" &&
+        args.includes("{{.State.Status}}|{{.State.Running}}|{{.State.Pid}}")
+      ) {
+        // Container is stopped on first probe. After remove, missing.
+        const removeSeen = calls.some((c) => c.args[0] === "rm");
+        if (removeSeen) {
+          return { stdout: "", stderr: "no such object", exitCode: 1 };
+        }
+        return { stdout: "exited|false|0", exitCode: 0 };
+      }
+      if (
+        cmd === "inspect" &&
+        args.some((a) => a.includes("{{.Config.Image}}"))
+      ) {
+        return { stdout: drifted, exitCode: 0 };
+      }
+      if (cmd === "inspect") return { stdout: "", exitCode: 0 };
+      if (cmd === "stop") return { stdout: "", exitCode: 0 };
+      if (cmd === "rm") return { stdout: "ok", exitCode: 0 };
+      if (cmd === "image" && args[1] === "inspect") {
+        return { stdout: "ok", exitCode: 0 };
+      }
+      if (cmd === "run") return { stdout: "id", exitCode: 0 };
+      throw new Error(`unexpected exec: ${args.join(" ")}`);
+    });
+    const debugLines: string[] = [];
+    await ensureRunning(
+      docker,
+      "questdb",
+      requested,
+      (m) => debugLines.push(m),
+      undefined,
+      exec,
+    );
+    const cmds = calls.map((c) => c.args[0]);
+    assert.ok(cmds.includes("rm"), "stopped+drifted should be removed");
+    assert.ok(cmds.includes("run"), "stopped+drifted should be recreated");
+    // The 'start' branch should NOT have been taken on the drifting path.
+    // (It will appear once on the recursive missing-branch flow only if
+    // the new container needs starting — but `run -d` already starts it.)
+    assert.ok(
+      !cmds.some(
+        (c, i) =>
+          c === "start" && i < calls.findIndex((x) => x.args[0] === "rm"),
+      ),
+      "should not 'start' the stale container before remove",
+    );
+    assert.ok(
+      debugLines.some((l) => l.includes("config drift detected")),
+      `expected drift message, got: ${debugLines.join(" | ")}`,
+    );
+  });
+
+  it("starts a STOPPED container without recreating when no drift", async () => {
+    const matching = buildLiveConfigStdout({
+      image: "questdb/questdb:9.0.0",
+      env: '["FOO=2"]', // matches requested
+    });
+    const { exec, calls } = makeRouterExec((args) => {
+      const cmd = args[0];
+      if (
+        cmd === "inspect" &&
+        args.includes("{{.State.Status}}|{{.State.Running}}|{{.State.Pid}}")
+      ) {
+        return { stdout: "exited|false|0", exitCode: 0 };
+      }
+      if (
+        cmd === "inspect" &&
+        args.some((a) => a.includes("{{.Config.Image}}"))
+      ) {
+        return { stdout: matching, exitCode: 0 };
+      }
+      if (cmd === "start") return { stdout: "", exitCode: 0 };
+      throw new Error(`unexpected exec: ${args.join(" ")}`);
+    });
+    const debugLines: string[] = [];
+    await ensureRunning(
+      docker,
+      "questdb",
+      requested,
+      (m) => debugLines.push(m),
+      undefined,
+      exec,
+    );
+    const cmds = calls.map((c) => c.args[0]);
+    assert.ok(cmds.includes("start"));
+    assert.ok(!cmds.includes("rm"));
+    assert.ok(!cmds.includes("run"));
+    assert.ok(debugLines.some((l) => l.includes("Starting stopped container")));
+  });
+
+  it("starts a STOPPED container without diff when inspect fails (fail-safe)", async () => {
+    const { exec, calls } = makeRouterExec((args) => {
+      const cmd = args[0];
+      if (
+        cmd === "inspect" &&
+        args.includes("{{.State.Status}}|{{.State.Running}}|{{.State.Pid}}")
+      ) {
+        return { stdout: "exited|false|0", exitCode: 0 };
+      }
+      if (
+        cmd === "inspect" &&
+        args.some((a) => a.includes("{{.Config.Image}}"))
+      ) {
+        return { stdout: "", stderr: "boom", exitCode: 1 };
+      }
+      if (cmd === "start") return { stdout: "", exitCode: 0 };
+      throw new Error(`unexpected exec: ${args.join(" ")}`);
+    });
+    const debugLines: string[] = [];
+    await ensureRunning(
+      docker,
+      "questdb",
+      requested,
+      (m) => debugLines.push(m),
+      undefined,
+      exec,
+    );
+    const cmds = calls.map((c) => c.args[0]);
+    assert.ok(
+      cmds.includes("start"),
+      "should still start when diff inspect fails",
+    );
+    assert.ok(!cmds.includes("rm"));
+    assert.ok(
+      debugLines.some((l) => l.includes("could not inspect for drift")),
+    );
+  });
+});
