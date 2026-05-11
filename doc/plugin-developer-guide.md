@@ -774,6 +774,7 @@ If you want type safety, define a minimal interface in your plugin:
 ```typescript
 interface ContainerManagerApi {
   getRuntime: () => { runtime: string; version: string } | null;
+  whenReady: () => Promise<void>;
   ensureRunning: (name: string, config: unknown) => Promise<void>;
   start: (name: string) => Promise<void>;
   stop: (name: string) => Promise<void>;
