@@ -56,8 +56,16 @@ describe("makeLineSplitter", () => {
  * container runtime is available (CI without podman/docker, etc.) — the
  * splitter unit tests above cover the line-buffering logic without
  * needing a runtime.
+ *
+ * Also skipped on Windows: GitHub-hosted Windows runners ship Docker
+ * Desktop in Windows-container mode, where `docker --version` succeeds
+ * but `docker pull alpine:3.19` fails with "no matching manifest for
+ * windows/amd64" — alpine has no Windows variant.  These tests need a
+ * Linux container daemon; no easy way to provide one on the Windows
+ * runner image.
  */
 async function hasContainerRuntime(): Promise<ContainerRuntimeInfo | null> {
+  if (process.platform === "win32") return null;
   for (const rt of ["podman", "docker"] as const) {
     try {
       await execFileP(rt, ["--version"], { timeout: 5000 });
