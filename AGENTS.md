@@ -57,7 +57,7 @@ These are non-obvious rules baked into the runtime layer. Breaking them produces
 
 When we need to read live container state, we use a single `inspect --format` call with a pipe-delimited Go-template format string:
 
-```
+```gotemplate
 {{.HostConfig.NanoCpus}}|{{.HostConfig.Memory}}|...
 ```
 
