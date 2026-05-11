@@ -50,6 +50,7 @@ import {
   resolveHostPath,
   resolveSignalkDataSource,
   resolveSignalkNetworks,
+  safeInvokeVolumeIssue,
   startContainer,
   stopContainer,
 } from "./containers";
@@ -663,24 +664,20 @@ module.exports = (app: App) => {
         effectiveConfigPreFilter.volumes,
       );
 
-      const safeInvokeVolumeIssue = (event: VolumeIssue) => {
-        if (!options?.onVolumeIssue) return;
-        try {
-          options.onVolumeIssue(event);
-        } catch (err) {
+      const emitVolumeIssue = (event: VolumeIssue) =>
+        safeInvokeVolumeIssue(options?.onVolumeIssue, event, (err) =>
           app.error(
             `ensureRunning(${name}): onVolumeIssue handler threw for ` +
               `${event.containerPath} -> ${event.source} (${event.action}): ` +
               `${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
-      };
+          ),
+        );
 
       for (const v of skipped) {
         app.debug(
           `ensureRunning(${name}): skipping volume ${v.containerPath} -> ${v.source} (host path missing)`,
         );
-        safeInvokeVolumeIssue({
+        emitVolumeIssue({
           containerPath: v.containerPath,
           source: v.source,
           action: "skipped",
@@ -688,7 +685,7 @@ module.exports = (app: App) => {
         });
       }
       for (const v of aborted) {
-        safeInvokeVolumeIssue({
+        emitVolumeIssue({
           containerPath: v.containerPath,
           source: v.source,
           action: "aborted",
@@ -877,7 +874,7 @@ module.exports = (app: App) => {
       // back with the recovered mounts), notify the consumer that any
       // previously-missing volume sources are now applied.
       for (const r of recovered) {
-        safeInvokeVolumeIssue({
+        emitVolumeIssue({
           containerPath: r.containerPath,
           source: r.source,
           action: "recovered",

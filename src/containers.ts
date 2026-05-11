@@ -6,6 +6,7 @@ import {
   ContainerRuntimeInfo,
   ContainerState,
   HealthCheckOptions,
+  VolumeIssue,
   VolumeSpec,
 } from "./types";
 import { execRuntime, execRuntimeLong, isContainerized } from "./runtime";
@@ -175,6 +176,36 @@ export function collectRecoveredVolumes(
     }
   }
   return recovered;
+}
+
+/**
+ * Invoke an `onVolumeIssue` callback safely. Synchronous throws AND
+ * rejected promises both route to `reportError`, so handler bugs (in
+ * either flavour) never escape as unhandled rejections.
+ *
+ * The declared callback type is `(event) => void | Promise<void>`,
+ * but TS allows assigning a plain async function where `void` is
+ * expected — the eventual rejection bypasses a naive `try/catch`.
+ * Wrap the call in `Promise.resolve(...).catch(...)` so the same
+ * error path catches both shapes.
+ *
+ * Pure-by-design: `reportError` is injected so tests can capture
+ * the message instead of writing to `app.error`.
+ */
+export function safeInvokeVolumeIssue(
+  handler: ((event: VolumeIssue) => void | Promise<void>) | undefined,
+  event: VolumeIssue,
+  reportError: (err: unknown) => void,
+): void {
+  if (!handler) return;
+  try {
+    void Promise.resolve(handler(event)).catch(reportError);
+  } catch (err) {
+    // Pre-promise sync throw (e.g. the call expression itself threw
+    // before returning a Promise). Rare in practice but possible if
+    // the handler is something weird like a Proxy.
+    reportError(err);
+  }
 }
 
 export function qualifyImage(
