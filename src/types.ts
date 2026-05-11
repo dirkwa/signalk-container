@@ -340,8 +340,8 @@ export interface ContainerManagerApi {
    * runtime detection succeeded — callers should still re-check
    * `getRuntime()` after the await to distinguish "detection failed" from
    * "still in flight". Lets consumers replace the
-   * `while (... && getRuntime()) await sleep(1000)` polling pattern
-   * with a single `await containers.whenReady()`.
+   * `while (Date.now() < deadline && !getRuntime()) await sleep(1000)`
+   * polling pattern with a single `await containers.whenReady()`.
    */
   whenReady(): Promise<void>;
   pullImage(image: string, onProgress?: (msg: string) => void): Promise<void>;
