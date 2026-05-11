@@ -8,7 +8,11 @@
   ],
   "signalk": {
     "displayName": "Container Manager",
-    "appIcon": "./icon.svg"
+    "appIcon": "./icon.svg",
+    "screenshots": [
+      "./doc/screenshots/signalk-container-1.png",
+      "./doc/screenshots/signalk-container-2.png"
+    ]
   },
   "signalk-plugin-enabled-by-default": true,
   "main": "dist/index.js",
