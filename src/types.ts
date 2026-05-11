@@ -54,11 +54,22 @@ export interface ContainerConfig {
   ports?: Record<string, string>;
   /**
    * Explicit volume mounts. Keys are container paths, values are either:
-   *   - an absolute host path  (bind mount)
-   *   - a Docker/Podman named volume (no leading `/`)
-   * Example: `{ "/data": "/host/path" }` or `{ "/data": "my-volume" }`
+   *   - an absolute host path string (bind mount)
+   *   - a Docker/Podman named volume string (no leading `/`)
+   *   - a `VolumeSpec` object for per-volume `ifMissing` policy (skip
+   *     or abort when the host source is missing)
+   *
+   * Examples:
+   *   `{ "/data": "/host/path" }`                                  // bind, auto-create
+   *   `{ "/data": "my-volume" }`                                   // named volume
+   *   `{ "/usb": { source: "/media/USB", ifMissing: "skip" } }`    // optional bind
+   *   `{ "/certs": { source: "/etc/certs", ifMissing: "abort" } }` // required bind
+   *
+   * See `VolumeSpec` for the policy semantics and `EnsureRunningOptions.onVolumeIssue`
+   * for the event handler that fires when a `'skip'` / `'abort'` policy
+   * triggers or when a previously-missing source recovers.
    */
-  volumes?: Record<string, string>;
+  volumes?: Record<string, string | VolumeSpec>;
   /**
    * Mount the SignalK data directory at this container path, regardless
    * of how SignalK itself is deployed (bare-metal, Docker with a named
@@ -340,9 +351,106 @@ export interface CleanupOrphansResult {
   reaped: OrphanJobInfo[];
 }
 
+/**
+ * Per-entry policy for a `ContainerConfig.volumes` mount when the host
+ * source path is missing at container-create time. Use the object form
+ * in `volumes` whenever the source is something other than plugin-owned
+ * state — user-managed resources (USB drives, NFS mounts) and
+ * deployment-required mounts (TLS certs, secrets) all benefit from
+ * explicit policy.
+ *
+ * Named volumes (`source` without a leading `/` or `.`) always pass
+ * through regardless of `ifMissing` — the runtime owns their lifecycle.
+ */
+export interface VolumeSpec {
+  /** Host path or named-volume string — same shape as the bare-string form. */
+  source: string;
+  /**
+   * What signalk-container should do when `source` is a host path
+   * (starts with `/`) and the path does not exist:
+   *
+   *   - `'create'` (default, same as a bare string): the volume is
+   *     passed through to the runtime, which auto-creates the host
+   *     directory as an empty dir. Right for plugin state directories.
+   *   - `'skip'`: signalk-container omits the volume from the
+   *     requested config; the container starts without the mount.
+   *     An `onVolumeIssue` event with `action: 'skipped'` fires so
+   *     the plugin can surface status (e.g. `setPluginStatus`).
+   *     Right for user-managed resources (USB drives, optional
+   *     baseline mounts, NFS shares).
+   *   - `'abort'`: signalk-container throws from `ensureRunning`
+   *     with a clear error message; the plugin's `await` rejects.
+   *     An `onVolumeIssue` event with `action: 'aborted'` fires
+   *     before the throw. Right for mounts the container cannot
+   *     run without (TLS certificates, persistent state required
+   *     for correctness, deployment-specified secrets).
+   *
+   * Defaults to `'create'` for backwards compatibility.
+   */
+  ifMissing?: "create" | "skip" | "abort";
+}
+
+/**
+ * One policy event delivered to `EnsureRunningOptions.onVolumeIssue`.
+ * The same callback fires for all three actions; switch on `action`
+ * to dispatch.
+ */
+export interface VolumeIssue {
+  /** Container-side mount path — the key in `ContainerConfig.volumes`. */
+  containerPath: string;
+  /** Host source as declared on the requested config (post magic-field resolution). */
+  source: string;
+  /**
+   * What signalk-container did about this volume:
+   *   - `'skipped'`: dropped from the requested config; container
+   *     starts without the mount.
+   *   - `'aborted'`: signalk-container is about to throw from
+   *     `ensureRunning`. Fires synchronously before the throw.
+   *   - `'recovered'`: a previously skipped or aborted volume's
+   *     source has reappeared. The container has been recreated
+   *     to include the mount. Fires AFTER the recreate completes.
+   */
+  action: "skipped" | "aborted" | "recovered";
+  /** Human-readable explanation; safe to surface in `setPluginStatus`. */
+  reason: string;
+}
+
 export interface HealthCheckOptions {
   healthCheck?: () => Promise<boolean>;
   onUnhealthy?: (name: string, error: string) => void;
+}
+
+/**
+ * Options for `ensureRunning(name, config, options)`. Superset of
+ * `HealthCheckOptions` — existing callers passing a `HealthCheckOptions`
+ * object continue to work.
+ */
+export interface EnsureRunningOptions extends HealthCheckOptions {
+  /**
+   * Called once per volume that hit a policy event during this
+   * `ensureRunning` call. Fires for `'skipped'`, `'aborted'`, and
+   * `'recovered'` actions on volumes declared with the `VolumeSpec`
+   * object form (no events fire for bare-string or `'create'`-policy
+   * volumes — those are today's auto-create behaviour).
+   *
+   *   - `'skipped'`: an `ifMissing: 'skip'` volume's host source was
+   *     missing; signalk-container dropped it and the container
+   *     starts without the mount.
+   *   - `'aborted'`: an `ifMissing: 'abort'` volume's host source
+   *     was missing; signalk-container fires this event synchronously
+   *     and then throws. Plugins can `app.setPluginError(...)`
+   *     inside the handler before the throw propagates.
+   *   - `'recovered'`: a volume previously dropped or aborted is
+   *     now present and applied. The container has been recreated
+   *     to include the mount. Plugins can clear any
+   *     "waiting for resource" status.
+   *
+   * Handler errors are caught and logged at warn level; they do
+   * not affect container lifecycle. Keep handlers fast and
+   * side-effect-only (set plugin status, log, etc.) — they are
+   * called synchronously in the lifecycle hot path.
+   */
+  onVolumeIssue?: (event: VolumeIssue) => void;
 }
 
 export interface ContainerManagerApi {
@@ -386,7 +494,7 @@ export interface ContainerManagerApi {
   ensureRunning(
     name: string,
     config: ContainerConfig,
-    options?: HealthCheckOptions,
+    options?: EnsureRunningOptions,
   ): Promise<void>;
   /**
    * Resolve the source (named volume or host path) that backs

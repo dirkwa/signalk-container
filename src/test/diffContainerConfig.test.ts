@@ -437,3 +437,22 @@ describe("diffContainerConfig — unset detection via prior config", () => {
     assert.ok(!drifted.includes("env"));
   });
 });
+
+describe("diffContainerConfig — recovery path documentation", () => {
+  // When `classifyVolumeSources` filters out a 'skip' volume, the
+  // requested map shrinks. After the source recovers, the next call
+  // passes the (now-larger) requested map; this test documents that
+  // diff treats the "missing in requested, present in live" case
+  // correctly — when a previously-skipped mount comes back, the diff
+  // detects drift and the inner ensureRunning recreates with the
+  // mount. The recovery event-emit in the wrapper depends on this
+  // pre-existing behaviour.
+  it("recovery: requested volume absent from live -> volumes drift", () => {
+    const { drifted } = diffContainerConfig(
+      reqBase({ volumes: { "/usb": "/media/USB" } }),
+      liveBase({ binds: [] }), // live has no /usb mount yet (was previously skipped)
+      docker,
+    );
+    assert.ok(drifted.includes("volumes"));
+  });
+});
