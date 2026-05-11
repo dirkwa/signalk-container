@@ -10,10 +10,11 @@ import {
   ContainerResourceLimits,
   ContainerRuntimeInfo,
   ContainerState,
-  HealthCheckOptions,
+  EnsureRunningOptions,
   PluginConfig,
   PruneResult,
   UpdateResourcesResult,
+  VolumeIssue,
 } from "./types";
 import {
   fieldsRequiringRecreateForUnset,
@@ -25,6 +26,8 @@ import {
 } from "./resources";
 import { detectRuntime, isContainerized } from "./runtime";
 import {
+  classifyVolumeSources,
+  collectRecoveredVolumes,
   connectToNetwork,
   disconnectFromNetwork,
   ensureNetwork,
@@ -119,8 +122,19 @@ module.exports = (app: App) => {
    *                        (plugin default ⊕ user override). Used to
    *                        skip no-op updates and report via
    *                        getResources().
+   *   lastVolumeIssues   — containerPaths whose `VolumeSpec` source
+   *                        was missing on the last ensureRunning()
+   *                        call (and which policy applied). Used to
+   *                        detect recovery on the next call.
    */
   const lastConfigs = new Map<string, ContainerConfig>();
+  const lastVolumeIssues = new Map<
+    string,
+    {
+      skipped: Array<{ containerPath: string; source: string }>;
+      aborted: Array<{ containerPath: string; source: string }>;
+    }
+  >();
   let currentOverrides: Record<string, ContainerResourceLimits> = {};
   // Cached result of resolveSignalkDataSource() — resolved once on first
   // ensureRunning() call that uses signalkDataMount, then reused.
@@ -389,7 +403,7 @@ module.exports = (app: App) => {
     async ensureRunning(
       name: string,
       config: ContainerConfig,
-      options?: HealthCheckOptions,
+      options?: EnsureRunningOptions,
     ) {
       if (!runtimeInfo) throw new Error("No container runtime available");
 
@@ -636,18 +650,93 @@ module.exports = (app: App) => {
           `ensureRunning(${name}): dropped resources.${d.field}: ${d.reason}`,
         );
       }
-      const effectiveConfig: ContainerConfig = {
+      const effectiveConfigPreFilter: ContainerConfig = {
         ...config,
         resources: filteredMerged,
       };
+
+      // Classify volumes against host-source existence and per-volume
+      // ifMissing policy. `skipped` volumes are dropped from the
+      // request and announced via onVolumeIssue; `aborted` volumes
+      // trigger an event then a throw.
+      const { kept, skipped, aborted } = classifyVolumeSources(
+        effectiveConfigPreFilter.volumes,
+      );
+
+      const safeInvokeVolumeIssue = (event: VolumeIssue) => {
+        if (!options?.onVolumeIssue) return;
+        try {
+          options.onVolumeIssue(event);
+        } catch (err) {
+          app.error(
+            `ensureRunning(${name}): onVolumeIssue handler threw for ` +
+              `${event.containerPath} -> ${event.source} (${event.action}): ` +
+              `${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      };
+
+      for (const v of skipped) {
+        app.debug(
+          `ensureRunning(${name}): skipping volume ${v.containerPath} -> ${v.source} (host path missing)`,
+        );
+        safeInvokeVolumeIssue({
+          containerPath: v.containerPath,
+          source: v.source,
+          action: "skipped",
+          reason: `Host path ${v.source} does not exist; volume omitted`,
+        });
+      }
+      for (const v of aborted) {
+        safeInvokeVolumeIssue({
+          containerPath: v.containerPath,
+          source: v.source,
+          action: "aborted",
+          reason: `Required host path ${v.source} does not exist`,
+        });
+      }
+      if (aborted.length > 0) {
+        const list = aborted
+          .map((v) => `${v.containerPath} -> ${v.source}`)
+          .join(", ");
+        // Surface to debug too — the throw alone isn't visible in places
+        // that only watch debug output.
+        app.debug(
+          `ensureRunning(${name}): aborting — required host paths missing for volumes: ${list}`,
+        );
+        // Don't write lastVolumeIssues here — we never reached the
+        // recreate-or-no-op decision; the previous state remains in
+        // effect (or there was none).
+        throw new Error(
+          `ensureRunning(${name}): required host paths missing for volumes: ${list}`,
+        );
+      }
+
+      const effectiveConfig: ContainerConfig = {
+        ...effectiveConfigPreFilter,
+        volumes: kept,
+      };
+
+      // Recovery detection: anything in lastVolumeIssues that is now
+      // present in `kept` is announced AFTER ensureRunning returns
+      // (the inner call's diff path is what actually recreates the
+      // container to include the recovered mount).
+      const recovered = collectRecoveredVolumes(
+        lastVolumeIssues.get(name),
+        skipped,
+        aborted,
+        kept,
+      );
 
       // Capture the prior call's config before overwriting so the diff
       // inside ensureRunning can detect "unset" drift (env key removed,
       // command previously set and now undefined). undefined on first call.
       const priorConfig = lastConfigs.get(name);
-      // Cache for later updateResources() recreate-fallback path.
+      // Cache for later updateResources() recreate-fallback path. Post-
+      // filter shape — drift detection sees consistent state across calls.
       lastConfigs.set(name, effectiveConfig);
       effectiveResources.set(name, filteredMerged);
+      lastVolumeIssues.set(name, { skipped, aborted: [] });
 
       try {
         await ensureRunning(
@@ -777,6 +866,19 @@ module.exports = (app: App) => {
             `ensureRunning(${name}): live-updated resources to match new config`,
           );
         }
+      }
+
+      // Recovery emission: AFTER the inner ensureRunning returns (so
+      // any drift-driven recreate has already brought the container
+      // back with the recovered mounts), notify the consumer that any
+      // previously-missing volume sources are now applied.
+      for (const r of recovered) {
+        safeInvokeVolumeIssue({
+          containerPath: r.containerPath,
+          source: r.source,
+          action: "recovered",
+          reason: `Host path ${r.source} is now present; volume applied`,
+        });
       }
 
       if (options?.healthCheck) {
@@ -1113,6 +1215,7 @@ module.exports = (app: App) => {
           }
           lastConfigs.delete(name);
           effectiveResources.delete(name);
+          lastVolumeIssues.delete(name);
           app.setPluginError(
             `Container ${name} is in an indeterminate state: ` +
               `recreate failed (${recreateMsg}) AND rollback failed (${rollbackMsg}). ` +

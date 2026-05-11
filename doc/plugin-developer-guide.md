@@ -188,6 +188,54 @@ Data is safe because volumes live on the host filesystem, not inside the contain
 
 **Removed: hash-file pattern.** Earlier versions of this guide instructed plugins to maintain a `${dataDir}.container-hash` file and call `containers.remove()` themselves on mismatch. That pattern is no longer needed — and was easy to get wrong (each consumer plugin used a different field subset, missing fields the others included). Delete any `container-hash` reads/writes and any `state !== "missing" && hash differs` recreate logic. Restart the consumer plugin once and the central diff will reconcile any drift on the next `ensureRunning` call.
 
+### Optional and required volumes
+
+By default, `volumes` entries with a missing host path are auto-created as empty directories by the runtime — fine for plugin state dirs. When a volume represents a _user-managed_ or _deployment-required_ resource, use the `VolumeSpec` object form with an `ifMissing` policy:
+
+- `"create"` (default, same as a bare string): runtime creates the host dir. Right for plugin state.
+- `"skip"`: signalk-container drops the volume when the host path is missing; the container starts without the mount. Right for optional USB drives, NFS mounts, baseline scans.
+- `"abort"`: signalk-container throws from `ensureRunning` with a clear error. Right for mounts the container cannot function without (TLS certs, deployment secrets, required state).
+
+Wire `onVolumeIssue` in the options to react when a volume's source is missing, aborted, or recovered. The same callback fires for all three actions; switch on `event.action`. signalk-container detects recovery automatically: when a previously-missing source reappears on a subsequent `ensureRunning` call, the container is recreated to include the mount and the handler fires with `action: "recovered"`.
+
+```typescript
+await containers.ensureRunning(
+  "my-backup",
+  {
+    image: "myorg/backup",
+    tag: "latest",
+    volumes: {
+      "/data": app.getDataDirPath(), // auto-create
+      "/usb": { source: "/media/dirk/USB-SSD", ifMissing: "skip" }, // optional
+      "/certs": {
+        source: "/etc/letsencrypt/live",
+        ifMissing: "abort",
+      }, // required
+    },
+  },
+  {
+    onVolumeIssue: (event) => {
+      if (event.action === "skipped") {
+        app.setPluginStatus(
+          `Optional mount ${event.containerPath} not available`,
+        );
+      } else if (event.action === "aborted") {
+        app.setPluginError(
+          `Required mount ${event.containerPath} missing: ${event.source}`,
+        );
+      } else {
+        // 'recovered' — clear any prior status
+        app.setPluginStatus("Running");
+      }
+    },
+  },
+);
+```
+
+Named volumes (sources without a leading `/`) always pass through regardless of `ifMissing` — the runtime owns their lifecycle.
+
+`onVolumeIssue` handler errors are caught and logged at error level; they cannot break container lifecycle. Keep handlers fast and side-effect-only (set plugin status, log) — they are called synchronously in the lifecycle hot path.
+
 ---
 
 ## Stopping Containers When Plugin is Disabled
@@ -246,6 +294,8 @@ Available in signalk-container 1.6.0+.
 ### `ensureRunning(name, config, options?): Promise<void>`
 
 Creates and starts a container if missing; starts it if stopped. If the container is already running OR stopped with **drifted config** (image, tag, command, networkMode, env, volumes, or ports differ from the requested config), it is removed and recreated transparently. Resource limits changes are applied live where possible — see [Resource Limits](#resource-limits).
+
+Volumes accept either a bare host-path string (auto-create — runtime creates the host dir if missing) or a `VolumeSpec` object `{ source, ifMissing: "create" | "skip" | "abort" }` for per-volume policy. `options` is an `EnsureRunningOptions` (a superset of `HealthCheckOptions`) which also accepts an `onVolumeIssue` event handler. See [Optional and required volumes](#optional-and-required-volumes) for the full pattern.
 
 ```typescript
 await containers.ensureRunning("my-db", {
@@ -772,10 +822,25 @@ The inline ResourceLimitsEditor updates its form inputs from the server's post-a
 If you want type safety, define a minimal interface in your plugin:
 
 ```typescript
+interface VolumeIssue {
+  containerPath: string;
+  source: string;
+  action: "skipped" | "aborted" | "recovered";
+  reason: string;
+}
+interface EnsureRunningOptions {
+  healthCheck?: () => Promise<boolean>;
+  onUnhealthy?: (name: string, error: string) => void;
+  onVolumeIssue?: (event: VolumeIssue) => void;
+}
 interface ContainerManagerApi {
   getRuntime: () => { runtime: string; version: string } | null;
   whenReady: () => Promise<void>;
-  ensureRunning: (name: string, config: unknown) => Promise<void>;
+  ensureRunning: (
+    name: string,
+    config: unknown,
+    options?: EnsureRunningOptions,
+  ) => Promise<void>;
   start: (name: string) => Promise<void>;
   stop: (name: string) => Promise<void>;
   remove: (name: string) => Promise<void>;

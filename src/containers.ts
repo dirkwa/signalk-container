@@ -1,11 +1,12 @@
 import * as net from "net";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import {
   ContainerConfig,
   ContainerInfo,
   ContainerRuntimeInfo,
   ContainerState,
   HealthCheckOptions,
+  VolumeSpec,
 } from "./types";
 import { execRuntime, execRuntimeLong, isContainerized } from "./runtime";
 import { resourceFlagsForRun } from "./resources";
@@ -41,6 +42,132 @@ export function volumeArg(
   if (runtime.runtime === "podman" && !isNamedVolume) flags.push("Z");
   const suffix = flags.length > 0 ? `:${flags.join(",")}` : "";
   return `${hostPath}:${containerPath}${suffix}`;
+}
+
+/**
+ * Extract the source string from a `volumes` entry that may be a bare
+ * string or a `VolumeSpec`. Used at call sites that don't care about
+ * `ifMissing` policy — `buildRunArgs` and `diffContainerConfig` both
+ * consume bare-string volumes after the wrapper has run
+ * `classifyVolumeSources`, but they still type their input as the
+ * union for callers that bypass the wrapper.
+ */
+function volumeSource(raw: string | VolumeSpec): string {
+  return typeof raw === "string" ? raw : raw.source;
+}
+
+/**
+ * Classify each volume entry against host-source existence and the
+ * declared `ifMissing` policy. Returns:
+ *
+ *   - `kept`: the volumes that should be passed to the runtime,
+ *     normalized to bare-string form (the shape `buildRunArgs` and
+ *     `diffContainerConfig` already consume).
+ *   - `skipped`: host-path volumes whose source is missing AND whose
+ *     policy is `'skip'`. Caller should emit `onVolumeIssue`
+ *     events for each.
+ *   - `aborted`: host-path volumes whose source is missing AND whose
+ *     policy is `'abort'`. Caller should emit `onVolumeIssue`
+ *     events then throw.
+ *
+ * Bare-string entries and `ifMissing: 'create'` entries always end
+ * up in `kept` (the runtime auto-creates the host dir on demand,
+ * matching today's behaviour for the bare-string form).
+ *
+ * Named volumes (source without a leading `/` or `.`) always end up
+ * in `kept` regardless of policy — the runtime owns their lifecycle.
+ *
+ * `probe` is the host-path existence check; defaults to `existsSync`.
+ * Tests inject a stub so they don't touch the filesystem.
+ */
+export function classifyVolumeSources(
+  volumes: Record<string, string | VolumeSpec> | undefined,
+  probe: (path: string) => boolean = existsSync,
+): {
+  kept: Record<string, string>;
+  skipped: Array<{ containerPath: string; source: string }>;
+  aborted: Array<{ containerPath: string; source: string }>;
+} {
+  const kept: Record<string, string> = {};
+  const skipped: Array<{ containerPath: string; source: string }> = [];
+  const aborted: Array<{ containerPath: string; source: string }> = [];
+  if (!volumes) return { kept, skipped, aborted };
+
+  for (const [containerPath, raw] of Object.entries(volumes)) {
+    const source = typeof raw === "string" ? raw : raw.source;
+    const policy =
+      typeof raw === "string" ? "create" : (raw.ifMissing ?? "create");
+
+    // Named volumes (no leading `/` or `.`) pass through unchanged —
+    // the runtime owns their lifecycle. Don't even probe — there is
+    // no host path to check.
+    const isHostPath = source.startsWith("/") || source.startsWith(".");
+    if (!isHostPath) {
+      kept[containerPath] = source;
+      continue;
+    }
+
+    // Host path: only the missing case differentiates policies.
+    if (probe(source)) {
+      kept[containerPath] = source;
+      continue;
+    }
+
+    if (policy === "skip") {
+      skipped.push({ containerPath, source });
+    } else if (policy === "abort") {
+      aborted.push({ containerPath, source });
+    } else {
+      // 'create' — keep the volume; runtime will auto-create the host
+      // dir at container-create time. Matches today's bare-string
+      // behaviour.
+      kept[containerPath] = source;
+    }
+  }
+
+  return { kept, skipped, aborted };
+}
+
+/**
+ * Given the volume issues from the last `ensureRunning` call (both
+ * skipped and aborted entries) and the current call's classification,
+ * return the list of entries that are now present and applied — i.e.
+ * recovered. Used to fire `onVolumeIssue` with `action: 'recovered'`
+ * after the inner `ensureRunning` has recreated the container to
+ * include the recovered mount.
+ *
+ * A volume has "recovered" when:
+ *   - it was in `prior.skipped` or `prior.aborted` (i.e. missing on
+ *     the last call), AND
+ *   - it is NOT in the current call's `currentSkipped` or
+ *     `currentAborted` (i.e. it is no longer missing), AND
+ *   - its `containerPath` is in `kept` (i.e. the runtime will actually
+ *     mount it this time).
+ *
+ * Pure function — no I/O.
+ */
+export function collectRecoveredVolumes(
+  prior:
+    | {
+        skipped: Array<{ containerPath: string; source: string }>;
+        aborted: Array<{ containerPath: string; source: string }>;
+      }
+    | undefined,
+  currentSkipped: Array<{ containerPath: string; source: string }>,
+  currentAborted: Array<{ containerPath: string; source: string }>,
+  kept: Record<string, string>,
+): Array<{ containerPath: string; source: string }> {
+  if (!prior) return [];
+  const stillMissing = new Set(
+    [...currentSkipped, ...currentAborted].map((v) => v.containerPath),
+  );
+  const recovered: Array<{ containerPath: string; source: string }> = [];
+  for (const v of [...prior.skipped, ...prior.aborted]) {
+    if (!stillMissing.has(v.containerPath) && v.containerPath in kept) {
+      recovered.push(v);
+    }
+  }
+  return recovered;
 }
 
 export function qualifyImage(
@@ -714,10 +841,10 @@ export function diffContainerConfig(
   // Volumes: build canonical Map<containerPath, hostPath> for each side.
   const requestedVolumes = new Map<string, string>();
   if (requested.volumes) {
-    for (const [containerPath, hostPath] of Object.entries(requested.volumes)) {
+    for (const [containerPath, raw] of Object.entries(requested.volumes)) {
       requestedVolumes.set(
         stripTrailingSlash(containerPath),
-        stripTrailingSlash(hostPath),
+        stripTrailingSlash(volumeSource(raw)),
       );
     }
   }
@@ -790,8 +917,8 @@ function buildRunArgs(
   }
 
   if (config.volumes) {
-    for (const [containerPath, hostPath] of Object.entries(config.volumes)) {
-      args.push("-v", volumeArg(hostPath, containerPath, runtime));
+    for (const [containerPath, raw] of Object.entries(config.volumes)) {
+      args.push("-v", volumeArg(volumeSource(raw), containerPath, runtime));
     }
   }
 
