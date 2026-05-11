@@ -1,0 +1,158 @@
+language: en-US
+
+reviews:
+  profile: assertive
+  auto_review:
+    enabled: true
+    drafts: false
+  high_level_summary_instructions: |
+    Write all summaries in present tense.
+    Describe what the code does, not what it did.
+    Example: "This PR adds feature X" instead of "This PR added feature X"
+
+  path_instructions:
+    - path: "**/*"
+      instructions: |
+        ## Repository workflow
+
+        signalk-container ships as an npm package consumed by Signal K
+        plugins. The maintainer owns the release process — version bumps
+        happen in their own `chore(release): X.Y.Z` PR, separate from
+        feature/fix work. **Do not include `package.json` version changes
+        in feature or fix PRs.** Flag any PR that mixes a `"version"` bump
+        with non-release changes.
+
+        Other workflow rules to enforce:
+        - Branch names use hyphens, not slashes (`fix-something`, not
+          `fix/something`). The Signal K server convention applies here.
+        - Angular conventional commits: `<type>(<scope>): <subject>`.
+          Subject ≤ 50 chars, imperative mood, no period.
+        - No `Co-Authored-By` lines and no "Generated with Claude Code"
+          attribution in commit messages or PR bodies.
+
+        ## Echo comments
+
+        Flag any comment that merely restates what the code already says.
+        Examples to flag:
+        - `// Sets the age` above a function named `setAge()`
+        - `// Loop through items` above a `for` loop
+        - `// returns null on failure` next to `return null` in an error
+          branch
+        These add noise without adding meaning. Request removal or
+        replacement with a comment explaining *why*, not *what*.
+
+        ## Leftover crumbs from intermediate commits
+
+        Check for references to things that existed in earlier commits of
+        this PR but are no longer present — removed variables, old function
+        names, deleted files, superseded approaches. These are confusing
+        to future readers. Flag any comments, docs, or code that refer to
+        something not present in the current state of the branch.
+
+        ## Documentation drift risk
+
+        Flag any `.md` file that contains detailed implementation steps,
+        specific API call sequences, code snippets, or configuration
+        values that are likely to fall out of sync as the code evolves.
+        Documentation should describe architecture and how things work
+        conceptually — not step-by-step instructions that duplicate or
+        shadow the code itself.
+
+        Specifically for this repo: the API reference in
+        `doc/plugin-developer-guide.md` and `README.md`'s API table must
+        stay aligned with `ContainerManagerApi` in `src/types.ts`. Flag
+        any new method on the type that is missing from either doc, or
+        any doc method whose JSDoc-style signature has drifted from the
+        type.
+
+        ## Implementation status in documentation
+
+        Flag any `.md` file that describes implementation progress,
+        status, or build steps (e.g. "Step 3: implement X", "TODO: add Y",
+        "currently implemented as Z"). This belongs in PR descriptions or
+        commit messages, not in documentation. Documentation should
+        describe how things work, not how they were built or what stage
+        they are in.
+
+        Architecture decisions and design rationale are fine. Build
+        narratives are not.
+
+        ## Unchecked items in test plans
+
+        If a PR description or any `.md` file contains a checklist with
+        unchecked items, flag it. Either the work is incomplete, or the
+        checklist should be removed before merge.
+
+        ## Runtime concerns
+
+        signalk-container shells out to `podman`/`docker` via
+        `execRuntime` (`src/runtime.ts`). When reviewing changes to
+        `src/containers.ts`, `src/jobs.ts`, `src/resources.ts`, or
+        `src/updates/`:
+        - Every new external command should accept an injectable `exec`
+          parameter so tests can stub it (see existing
+          `ExecFn = execRuntime` pattern). Flag new direct `execRuntime`
+          calls in exported helpers.
+        - Prefer Go-template format strings (`inspect --format '{{...}}'`)
+          for diff/state probes over JSON parsing of full inspect output —
+          they work uniformly across podman and docker. See
+          `getLiveResources` / `getLiveContainerConfig` for the canonical
+          pattern.
+        - Podman bind mounts get a `:Z` suffix for SELinux relabel;
+          named volumes (no leading `/`) must NOT receive `:Z` — podman
+          rejects it. Use `volumeArg` in `src/containers.ts` rather than
+          building bind strings inline.
+        - Docker reports `HostConfig.NetworkMode` as `"default"` or
+          `"bridge"`; podman rootless reports `"slirp4netns"` or
+          `"pasta"`. The diff path canonicalizes these. Do not introduce
+          new networkMode comparisons without going through
+          `canonicalNetworkMode`.
+
+        ## Tests
+
+        - The test runner is `node:test`. Tests live in `src/test/*.ts`,
+          compile to `dist/test/*.js`, run via `node --test
+          "dist/test/**/*.test.js"`. The glob must be double-quoted so
+          Windows actually expands it (single quotes are passed through
+          literally by cmd).
+        - Container-integration tests (`runJobCallbacks.test.ts`) gate
+          on `hasContainerRuntime()` which returns `null` on Windows.
+          Do not add new integration tests that pull real Linux images
+          without the same guard.
+        - Unit-style tests inject `fakeExec` rather than touching the
+          real runtime. New tests should follow that pattern — see
+          `src/test/getLiveResources.test.ts` and
+          `src/test/diffContainerConfig.test.ts` for the canonical
+          shape.
+
+        ## Cross-plugin API surface
+
+        Consumer plugins access signalk-container via
+        `(globalThis as any).__signalk_containerManager` and then call
+        `await containers.whenReady()` before any other API call. Any
+        change to `ContainerManagerApi` in `src/types.ts` is a public
+        contract change — flag missing JSDoc on new methods, removed
+        methods, or signature-breaking changes that are not called out
+        in the PR description.
+
+        ## What NOT to flag
+
+        Do not flag the following — they are intentional:
+        - The `dist/` directory is generated; do not request edits to
+          files under `dist/`.
+        - Single-character variable names inside Go-template format
+          strings (e.g. `{{.Config.Image}}`). These are runtime syntax,
+          not JS code.
+        - The `_postRecreate` recursion-guard parameter on
+          `ensureRunning` — the underscore prefix is intentional, marks
+          it as an internal-use-only param.
+        - Tests skipping on `process.platform === "win32"` for
+          integration tests that pull Linux images. The Windows runner
+          has Docker Desktop in Windows-container mode; there is no
+          easy way around it.
+
+        ## Scope
+
+        Focus on files changed since master. Think carefully about how
+        changes interact with existing code and documentation — not just
+        the diff in isolation.
