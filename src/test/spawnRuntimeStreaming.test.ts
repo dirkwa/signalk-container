@@ -60,16 +60,25 @@ describe("spawnRuntimeStreaming", { skip: skipOnWindows }, () => {
     assert.deepEqual(lines, ["a", "b", "c"]);
   });
 
-  it("returns a pid for a successfully-spawned child", () => {
+  it("returns a pid for a successfully-spawned child", async () => {
+    let exitCode: number | null | undefined;
     const handle = spawnRuntimeStreaming(
       runtimeStub,
       ["-c", "sleep 60"],
       () => {},
-      { binary: "/bin/bash" },
+      {
+        binary: "/bin/bash",
+        onExit: (code) => {
+          exitCode = code;
+        },
+      },
     );
     assert.equal(typeof handle.pid, "number");
     assert.ok(handle.pid! > 0);
     handle.stop();
+    // Wait for the child to die before exiting the test — see
+    // "stop() is idempotent" for the rationale.
+    await waitFor(() => exitCode !== undefined, "child should exit");
   });
 
   it("stop() actually kills a long-running child", async () => {
@@ -91,16 +100,26 @@ describe("spawnRuntimeStreaming", { skip: skipOnWindows }, () => {
     assert.notEqual(exitCode, undefined);
   });
 
-  it("stop() is idempotent", () => {
+  it("stop() is idempotent", async () => {
+    let exitCode: number | null | undefined;
     const handle = spawnRuntimeStreaming(
       runtimeStub,
       ["-c", "sleep 60"],
       () => {},
-      { binary: "/bin/bash" },
+      {
+        binary: "/bin/bash",
+        onExit: (code) => {
+          exitCode = code;
+        },
+      },
     );
     handle.stop();
     handle.stop();
     handle.stop();
+    // Wait for the child to actually exit before returning — leaving
+    // a half-killed child plus its open stdio pipes registered with
+    // the event loop has been observed to destabilise macOS runners.
+    await waitFor(() => exitCode !== undefined, "child should exit");
   });
 
   it("routes stderr to onError without splitting", async () => {
