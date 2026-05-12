@@ -568,6 +568,11 @@ const RESOURCE_FIELDS = [
 function formatTimeAgo(isoTimestamp: string): string {
   try {
     const then = new Date(isoTimestamp).getTime();
+    // `new Date(...).getTime()` returns NaN for unparseable input —
+    // doesn't throw, so the try/catch alone wouldn't catch it.  Bail
+    // out before the arithmetic propagates NaN through every branch
+    // and lands on "NaNd ago".
+    if (!Number.isFinite(then)) return isoTimestamp;
     const seconds = Math.max(0, Math.floor((Date.now() - then) / 1000));
     if (seconds < 5) return "just now";
     if (seconds < 60) return `${seconds}s ago`;
