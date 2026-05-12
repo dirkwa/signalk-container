@@ -249,15 +249,13 @@ await containers.ensureRunning("questdb", config, {
 });
 ```
 
-signalk-container spawns one `podman logs -f` (or `docker logs -f`) child per container — multiple subscribers (your callback plus any open Logs modal in the config panel) share the same underlying tail. The tail is torn down and respawned automatically on auto-recreate, removed on `containers.remove()`, and stopped on plugin `stop()`.
-
-Lines are combined stdout+stderr (the same shape `podman logs <name>` produces). Per-stream separation isn't supported in this release.
+The subscription survives auto-recreate (the tail re-attaches to the fresh container), is torn down on `containers.remove()`, and stopped on plugin `stop()`. Lines are combined stdout+stderr.
 
 `onContainerLog` accepts either a synchronous handler or an `async` one. Both synchronous throws and rejected promises are caught and logged at error level — handler bugs cannot break container lifecycle.
 
-End users get the same stream via the **Logs** button on every managed-container card in the config panel (live SSE; backfill of last 200 lines; copy + download). The button works for any container regardless of whether your plugin wired `onContainerLog`.
+End users get the same stream via the **Logs** button on every managed-container card in the config panel, regardless of whether your plugin wired `onContainerLog`.
 
-For an explicit one-shot fetch (e.g. attaching log context to a health-check failure), use `containers.getLogs(name, { tail })` — it bypasses the streaming broker and returns the last N lines as a `Promise<string[]>`.
+For an explicit one-shot fetch (e.g. attaching log context to a health-check failure), use `containers.getLogs(name, { tail })` — returns the last N lines as a `Promise<string[]>`.
 
 Both are available in signalk-container 1.7.0+.
 
