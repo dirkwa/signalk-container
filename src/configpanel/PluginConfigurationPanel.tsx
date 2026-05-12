@@ -184,10 +184,10 @@ const S: Record<string, CSSProperties> = {
     gap: 6,
     flexShrink: 0,
   },
-  // Resource-limits editor styles
   containerCard: {
-    // Wraps the existing containerItem + the optional inline editor
-    // so they visually read as one card.
+    // Wraps the container row + the inline limits editor so they
+    // visually read as one card.  Without this wrapper the editor
+    // would appear as a separate floating element below the row.
     background: "#f8f9fa",
     border: "1px solid #e0e0e0",
     borderRadius: 10,
@@ -195,9 +195,6 @@ const S: Record<string, CSSProperties> = {
     overflow: "hidden",
   },
   containerItemFlat: {
-    // containerItem but without the border/background/margin
-    // (those come from containerCard now) and without the
-    // independent border-radius.
     display: "flex",
     alignItems: "center",
     gap: 12,
