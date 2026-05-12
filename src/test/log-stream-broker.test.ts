@@ -311,11 +311,53 @@ describe("LogStreamBroker — startTail propagation", () => {
   });
 });
 
+/**
+ * Poll `check` every `stepMs` until it returns true or the deadline
+ * passes.  Throws a clear error if it times out — flaky CI builds
+ * fail fast instead of giving cryptic "expected 2 got 1" assertions
+ * far away from the cause.
+ */
+async function waitFor(
+  check: () => boolean,
+  label: string,
+  timeoutMs = 1000,
+  stepMs = 5,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (check()) return;
+    await new Promise((r) => setTimeout(r, stepMs));
+  }
+  throw new Error(`waitFor timed out (${timeoutMs}ms): ${label}`);
+}
+
+/**
+ * Assert that a condition stays false for `durationMs`.  Use for
+ * negative claims (e.g. "no respawn should happen").  Shorter than
+ * `waitFor` because we only need long enough to cover the would-be
+ * trigger window plus a small margin.
+ */
+async function assertStays(
+  check: () => boolean,
+  label: string,
+  durationMs: number,
+): Promise<void> {
+  const deadline = Date.now() + durationMs;
+  while (Date.now() < deadline) {
+    if (check())
+      throw new Error(`assertStays violated (${durationMs}ms): ${label}`);
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
 describe("LogStreamBroker — auto-respawn after tail exit", () => {
   // Use a tiny respawn delay so the test suite stays fast.  The
   // production constant is 1000ms.
   const TEST_RESPAWN_DELAY_MS = 5;
-  const POLL_MS = TEST_RESPAWN_DELAY_MS + 20;
+  // Margin for the negative "no respawn happened" assertions.
+  // Production base × ~6 keeps backoff bounded in tests without
+  // exceeding the parent test timeout.
+  const NEGATIVE_WAIT_MS = TEST_RESPAWN_DELAY_MS * 6;
 
   it("respawns the tail when onExit fires with subscribers still attached", async () => {
     const fake = makeFakeTail();
@@ -328,8 +370,7 @@ describe("LogStreamBroker — auto-respawn after tail exit", () => {
     // Underlying child dies (auto-recreate, daemon glitch).  The
     // subscriber stays attached — no new subscribe() call fires.
     fake.killCurrentTail();
-    await new Promise((r) => setTimeout(r, POLL_MS));
-    assert.equal(fake.spawnCount(), 2);
+    await waitFor(() => fake.spawnCount() === 2, "respawn after onExit");
     broker.close("container-removed");
   });
 
@@ -343,8 +384,11 @@ describe("LogStreamBroker — auto-respawn after tail exit", () => {
     fake.killCurrentTail();
     // Unsubscribe before the respawn timer fires.
     unsub();
-    await new Promise((r) => setTimeout(r, POLL_MS));
-    assert.equal(fake.spawnCount(), 1);
+    await assertStays(
+      () => fake.spawnCount() > 1,
+      "no respawn after last unsubscribe",
+      NEGATIVE_WAIT_MS,
+    );
   });
 
   it("does not respawn after close()", async () => {
@@ -356,8 +400,11 @@ describe("LogStreamBroker — auto-respawn after tail exit", () => {
     broker.subscribe({ onLine: () => {} });
     fake.killCurrentTail();
     broker.close("container-removed");
-    await new Promise((r) => setTimeout(r, POLL_MS));
-    assert.equal(fake.spawnCount(), 1);
+    await assertStays(
+      () => fake.spawnCount() > 1,
+      "no respawn after close()",
+      NEGATIVE_WAIT_MS,
+    );
   });
 
   it("applies exponential backoff on repeated exits; a delivered line resets it", async () => {
@@ -368,24 +415,30 @@ describe("LogStreamBroker — auto-respawn after tail exit", () => {
     });
     broker.subscribe({ onLine: () => {} });
     assert.equal(fake.spawnCount(), 1);
-    // Three back-to-back exits with no lines delivered.  Successive
-    // respawn delays scale: 5ms, 10ms, 20ms; total ~35ms.
+    // Three back-to-back exits without delivering a line — each
+    // respawn doubles the delay.  Total finishes well under 1s so
+    // a single waitFor would also work, but staggering keeps the
+    // intent of "this is a backoff sequence" visible.
     fake.killCurrentTail();
-    await new Promise((r) => setTimeout(r, POLL_MS));
-    assert.equal(fake.spawnCount(), 2);
+    await waitFor(() => fake.spawnCount() === 2, "respawn #1");
     fake.killCurrentTail();
-    await new Promise((r) => setTimeout(r, POLL_MS + 10));
-    assert.equal(fake.spawnCount(), 3);
+    await waitFor(() => fake.spawnCount() === 3, "respawn #2 (delayed)");
     fake.killCurrentTail();
-    await new Promise((r) => setTimeout(r, POLL_MS + 30));
-    assert.equal(fake.spawnCount(), 4);
+    await waitFor(
+      () => fake.spawnCount() === 4,
+      "respawn #3 (further delayed)",
+    );
     // A delivered line marks the tail healthy and resets the
-    // counter.  Next exit goes back to the 5ms base — verify the
-    // respawn lands within POLL_MS, not the next backoff step.
+    // counter — the next exit goes back to the fast base delay.
     fake.emit("hello");
     fake.killCurrentTail();
-    await new Promise((r) => setTimeout(r, POLL_MS));
-    assert.equal(fake.spawnCount(), 5);
+    await waitFor(
+      () => fake.spawnCount() === 5,
+      "respawn #4 after backoff reset",
+      // The reset means we expect it within the base delay window;
+      // give just a small margin.
+      TEST_RESPAWN_DELAY_MS * 3,
+    );
     broker.close("container-removed");
   });
 
@@ -414,8 +467,11 @@ describe("LogStreamBroker — auto-respawn after tail exit", () => {
     // identity guard this would null the live handle and schedule
     // another respawn.
     fake.fireOnExitFor(0);
-    await new Promise((r) => setTimeout(r, POLL_MS));
-    assert.equal(fake.spawnCount(), 2);
+    await assertStays(
+      () => fake.spawnCount() > 2,
+      "stale onExit triggered a spurious respawn",
+      NEGATIVE_WAIT_MS,
+    );
     broker.close("container-removed");
   });
 });

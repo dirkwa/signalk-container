@@ -157,7 +157,7 @@ export function createLogStreamBroker(
       spawnIfNeeded();
     }, delay);
     // Don't pin the event loop open during shutdown.
-    (respawnTimer as { unref?: () => void }).unref?.();
+    respawnTimer.unref();
   };
 
   const cancelRespawn = () => {

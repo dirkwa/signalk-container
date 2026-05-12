@@ -1856,17 +1856,31 @@ module.exports = (app: App) => {
         }
         const tail = tailParse.value;
         const since = sinceParse.value;
+        const name = req.params.name;
+        // Deterministic 404 detection — match the stream route.  Don't
+        // regex stderr (locale + runtime-specific phrasing); ask the
+        // runtime directly whether the container exists.
         try {
-          const lines = await api.getLogs(req.params.name, { tail, since });
-          res.json({ name: req.params.name, lines });
+          const state = await getContainerState(runtimeInfo, name);
+          if (state === "missing") {
+            res.status(404).json({ error: `No such container: ${name}` });
+            return;
+          }
         } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          // Treat "no such container" as 404 so the UI can render a
-          // friendlier message than 500.  Runtime stderr varies; both
-          // podman and docker include "No such" or similar in the
-          // error path.
-          const status = /no such|not found/i.test(msg) ? 404 : 500;
-          res.status(status).json({ error: msg });
+          res.status(503).json({
+            error: `Failed to inspect container runtime: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          });
+          return;
+        }
+        try {
+          const lines = await api.getLogs(name, { tail, since });
+          res.json({ name, lines });
+        } catch (err) {
+          res.status(500).json({
+            error: err instanceof Error ? err.message : String(err),
+          });
         }
       });
 
