@@ -1824,16 +1824,38 @@ module.exports = (app: App) => {
           res.status(503).json({ error: "No container runtime available" });
           return;
         }
-        const tailRaw = req.query.tail;
-        const sinceRaw = req.query.since;
-        const tail =
-          typeof tailRaw === "string" && tailRaw !== ""
-            ? Number(tailRaw)
-            : undefined;
-        const since =
-          typeof sinceRaw === "string" && sinceRaw !== ""
-            ? Number(sinceRaw)
-            : undefined;
+        // Validate query params at the boundary.  Reject non-integer
+        // and negative values with 400 — `getContainerLogs` clamps
+        // server-side but that's a fallback, not a substitute for
+        // input validation at the public surface.
+        const parsePositiveInt = (
+          raw: unknown,
+          field: string,
+        ): { value: number | undefined; error?: string } => {
+          if (raw === undefined || raw === "") return { value: undefined };
+          if (typeof raw !== "string")
+            return { value: undefined, error: `${field} must be a string` };
+          const n = Number(raw);
+          if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) {
+            return {
+              value: undefined,
+              error: `${field} must be a non-negative integer (got ${JSON.stringify(raw)})`,
+            };
+          }
+          return { value: n };
+        };
+        const tailParse = parsePositiveInt(req.query.tail, "tail");
+        if (tailParse.error) {
+          res.status(400).json({ error: tailParse.error });
+          return;
+        }
+        const sinceParse = parsePositiveInt(req.query.since, "since");
+        if (sinceParse.error) {
+          res.status(400).json({ error: sinceParse.error });
+          return;
+        }
+        const tail = tailParse.value;
+        const since = sinceParse.value;
         try {
           const lines = await api.getLogs(req.params.name, { tail, since });
           res.json({ name: req.params.name, lines });

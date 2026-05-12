@@ -295,6 +295,14 @@ export async function execRuntimeLong(
  * own for `-f`/follow-style commands.  `pid` is exposed for debug
  * logging only; do not signal it directly.
  */
+/**
+ * Grace period between SIGTERM and SIGKILL when `stop()`-ing a
+ * streaming child.  Long enough for `podman logs -f` to flush its
+ * buffers (sub-second in practice) but short enough that a stuck
+ * child doesn't hold up plugin shutdown.
+ */
+export const SIGTERM_GRACE_PERIOD_MS = 2000;
+
 export interface StreamingProcessHandle {
   /** Stop the child.  Sends SIGTERM, then SIGKILL after a grace
    *  period if the process is still alive.  Idempotent. */
@@ -391,8 +399,9 @@ export function spawnRuntimeStreaming(
     } catch {
       /* already dead */
     }
-    // Grace period — give the child 2s to exit cleanly before SIGKILL.
-    // `unref()` so the timer doesn't hold the event loop open.
+    // Grace period — give the child time to exit cleanly before
+    // SIGKILL.  See SIGTERM_GRACE_PERIOD_MS.  `unref()` so the timer
+    // doesn't hold the event loop open.
     setTimeout(() => {
       if (proc && proc.exitCode === null && !proc.killed) {
         try {
@@ -401,7 +410,7 @@ export function spawnRuntimeStreaming(
           /* already dead */
         }
       }
-    }, 2000).unref();
+    }, SIGTERM_GRACE_PERIOD_MS).unref();
   };
 
   return { stop, pid: proc.pid };

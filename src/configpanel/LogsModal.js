@@ -123,6 +123,9 @@ export default function LogsModal({ name, onClose }) {
   const bodyRef = useRef(null);
   const esRef = useRef(null);
   const userScrolledUpRef = useRef(false);
+  const modalRef = useRef(null);
+  const closeBtnRef = useRef(null);
+  const previouslyFocusedRef = useRef(null);
 
   // Append helper — caps the buffer so unbounded growth can't pin
   // the DOM.
@@ -266,6 +269,61 @@ export default function LogsModal({ name, onClose }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  // Focus management: remember the element that had focus before
+  // the modal opened, move focus to the Close button on mount,
+  // restore focus on unmount.
+  useEffect(() => {
+    previouslyFocusedRef.current =
+      typeof document !== "undefined" ? document.activeElement : null;
+    // Defer to after paint so the button exists in the DOM.
+    const t = setTimeout(() => {
+      closeBtnRef.current?.focus();
+    }, 0);
+    return () => {
+      clearTimeout(t);
+      const prev = previouslyFocusedRef.current;
+      if (prev && typeof prev.focus === "function") {
+        try {
+          prev.focus();
+        } catch {
+          /* element may have been removed */
+        }
+      }
+    };
+  }, []);
+
+  // Focus trap: keep Tab cycling within the modal's focusable
+  // elements so keyboard users can't tab out into the config panel
+  // behind.  Listen on the modal container; let other keys bubble
+  // (ESC is handled by the window listener above).
+  const onModalKeyDown = useCallback((e) => {
+    if (e.key !== "Tab") return;
+    const root = modalRef.current;
+    if (!root) return;
+    // Visible, focusable elements only.  Buttons + the <pre> are
+    // sufficient for this modal — no inputs or links.
+    const focusable = Array.from(
+      root.querySelectorAll(
+        'button:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ),
+    ).filter((el) => el.offsetParent !== null);
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    const active = document.activeElement;
+    if (e.shiftKey) {
+      if (active === first || !root.contains(active)) {
+        e.preventDefault();
+        last.focus();
+      }
+    } else {
+      if (active === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    }
+  }, []);
+
   // Close on overlay click (but not when clicking inside the modal).
   const onOverlayClick = useCallback(
     (e) => {
@@ -295,7 +353,7 @@ export default function LogsModal({ name, onClose }) {
       aria-modal="true"
       aria-label={`Logs for ${name}`}
     >
-      <div style={S.modal}>
+      <div style={S.modal} ref={modalRef} onKeyDown={onModalKeyDown}>
         <div style={S.header}>
           <span style={{ ...S.statusDot, ...statusStyle }} title={statusText} />
           <span style={S.title}>{name}</span>
@@ -328,7 +386,12 @@ export default function LogsModal({ name, onClose }) {
           >
             Download
           </button>
-          <button type="button" style={S.closeBtn} onClick={onClose}>
+          <button
+            type="button"
+            style={S.closeBtn}
+            onClick={onClose}
+            ref={closeBtnRef}
+          >
             Close
           </button>
         </div>
