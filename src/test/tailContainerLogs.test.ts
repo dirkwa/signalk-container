@@ -11,6 +11,7 @@ const runtime: ContainerRuntimeInfo = {
 
 interface SpawnCall {
   args: string[];
+  mergeStderr?: boolean;
 }
 
 /**
@@ -24,8 +25,10 @@ function makeStubSpawn() {
   const stub: typeof import("../runtime").spawnRuntimeStreaming = (
     _runtime,
     args,
+    _onLine,
+    options,
   ) => {
-    calls.push({ args: [...args] });
+    calls.push({ args: [...args], mergeStderr: options?.mergeStderr });
     return {
       stop: () => {
         stopCount++;
@@ -83,6 +86,17 @@ describe("tailContainerLogs", () => {
     handle.stop();
     handle.stop();
     assert.equal(stub.stopCount(), 2);
+  });
+
+  it("sets mergeStderr so container stderr reaches onLine", () => {
+    // Regression for the bug where mayara (a Rust container that
+    // logs everything to stderr) produced no SSE output while
+    // spamming SK's server log as `tail error: ...`.  Combined
+    // stdout+stderr is the documented contract; the spawn options
+    // must reflect that.
+    const stub = makeStubSpawn();
+    tailContainerLogs(runtime, "foo", () => {}, { spawn: stub.spawn });
+    assert.equal(stub.calls[0].mergeStderr, true);
   });
 
   it("normalizes NaN/Infinity/negative startTail to 0", () => {

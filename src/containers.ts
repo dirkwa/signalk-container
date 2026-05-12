@@ -264,6 +264,14 @@ export function tailContainerLogs(
   return spawnFn(runtime, ["logs", "-f", "--tail", tail, fullName], onLine, {
     onError: options?.onError,
     onExit: options?.onExit,
+    // Container stderr is part of the log stream the user wants
+    // to see — `podman logs -f` forwards it on its own stderr fd,
+    // and we want it on the same `onLine` channel as stdout.
+    // Without this, Rust/Go apps that log to stderr (mayara, etc.)
+    // appear silent in the modal while spamming SK's server log
+    // as "tail error".  Matches the combined-output semantics
+    // documented for `podman logs <name>`.
+    mergeStderr: true,
   });
 }
 
