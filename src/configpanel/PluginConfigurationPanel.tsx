@@ -6,6 +6,7 @@ import type {
   ContainerRuntimeInfo,
   PluginConfig,
 } from "../types";
+import type { UpdateCheckResult } from "../updates/types";
 
 interface SelectOption {
   label: string;
@@ -57,35 +58,6 @@ interface ApplyResult {
   warnings?: string[];
   error?: string;
   effective?: ContainerResourceLimits;
-}
-
-/**
- * Update-check result as returned by `GET /api/updates`.  Shape is
- * the consumer-plugin's `UpdateCheckResult` (not currently exported
- * from `src/types.ts` — defining the fields locally to the extent
- * the panel reads them).
- */
-interface UpdateCheckResult {
-  containerName?: string;
-  pluginId?: string;
-  reason?:
-    | "up-to-date"
-    | "newer-version"
-    | "older-than-pinned"
-    | "digest-drift"
-    | "offline"
-    | "error"
-    | "unknown";
-  runningTag?: string;
-  currentVersion?: string;
-  latestVersion?: string;
-  updateAvailable?: boolean;
-  fromCache?: boolean;
-  error?: string;
-  /** ISO timestamp of the last successful check; populated by the
-   *  update service alongside the latest result.  Used by the
-   *  staleness indicator. */
-  lastSuccessfulCheckAt?: string;
 }
 
 interface PluginConfigurationPanelProps {
