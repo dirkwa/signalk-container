@@ -12,7 +12,10 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
  *     ref-count drops on the server side and it stops the tail
  *     when no other subscribers remain.
  *   - The user can toggle auto-scroll, copy the visible text, or
- *     download a `sk-<name>-<ts>.log` file.
+ *     download a `<name>-<ts>.log` file.  `name` is whatever the
+ *     server returned for the container; today it's already
+ *     `sk-`-prefixed because that's the convention but the modal
+ *     doesn't depend on the prefix.
  *
  * Capped at MAX_LINES in memory so a chatty container left open
  * for hours doesn't pin a noticeable amount of DOM.

@@ -73,4 +73,28 @@ describe("parsePositiveIntQuery", () => {
     const r = parsePositiveIntQuery("-1", "tail");
     assert.match(r.error ?? "", /"-1"/);
   });
+
+  it("rejects hex notation (0x10)", () => {
+    const r = parsePositiveIntQuery("0x10", "tail");
+    assert.equal(r.value, undefined);
+    assert.match(r.error ?? "", /tail/);
+  });
+
+  it("rejects scientific notation (1e3)", () => {
+    const r = parsePositiveIntQuery("1e3", "tail");
+    assert.equal(r.value, undefined);
+    assert.match(r.error ?? "", /tail/);
+  });
+
+  it("rejects leading plus sign (+5)", () => {
+    const r = parsePositiveIntQuery("+5", "tail");
+    assert.equal(r.value, undefined);
+    assert.match(r.error ?? "", /tail/);
+  });
+
+  it("rejects whitespace (' 5 ')", () => {
+    const r = parsePositiveIntQuery(" 5 ", "tail");
+    assert.equal(r.value, undefined);
+    assert.match(r.error ?? "", /tail/);
+  });
 });

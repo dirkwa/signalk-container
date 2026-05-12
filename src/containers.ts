@@ -285,8 +285,17 @@ export function parsePositiveIntQuery(
   if (raw === undefined || raw === "") return { value: undefined };
   if (typeof raw !== "string")
     return { value: undefined, error: `${field} must be a string` };
+  // Decimal digits only — reject hex (`0x10`), scientific (`1e3`),
+  // signs (`+5`), and any whitespace.  `Number(raw)` accepts all of
+  // those silently which is surprising for an integer query param.
+  if (!/^[0-9]+$/.test(raw)) {
+    return {
+      value: undefined,
+      error: `${field} must be a non-negative integer (got ${JSON.stringify(raw)})`,
+    };
+  }
   const n = Number(raw);
-  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) {
+  if (!Number.isFinite(n) || !Number.isSafeInteger(n)) {
     return {
       value: undefined,
       error: `${field} must be a non-negative integer (got ${JSON.stringify(raw)})`,
