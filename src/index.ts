@@ -34,12 +34,14 @@ import {
   ensureRunning,
   execInContainer,
   getActualPortBindings,
+  getContainerLogs,
   getContainerState,
   getImageDigest,
   getLiveResources,
   imageExists,
   listContainers,
   findSelfContainerId,
+  parsePositiveIntQuery,
   pruneImages,
   pullImage,
   qualifyImage as qualifyImageForRuntime,
@@ -50,10 +52,13 @@ import {
   resolveHostPath,
   resolveSignalkDataSource,
   resolveSignalkNetworks,
+  safeInvokeContainerLog,
   safeInvokeVolumeIssue,
   startContainer,
   stopContainer,
+  tailContainerLogs,
 } from "./containers";
+import { createLogStreamBroker, LogStreamBroker } from "./log-stream-broker";
 import { runJob, cleanupOrphanedJobs } from "./jobs";
 import { UpdateService } from "./updates/service";
 import { FileUpdateCache } from "./updates/cache";
@@ -90,6 +95,13 @@ interface App {
   ) => void;
   [key: string]: unknown;
 }
+
+/**
+ * SSE comment-frame heartbeat interval.  30s is comfortably below
+ * common reverse-proxy idle-read timeouts (nginx default 60s) but
+ * not so frequent that quiet streams pay a noticeable cost.
+ */
+const SSE_HEARTBEAT_MS = 30_000;
 
 module.exports = (app: App) => {
   let runtimeInfo: ContainerRuntimeInfo | null = null;
@@ -136,6 +148,16 @@ module.exports = (app: App) => {
       aborted: Array<{ containerPath: string; source: string }>;
     }
   >();
+  // Per-container log-stream broker.  Lazily created on first subscribe
+  // (either from `onContainerLog` or the SSE route), torn down when
+  // the last subscriber unsubscribes OR when the container is
+  // removed.  See src/log-stream-broker.ts for the fan-out model.
+  const logStreamBrokers = new Map<string, LogStreamBroker>();
+  // Tracks the latest `onContainerLog` unsubscribe fn per container
+  // so auto-recreate (and re-calls of ensureRunning with a different
+  // callback) can cancel the prior subscription before installing
+  // the new one.
+  const perCallOnContainerLogUnsub = new Map<string, () => void>();
   let currentOverrides: Record<string, ContainerResourceLimits> = {};
   // Cached result of resolveSignalkDataSource() — resolved once on first
   // ensureRunning() call that uses signalkDataMount, then reused.
@@ -368,6 +390,40 @@ module.exports = (app: App) => {
     if (!(name in currentOverrides)) return;
     delete currentOverrides[name];
     persistOverridesToDisk(`clearOverride(${name})`);
+  }
+
+  /**
+   * Return the log-stream broker for `name`, lazily creating it on
+   * the first subscribe.  Subscribers (an `onContainerLog` callback
+   * or an SSE handler) share a single underlying `podman logs -f`
+   * child.  Throws if the runtime isn't initialised yet.
+   *
+   * Also accepts an optional `startTail` to seed the broker on
+   * first creation only — once a broker is alive, subsequent
+   * `getOrCreateBroker` calls return the existing instance and
+   * `startTail` is ignored.  This matches the documented limit
+   * on `EnsureRunningOptions.onContainerLogStartTail`.
+   */
+  function getOrCreateBroker(
+    name: string,
+    startTail?: number,
+  ): LogStreamBroker {
+    let broker = logStreamBrokers.get(name);
+    if (broker && !broker.isClosed()) return broker;
+    if (!runtimeInfo) throw new Error("No container runtime available");
+    broker = createLogStreamBroker(runtimeInfo, name, {
+      startTail,
+      spawnTail: tailContainerLogs,
+      onTailError: (msg) => app.error(`logs(${name}): tail error: ${msg}`),
+      onSubscriberError: (err) =>
+        app.error(
+          `logs(${name}): subscriber threw: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        ),
+    });
+    logStreamBrokers.set(name, broker);
+    return broker;
   }
 
   const api: ContainerManagerApi = {
@@ -882,6 +938,41 @@ module.exports = (app: App) => {
         });
       }
 
+      // onContainerLog: subscribe the plugin callback (if any) to the
+      // per-container broker.  Re-entry from auto-recreate (or a
+      // fresh consumer-plugin call) cancels the prior subscription
+      // before re-subscribing — without this, two callbacks would
+      // accumulate per recreate and the old one would be unreachable
+      // (still inside the broker's subscriber set).
+      if (options?.onContainerLog) {
+        perCallOnContainerLogUnsub.get(name)?.();
+        const userOnContainerLog = options.onContainerLog;
+        const broker = getOrCreateBroker(name, options.onContainerLogStartTail);
+        const unsub = broker.subscribe({
+          onLine: (line) =>
+            safeInvokeContainerLog(userOnContainerLog, line, (err) =>
+              app.error(
+                `ensureRunning(${name}): onContainerLog handler threw: ${
+                  err instanceof Error ? err.message : String(err)
+                }`,
+              ),
+            ),
+        });
+        perCallOnContainerLogUnsub.set(name, unsub);
+      } else {
+        // Caller explicitly removed onContainerLog this call —
+        // drop any prior subscription so we don't keep feeding a
+        // detached callback.  If that drains the broker, evict it
+        // from the Map so a fresh subscriber later spawns a clean
+        // tail (mirrors the SSE-disconnect cleanup below).
+        perCallOnContainerLogUnsub.get(name)?.();
+        perCallOnContainerLogUnsub.delete(name);
+        const broker = logStreamBrokers.get(name);
+        if (broker && !broker.isClosed() && broker.subscriberCount() === 0) {
+          logStreamBrokers.delete(name);
+        }
+      }
+
       if (options?.healthCheck) {
         const existing = healthTimers.get(name);
         if (existing) clearInterval(existing);
@@ -951,6 +1042,15 @@ module.exports = (app: App) => {
       if (!runtimeInfo) throw new Error("No container runtime available");
       await removeContainer(runtimeInfo, name);
       evictContainerAddresses(name);
+      // Tear down the log-stream broker — notifies any SSE clients
+      // with `event: end` and stops the underlying `podman logs -f`.
+      // Plugin `onContainerLog` callbacks just stop receiving lines.
+      const broker = logStreamBrokers.get(name);
+      if (broker) {
+        broker.close("container-removed");
+        logStreamBrokers.delete(name);
+      }
+      perCallOnContainerLogUnsub.delete(name);
     },
 
     async getState(name: string): Promise<ContainerState> {
@@ -961,6 +1061,14 @@ module.exports = (app: App) => {
     async runJob(config: ContainerJobConfig): Promise<ContainerJobResult> {
       if (!runtimeInfo) throw new Error("No container runtime available");
       return runJob(runtimeInfo, config);
+    },
+
+    async getLogs(
+      name: string,
+      options?: { tail?: number; since?: number },
+    ): Promise<string[]> {
+      if (!runtimeInfo) throw new Error("No container runtime available");
+      return getContainerLogs(runtimeInfo, name, options);
     },
 
     async cleanupOrphanedJobs(filter: {
@@ -1517,6 +1625,14 @@ module.exports = (app: App) => {
       }
       lastConfigs.clear();
       lastVolumeIssues.clear();
+      // Force-close every broker; SSE clients still attached receive
+      // `event: end` and disconnect.  `podman logs -f` children get
+      // SIGTERM via the broker's stop-tail path.
+      for (const broker of logStreamBrokers.values()) {
+        broker.close("plugin-stopped");
+      }
+      logStreamBrokers.clear();
+      perCallOnContainerLogUnsub.clear();
       effectiveResources.clear();
       pluginDefaults.clear();
       currentOverrides = {};
@@ -1711,6 +1827,175 @@ module.exports = (app: App) => {
             error: err instanceof Error ? err.message : "Unknown error",
           });
         }
+      });
+
+      // One-shot log fetch (no streaming).  Defaults `tail=200`,
+      // max 10000 (enforced inside getContainerLogs).  `since` is
+      // unix-epoch seconds.  Used by the UI Logs modal to paint
+      // initial history before opening the SSE stream.
+      router.get("/api/containers/:name/logs", async (req, res) => {
+        if (!runtimeInfo) {
+          res.status(503).json({ error: "No container runtime available" });
+          return;
+        }
+        // Validate query params at the boundary.  Reject non-integer
+        // and negative values with 400 — `getContainerLogs` clamps
+        // server-side but that's a fallback, not a substitute for
+        // input validation at the public surface.  See
+        // `parsePositiveIntQuery` in containers.ts (exported so it
+        // can be tested in isolation).
+        const tailParse = parsePositiveIntQuery(req.query.tail, "tail");
+        if (tailParse.error) {
+          res.status(400).json({ error: tailParse.error });
+          return;
+        }
+        const sinceParse = parsePositiveIntQuery(req.query.since, "since");
+        if (sinceParse.error) {
+          res.status(400).json({ error: sinceParse.error });
+          return;
+        }
+        const tail = tailParse.value;
+        const since = sinceParse.value;
+        const name = req.params.name;
+        // Deterministic 404 detection — match the stream route.  Don't
+        // regex stderr (locale + runtime-specific phrasing); ask the
+        // runtime directly whether the container exists.
+        try {
+          const state = await getContainerState(runtimeInfo, name);
+          if (state === "missing") {
+            res.status(404).json({ error: `No such container: ${name}` });
+            return;
+          }
+        } catch (err) {
+          res.status(503).json({
+            error: `Failed to inspect container runtime: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          });
+          return;
+        }
+        try {
+          const lines = await api.getLogs(name, { tail, since });
+          res.json({ name, lines });
+        } catch (err) {
+          res.status(500).json({
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      });
+
+      // SSE stream of live log lines.  Subscriber to the per-container
+      // broker; auto-disconnects when the client goes away.  Closes
+      // with `event: end` when the container is removed or the plugin
+      // is stopped.  See `LogStreamBroker` for fan-out semantics.
+      router.get("/api/containers/:name/logs/stream", async (req, res) => {
+        if (!runtimeInfo) {
+          res.status(503).json({ error: "No container runtime available" });
+          return;
+        }
+        const { name } = req.params;
+        // Preflight: don't open the SSE stream against a container
+        // that doesn't exist.  Otherwise the client connects, gets
+        // 200, and immediately receives `event: end` from the
+        // broker's `onTailError` — visually confusing and wastes a
+        // round-trip on an obvious 404.  Wrap the inspect call —
+        // `getContainerState` can throw if the runtime is busy or
+        // exec itself fails, and we still want a clean JSON error.
+        try {
+          const state = await getContainerState(runtimeInfo, name);
+          if (state === "missing") {
+            res.status(404).json({ error: `No such container: ${name}` });
+            return;
+          }
+        } catch (err) {
+          res.status(503).json({
+            error: `Failed to inspect container runtime: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          });
+          return;
+        }
+        res.writeHead(200, {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+          // Tells nginx (and most reverse proxies) not to buffer the
+          // response so each line reaches the browser immediately.
+          "X-Accel-Buffering": "no",
+        });
+        res.write("event: hello\ndata: connected\n\n");
+
+        let broker: LogStreamBroker;
+        try {
+          broker = getOrCreateBroker(name);
+        } catch (err) {
+          // Defensive — runtimeInfo was non-null above but could in
+          // theory become null between the check and getOrCreateBroker.
+          res.write(
+            `event: end\ndata: ${err instanceof Error ? err.message : String(err)}\n\n`,
+          );
+          res.end();
+          return;
+        }
+
+        const unsub = broker.subscribe({
+          onLine: (line) => {
+            // Replace any embedded newlines with spaces — SSE `data:`
+            // frames are line-oriented and our upstream splitter
+            // already emits one line at a time, so this is defensive.
+            const safeLine = line.replace(/[\r\n]+/g, " ");
+            // Guard the write: a client disconnect can fire between
+            // the broker emitting a line and node delivering it to
+            // this callback, and `res.write` on an ended/destroyed
+            // response throws ERR_STREAM_WRITE_AFTER_END.  Without
+            // this guard the throw would propagate up through the
+            // broker fan-out and noisily route via `onTailError`.
+            if (res.writableEnded || res.destroyed) return;
+            try {
+              res.write(`data: ${safeLine}\n\n`);
+            } catch {
+              /* connection already gone; req.close handler will fire */
+            }
+          },
+          onClose: (reason) => {
+            // Same race as onLine: client may have disconnected
+            // before this fires.  res.write/res.end on an ended
+            // response throws ERR_STREAM_WRITE_AFTER_END.
+            if (res.writableEnded || res.destroyed) return;
+            try {
+              res.write(`event: end\ndata: ${reason}\n\n`);
+              res.end();
+            } catch {
+              /* connection already gone */
+            }
+          },
+        });
+
+        // Heartbeat keeps reverse-proxy idle timeouts at bay during
+        // quiet container periods.  Sent as an SSE comment frame
+        // (single `:` line) — clients ignore it.  `unref()` so the
+        // timer doesn't hold the event loop open during shutdown;
+        // req.on("close") clears it on normal disconnect.
+        const heartbeat = setInterval(() => {
+          try {
+            res.write(": heartbeat\n\n");
+          } catch {
+            /* connection already gone; req.close handler will fire */
+          }
+        }, SSE_HEARTBEAT_MS);
+        heartbeat.unref();
+
+        req.on("close", () => {
+          clearInterval(heartbeat);
+          unsub();
+          const live = logStreamBrokers.get(name);
+          if (live && !live.isClosed() && live.subscriberCount() === 0) {
+            // Last subscriber went away — the broker stopped its
+            // tail in `unsub()`; drop the Map entry so a fresh
+            // subscribe later spawns a new broker.
+            logStreamBrokers.delete(name);
+          }
+        });
       });
 
       router.post("/api/prune", async (_req, res) => {

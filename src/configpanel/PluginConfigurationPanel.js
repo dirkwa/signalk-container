@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from "react";
+import LogsModal from "./LogsModal";
 
 const S = {
   root: {
@@ -956,6 +957,8 @@ export default function PluginConfigurationPanel({ configuration, save }) {
   const [checking, setChecking] = useState(new Set());
   // Which container rows have their resource editor expanded.
   const [expandedLimits, setExpandedLimits] = useState(new Set());
+  // Name of the container whose Logs modal is currently open, or null.
+  const [logsModalFor, setLogsModalFor] = useState(null);
   const [loading, setLoading] = useState(true);
   const [actionStatus, setActionStatus] = useState("");
   const [statusError, setStatusError] = useState(false);
@@ -1532,6 +1535,18 @@ export default function PluginConfigurationPanel({ configuration, save }) {
                     </button>
                   )}
                   <button
+                    style={{
+                      ...S.btn,
+                      background: "#fff",
+                      color: "#374151",
+                      border: "1px solid #d1d5db",
+                    }}
+                    onClick={() => setLogsModalFor(ct.name)}
+                    title="Stream the container's stdout+stderr log"
+                  >
+                    Logs
+                  </button>
+                  <button
                     style={{ ...S.btn, ...S.btnDanger }}
                     onClick={() => removeContainer(ct.name, ct.state)}
                   >
@@ -1655,6 +1670,10 @@ export default function PluginConfigurationPanel({ configuration, save }) {
       <button style={{ ...S.btn, ...S.btnSave }} onClick={doSave}>
         Save Configuration
       </button>
+
+      {logsModalFor && (
+        <LogsModal name={logsModalFor} onClose={() => setLogsModalFor(null)} />
+      )}
     </div>
   );
 }
