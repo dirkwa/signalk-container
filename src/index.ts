@@ -1922,7 +1922,21 @@ module.exports = (app: App) => {
           // Tells nginx (and most reverse proxies) not to buffer the
           // response so each line reaches the browser immediately.
           "X-Accel-Buffering": "no",
+          // Explicitly opt out of compression — some Express
+          // middleware stacks (including older Signal K builds)
+          // buffer up to the gzip block size before flushing,
+          // which silently delays the first SSE frame past the
+          // 30s timeout in EventSource client implementations.
+          "Content-Encoding": "identity",
         });
+        // Force the headers (and any queued body) onto the wire
+        // now — without this, Express keeps the response in a
+        // "wait for more" state until `res.end()` or a sufficient
+        // body chunk arrives.  For SSE that means the `hello`
+        // frame below would sit in the kernel send buffer instead
+        // of reaching the client, leaving the modal stuck at
+        // "Backfilled — opening live stream…".
+        res.flushHeaders();
         res.write("event: hello\ndata: connected\n\n");
 
         let broker: LogStreamBroker;
