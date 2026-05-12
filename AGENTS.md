@@ -63,7 +63,7 @@ Three-layer structure (`src/runtime.ts` → `src/containers.ts` → `src/log-str
 
 1. `spawnRuntimeStreaming` (`src/runtime.ts`) — primitive that wraps `child_process.spawn(podman/docker, args)` with a `stop()` handle and a `makeLineSplitter`-fed `onLine` callback. Used for any long-running runtime command that needs streaming output; `tailContainerLogs` is its only current caller. Returns synchronously with a stop-handle — unlike `execRuntimeLong` which awaits process exit.
 2. `tailContainerLogs` (`src/containers.ts`) — thin helper that composes `["logs", "-f", "--tail", N, prefixedName(name)]` and delegates to `spawnRuntimeStreaming`. `getContainerLogs` is the one-shot sibling (no `-f`, returns a `string[]`).
-3. `LogStreamBroker` (`src/log-stream-broker.ts`) — per-container fan-out. First subscribe spawns the tail; last unsubscribe stops it; tail exit nulls the cached handle so the next subscribe respawns (self-healing). Brokers are stored in a `Map<containerName, LogStreamBroker>` on the wrapper.
+3. `LogStreamBroker` (`src/log-stream-broker.ts`) — per-container fan-out. First subscribe spawns the tail; last unsubscribe stops it. On tail exit with subscribers still attached, the broker auto-respawns after a 1s delay (`RESPAWN_DELAY_MS`) so SSE-only consumers recover from auto-recreate or daemon glitches without waiting for a fresh subscribe. The 1s delay debounces the loop on genuine container removal — `containers.remove(name)` → `close()` lands first and cancels the pending timer. Brokers are stored in a `Map<containerName, LogStreamBroker>` on the wrapper.
 
 Consumer surfaces:
 

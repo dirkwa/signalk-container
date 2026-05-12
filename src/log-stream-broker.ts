@@ -2,6 +2,17 @@ import { tailContainerLogs } from "./containers";
 import { ContainerRuntimeInfo } from "./types";
 
 /**
+ * Delay between an underlying tail exiting and the broker trying
+ * to respawn it, when subscribers are still attached.  Long enough
+ * that the wrapper's `containers.remove(name)` → `close()` race
+ * can win on the explicit-remove path; short enough that an
+ * auto-recreate gap stays imperceptible.  When the new container
+ * doesn't materialise (true removal), each cycle costs one wasted
+ * spawn-and-exit per second until `close()` lands.
+ */
+const RESPAWN_DELAY_MS = 1000;
+
+/**
  * Why this exists / when the user is at risk
  *
  * Every place that wants to consume a managed container's log stream
@@ -21,10 +32,11 @@ import { ContainerRuntimeInfo } from "./types";
  *
  *   Auto-recreate inside `ensureRunning` removes the live
  *   container and recursively re-enters.  The broker's underlying
- *   tail child sees its target disappear and exits naturally.  The
- *   broker's `onExit` handler nulls its `tail` reference so the
- *   wrapper's *next* subscribe re-spawns against the fresh
- *   container.  Subscribers see a brief gap; no zombie children.
+ *   tail child sees its target disappear and exits naturally.  If
+ *   subscribers are still attached, the broker auto-respawns after
+ *   a 1s delay so SSE-only consumers (no plugin re-subscribe event
+ *   to ride on) recover transparently.  Subscribers see a brief
+ *   gap; no zombie children.
  *
  *   `containers.remove(name)` closes the broker explicitly
  *   (`close('container-removed')`), notifying every subscriber.
@@ -82,16 +94,23 @@ export function createLogStreamBroker(
     onTailError?: (msg: string) => void;
     /** Surfaces per-subscriber `onLine` throws. */
     onSubscriberError?: (err: unknown, subscriberIndex: number) => void;
+    /** Test injection: shorter delay before auto-respawning the tail
+     *  after onExit.  Defaults to `RESPAWN_DELAY_MS` (1s) in prod. */
+    respawnDelayMs?: number;
   },
 ): LogStreamBroker {
   const spawnTail = options?.spawnTail ?? tailContainerLogs;
   const startTail = options?.startTail ?? 0;
   const onTailError = options?.onTailError;
   const onSubscriberError = options?.onSubscriberError;
+  const respawnDelayMs = options?.respawnDelayMs ?? RESPAWN_DELAY_MS;
 
   const subscribers = new Set<LogSubscriber>();
   let tail: { stop: () => void } | null = null;
   let closed = false;
+  // Pending auto-respawn timer.  Tracked so `close()` and `stopTail()`
+  // can cancel it cleanly.
+  let respawnTimer: ReturnType<typeof setTimeout> | null = null;
 
   const fanOut = (line: string) => {
     let i = 0;
@@ -105,6 +124,29 @@ export function createLogStreamBroker(
     }
   };
 
+  const scheduleRespawn = () => {
+    if (respawnTimer !== null || closed) return;
+    if (subscribers.size === 0) return;
+    respawnTimer = setTimeout(() => {
+      respawnTimer = null;
+      // Re-check at fire time: a subscriber may have unsubscribed
+      // (dropping count to 0) or the broker may have been closed
+      // during the delay window.  spawnIfNeeded() guards against
+      // closed; the subscriber-count guard is here.
+      if (subscribers.size === 0) return;
+      spawnIfNeeded();
+    }, respawnDelayMs);
+    // Don't pin the event loop open during shutdown.
+    (respawnTimer as { unref?: () => void }).unref?.();
+  };
+
+  const cancelRespawn = () => {
+    if (respawnTimer !== null) {
+      clearTimeout(respawnTimer);
+      respawnTimer = null;
+    }
+  };
+
   const spawnIfNeeded = () => {
     if (tail !== null || closed) return;
     tail = spawnTail(runtime, name, fanOut, {
@@ -113,18 +155,23 @@ export function createLogStreamBroker(
       onExit: () => {
         // Underlying child died — most commonly because the
         // container was removed (auto-recreate, manual rm, host
-        // restart).  Null the handle so the next subscribe
-        // respawns.  Don't notify subscribers — they're typically
-        // still attached and expecting the broker to come back
-        // when the container does.  If they need to know, the
-        // wrapper has already called `close()` explicitly via
-        // the remove path.
+        // restart).  Null the handle, then auto-respawn after a
+        // short delay if subscribers are still attached and the
+        // broker hasn't been explicitly closed.  Without this an
+        // SSE-only consumer (no plugin onContainerLog re-subscribe
+        // event) would sit silent forever after auto-recreate or
+        // a transient daemon glitch.  The delay debounces the
+        // restart loop when the container is genuinely gone:
+        // `containers.remove(name)` in the wrapper races to call
+        // `close()`, which clears the pending timer.
         tail = null;
+        scheduleRespawn();
       },
     });
   };
 
   const stopTail = () => {
+    cancelRespawn();
     if (tail) {
       tail.stop();
       tail = null;

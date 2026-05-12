@@ -301,3 +301,53 @@ describe("LogStreamBroker — startTail propagation", () => {
     assert.equal(observedStartTail, 100);
   });
 });
+
+describe("LogStreamBroker — auto-respawn after tail exit", () => {
+  // Use a tiny respawn delay so the test suite stays fast.  The
+  // production constant is 1000ms.
+  const TEST_RESPAWN_DELAY_MS = 5;
+  const POLL_MS = TEST_RESPAWN_DELAY_MS + 20;
+
+  it("respawns the tail when onExit fires with subscribers still attached", async () => {
+    const fake = makeFakeTail();
+    const broker = createLogStreamBroker(runtime, "foo", {
+      spawnTail: fake.spawnTail,
+      respawnDelayMs: TEST_RESPAWN_DELAY_MS,
+    });
+    broker.subscribe({ onLine: () => {} });
+    assert.equal(fake.spawnCount(), 1);
+    // Underlying child dies (auto-recreate, daemon glitch).  The
+    // subscriber stays attached — no new subscribe() call fires.
+    fake.killCurrentTail();
+    await new Promise((r) => setTimeout(r, POLL_MS));
+    assert.equal(fake.spawnCount(), 2);
+    broker.close("container-removed");
+  });
+
+  it("does not respawn if all subscribers unsubscribed during the delay", async () => {
+    const fake = makeFakeTail();
+    const broker = createLogStreamBroker(runtime, "foo", {
+      spawnTail: fake.spawnTail,
+      respawnDelayMs: TEST_RESPAWN_DELAY_MS,
+    });
+    const unsub = broker.subscribe({ onLine: () => {} });
+    fake.killCurrentTail();
+    // Unsubscribe before the respawn timer fires.
+    unsub();
+    await new Promise((r) => setTimeout(r, POLL_MS));
+    assert.equal(fake.spawnCount(), 1);
+  });
+
+  it("does not respawn after close()", async () => {
+    const fake = makeFakeTail();
+    const broker = createLogStreamBroker(runtime, "foo", {
+      spawnTail: fake.spawnTail,
+      respawnDelayMs: TEST_RESPAWN_DELAY_MS,
+    });
+    broker.subscribe({ onLine: () => {} });
+    fake.killCurrentTail();
+    broker.close("container-removed");
+    await new Promise((r) => setTimeout(r, POLL_MS));
+    assert.equal(fake.spawnCount(), 1);
+  });
+});
