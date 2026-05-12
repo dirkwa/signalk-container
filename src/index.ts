@@ -1898,6 +1898,9 @@ module.exports = (app: App) => {
         // Heartbeat every 30s — keeps reverse-proxy idle timeouts at
         // bay during quiet container periods.  Sent as an SSE
         // comment frame (single `:` line) — clients ignore it.
+        // `unref()` so the timer doesn't hold the event loop open
+        // during shutdown; req.on("close") clears it on normal
+        // disconnect.
         const heartbeat = setInterval(() => {
           try {
             res.write(": heartbeat\n\n");
@@ -1905,6 +1908,7 @@ module.exports = (app: App) => {
             /* connection already gone; req.close handler will fire */
           }
         }, 30000);
+        heartbeat.unref();
 
         req.on("close", () => {
           clearInterval(heartbeat);
