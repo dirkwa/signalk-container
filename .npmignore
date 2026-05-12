@@ -1,5 +1,9 @@
 src/
 dist/test/
+# configpanel TSX is bundled by webpack into public/; the tsc emit
+# under dist/configpanel/ is type-check noise — never imported at
+# runtime.  Excluding keeps the npm tarball lean.
+dist/configpanel/
 .github/
 *.tsbuildinfo
 .DS_Store

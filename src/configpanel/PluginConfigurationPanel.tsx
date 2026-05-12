@@ -1,7 +1,52 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { CSSProperties, useCallback, useEffect, useState } from "react";
 import LogsModal from "./LogsModal";
 
-const S = {
+/* eslint-disable @typescript-eslint/no-explicit-any */
+// The configpanel consumes loosely-typed objects from the Signal K
+// admin host (the `configuration` prop) and from the
+// signalk-container REST surface (container info, effective resource
+// limits, update-status results).  Mapping those out as strict TS
+// interfaces would couple this PR to the entire server-side type
+// surface; leaving them as `any` matches the cross-plugin convention
+// used in src/index.ts (`(globalThis as any).__signalk_containerManager`).
+
+interface SelectOption {
+  label: string;
+  value: string;
+}
+
+interface SelectFieldProps {
+  label: string;
+  value: string;
+  options: SelectOption[];
+  onChange: (next: string) => void;
+  hint?: string;
+}
+
+interface ToggleFieldProps {
+  label: string;
+  value: boolean;
+  onChange: (next: boolean) => void;
+  hint?: string;
+}
+
+interface PluginConfigurationPanelProps {
+  configuration: any;
+  save: (next: any) => void;
+}
+
+interface ResourceLimitsEditorProps {
+  containerName: string;
+  effective: any;
+  initialOverride: any;
+  /** Receives the form-state payload; the parent already has the
+   *  unprefixed container name captured. */
+  onApply: (payload: any) => Promise<any>;
+  onResetToDefault: () => Promise<any>;
+  onClose: () => void;
+}
+
+const S: Record<string, CSSProperties> = {
   root: {
     fontFamily:
       '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
@@ -293,21 +338,27 @@ const S = {
   },
 };
 
-const stateColors = {
+const stateColors: Record<string, string> = {
   running: "#10b981",
   stopped: "#f59e0b",
   missing: "#94a3b8",
   "no-runtime": "#ef4444",
 };
 
-const stateLabels = {
+const stateLabels: Record<string, string> = {
   running: "Running",
   stopped: "Stopped",
   missing: "Not created",
   "no-runtime": "No runtime",
 };
 
-function SelectField({ label, value, options, onChange, hint }) {
+function SelectField({
+  label,
+  value,
+  options,
+  onChange,
+  hint,
+}: SelectFieldProps) {
   return (
     <div style={S.fieldRow}>
       <span style={S.label}>{label}</span>
@@ -327,7 +378,7 @@ function SelectField({ label, value, options, onChange, hint }) {
   );
 }
 
-function ToggleField({ label, value, onChange, hint }) {
+function ToggleField({ label, value, onChange, hint }: ToggleFieldProps) {
   return (
     <div style={S.fieldRow}>
       <span style={S.label}>{label}</span>
@@ -363,7 +414,7 @@ function ToggleField({ label, value, onChange, hint }) {
  * containers. REST endpoints under /api/containers/:name/resources and
  * the containerOverrides config key both use the UNPREFIXED form.
  */
-function unprefixed(name) {
+function unprefixed(name: string): string {
   return name && name.startsWith("sk-") ? name.slice(3) : name;
 }
 
@@ -445,7 +496,7 @@ const RESOURCE_FIELDS = [
  * update-check staleness indicator. Defensive against server clock
  * skew (clamps negative deltas to 0).
  */
-function formatTimeAgo(isoTimestamp) {
+function formatTimeAgo(isoTimestamp: string): string {
   try {
     const then = new Date(isoTimestamp).getTime();
     const seconds = Math.max(0, Math.floor((Date.now() - then) / 1000));
@@ -466,7 +517,7 @@ function formatTimeAgo(isoTimestamp) {
  * Format an UpdateCheckResult into a short human-readable status line
  * shown in the panel-wide actionStatus area after a manual check.
  */
-function formatUpdateStatus(result) {
+function formatUpdateStatus(result: any): string {
   if (!result) return "No update data";
   const {
     runningTag,
@@ -506,7 +557,9 @@ function formatUpdateStatus(result) {
  * for states we consider uninteresting (e.g. unknown while the check
  * hasn't fired yet). Colors mirror formatLimitBadge semantics.
  */
-function formatUpdateBadge(result) {
+function formatUpdateBadge(
+  result: any,
+): { label: string; bg: string; fg: string; title: string } | null {
   if (!result || !result.reason) return null;
   const { reason, runningTag, currentVersion, latestVersion, fromCache } =
     result;
@@ -564,8 +617,10 @@ function formatUpdateBadge(result) {
  *   - number field → parsed as Number
  *   - text field → string as-is
  */
-function buildLimitsPayload(formState) {
-  const out = {};
+function buildLimitsPayload(
+  formState: Record<string, any>,
+): Record<string, any> {
+  const out: Record<string, any> = {};
   for (const f of RESOURCE_FIELDS) {
     const v = formState[f.key];
     if (v === null) {
@@ -588,7 +643,7 @@ function buildLimitsPayload(formState) {
  * Render a current effective limit as a compact badge string.
  * Returns null if the value is missing/empty.
  */
-function formatLimitBadge(key, value) {
+function formatLimitBadge(key: string, value: any): string | null {
   if (value === undefined || value === null || value === "") return null;
   switch (key) {
     case "cpus":
@@ -620,18 +675,18 @@ function ResourceLimitsEditor({
   // effective state in the `effective` field, so the editor can
   // re-seed its form inputs to match. Without this the form would
   // drift from server truth after Reset (see Bug W).
-  onApply, // (formState) => Promise<{ method, warnings?, error?, effective? }>
-  onResetToDefault, // () => Promise<{ method, warnings?, error?, effective? }>
+  onApply,
+  onResetToDefault,
   onClose,
-}) {
+}: ResourceLimitsEditorProps) {
   // Seed form state from the given effective limits (what's actually
   // applied to the container). Defaults to the `effective` prop at
   // mount time; can be called with a fresh value returned from an
   // apply/reset action to re-sync the form to server truth without
   // waiting for React's prop update cycle.
-  const seedFrom = (eff) => {
+  const seedFrom = (eff: any): Record<string, any> => {
     const src = eff ?? effective;
-    const s = {};
+    const s: Record<string, any> = {};
     for (const f of RESOURCE_FIELDS) {
       if (src && src[f.key] !== undefined && src[f.key] !== null) {
         s[f.key] = String(src[f.key]);
@@ -642,7 +697,9 @@ function ResourceLimitsEditor({
     return s;
   };
 
-  const [formState, setFormState] = useState(() => seedFrom(effective));
+  const [formState, setFormState] = useState<Record<string, any>>(() =>
+    seedFrom(effective),
+  );
   const [showAdvanced, setShowAdvanced] = useState(() => {
     // Open Advanced section by default if the override already uses
     // any of the non-primary fields — otherwise the user would be
@@ -654,13 +711,13 @@ function ResourceLimitsEditor({
   });
   const [applying, setApplying] = useState(false);
   const [resetting, setResetting] = useState(false);
-  const [result, setResult] = useState(null);
+  const [result, setResult] = useState<any>(null);
 
-  const updateField = (key, value) => {
+  const updateField = (key: string, value: any) => {
     setFormState((prev) => ({ ...prev, [key]: value }));
   };
 
-  const toggleUnset = (key) => {
+  const toggleUnset = (key: string) => {
     setFormState((prev) => ({
       ...prev,
       [key]: prev[key] === null ? "" : null,
@@ -692,7 +749,9 @@ function ResourceLimitsEditor({
         setFormState(seedFrom(res.effective));
       }
     } catch (err) {
-      setResult({ error: err.message || String(err) });
+      setResult({
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
     setApplying(false);
   };
@@ -728,12 +787,14 @@ function ResourceLimitsEditor({
         setFormState(seedFrom(res.effective));
       }
     } catch (err) {
-      setResult({ error: err.message || String(err) });
+      setResult({
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
     setResetting(false);
   };
 
-  const renderField = (f) => {
+  const renderField = (f: (typeof RESOURCE_FIELDS)[number]) => {
     const val = formState[f.key];
     const isUnset = val === null;
     return (
@@ -894,7 +955,7 @@ function ResourceLimitsEditor({
               </strong>
               {result.warnings && result.warnings.length > 0 && (
                 <div style={S.limitsEditorWarning}>
-                  {result.warnings.map((w, i) => (
+                  {result.warnings.map((w: string, i: number) => (
                     <div key={i}>⚠ {w}</div>
                   ))}
                 </div>
@@ -907,7 +968,10 @@ function ResourceLimitsEditor({
   );
 }
 
-export default function PluginConfigurationPanel({ configuration, save }) {
+export default function PluginConfigurationPanel({
+  configuration,
+  save,
+}: PluginConfigurationPanelProps) {
   const cfg = configuration || {};
   const [runtime, setRuntime] = useState(cfg.runtime || "auto");
   const [pruneSchedule, setPruneSchedule] = useState(
@@ -927,15 +991,17 @@ export default function PluginConfigurationPanel({ configuration, save }) {
   // but the primary persistence path is now the backend's automatic
   // savePluginOptions inside updateResources. This React state is just a
   // cache for the Save button's round-trip.
-  const [containerOverrides, setContainerOverrides] = useState(
-    cfg.containerOverrides || {},
-  );
+  const [containerOverrides, setContainerOverrides] = useState<
+    Record<string, any>
+  >(cfg.containerOverrides || {});
 
-  const [runtimeInfo, setRuntimeInfo] = useState(null);
-  const [containers, setContainers] = useState([]);
+  const [runtimeInfo, setRuntimeInfo] = useState<any>(null);
+  const [containers, setContainers] = useState<any[]>([]);
   // Per-container effective resource limits, keyed by UNPREFIXED name.
   // Populated by fetchStatus() which hits /api/containers/:name/resources.
-  const [effectiveLimits, setEffectiveLimits] = useState({});
+  const [effectiveLimits, setEffectiveLimits] = useState<Record<string, any>>(
+    {},
+  );
   // Per-container `override` field as reported by the server, keyed by
   // UNPREFIXED name. The "Override active" badge derives from THIS, not
   // from the React containerOverrides state, so a browser reload (which
@@ -943,26 +1009,28 @@ export default function PluginConfigurationPanel({ configuration, save }) {
   // badge correctly. A null value here means "no override recorded by
   // the server"; a non-null object (even an empty one) means "override
   // exists".
-  const [overrideStates, setOverrideStates] = useState({});
+  const [overrideStates, setOverrideStates] = useState<Record<string, any>>({});
   // Update-check results from signalk-container's update service, keyed
   // by UNPREFIXED container name (not pluginId — so we can look them up
   // from the container list). Each value is an UpdateCheckResult from
   // /api/updates or null if no check has been performed yet.
   // Populated by fetchStatus() via GET /api/updates.
-  const [updateStates, setUpdateStates] = useState({});
+  const [updateStates, setUpdateStates] = useState<Record<string, any>>({});
   // Name → pluginId map derived from /api/updates — used for the
   // "Check now" button which has to hit /api/updates/:pluginId/check.
-  const [pluginIdByContainer, setPluginIdByContainer] = useState({});
+  const [pluginIdByContainer, setPluginIdByContainer] = useState<
+    Record<string, string>
+  >({});
   // Which containers are currently running a manual check (spinner).
-  const [checking, setChecking] = useState(new Set());
+  const [checking, setChecking] = useState<Set<string>>(new Set());
   // Which container rows have their resource editor expanded.
-  const [expandedLimits, setExpandedLimits] = useState(new Set());
+  const [expandedLimits, setExpandedLimits] = useState<Set<string>>(new Set());
   // Name of the container whose Logs modal is currently open, or null.
-  const [logsModalFor, setLogsModalFor] = useState(null);
+  const [logsModalFor, setLogsModalFor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [actionStatus, setActionStatus] = useState("");
   const [statusError, setStatusError] = useState(false);
-  const [pruneResult, setPruneResult] = useState(null);
+  const [pruneResult, setPruneResult] = useState<any>(null);
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -990,10 +1058,10 @@ export default function PluginConfigurationPanel({ configuration, save }) {
       // badges rather than erroring the whole panel. Both fields are
       // keyed by the UNPREFIXED container name.
       if (ctList.length > 0) {
-        const limitsMap = {};
-        const overrideMap = {};
+        const limitsMap: Record<string, any> = {};
+        const overrideMap: Record<string, any> = {};
         await Promise.all(
-          ctList.map(async (ct) => {
+          ctList.map(async (ct: any) => {
             const un = unprefixed(ct.name);
             try {
               const r = await fetch(
@@ -1023,8 +1091,8 @@ export default function PluginConfigurationPanel({ configuration, save }) {
         if (upRes.ok) {
           const upList = await upRes.json();
           if (Array.isArray(upList)) {
-            const pluginIdMap = {};
-            const freshMap = {};
+            const pluginIdMap: Record<string, string> = {};
+            const freshMap: Record<string, any> = {};
             for (const u of upList) {
               if (u && u.containerName) {
                 freshMap[u.containerName] = u;
@@ -1074,7 +1142,7 @@ export default function PluginConfigurationPanel({ configuration, save }) {
     return () => clearInterval(interval);
   }, [fetchStatus]);
 
-  const toggleLimitsExpand = (name) => {
+  const toggleLimitsExpand = (name: string) => {
     const un = unprefixed(name);
     setExpandedLimits((prev) => {
       const next = new Set(prev);
@@ -1084,7 +1152,7 @@ export default function PluginConfigurationPanel({ configuration, save }) {
     });
   };
 
-  const applyLimits = async (unprefixedName, payload) => {
+  const applyLimits = async (unprefixedName: string, payload: any) => {
     const res = await fetch(
       `/plugins/signalk-container/api/containers/${encodeURIComponent(unprefixedName)}/resources`,
       {
@@ -1144,7 +1212,7 @@ export default function PluginConfigurationPanel({ configuration, save }) {
     };
   };
 
-  const checkForUpdate = async (unprefixedName) => {
+  const checkForUpdate = async (unprefixedName: string) => {
     const pluginId = pluginIdByContainer[unprefixedName];
     if (!pluginId) {
       setActionStatus(
@@ -1178,7 +1246,9 @@ export default function PluginConfigurationPanel({ configuration, save }) {
         setStatusError(true);
       }
     } catch (e) {
-      setActionStatus(`Check error: ${e.message}`);
+      setActionStatus(
+        `Check error: ${e instanceof Error ? e.message : String(e)}`,
+      );
       setStatusError(true);
     }
     setChecking((prev) => {
@@ -1188,7 +1258,7 @@ export default function PluginConfigurationPanel({ configuration, save }) {
     });
   };
 
-  const resetLimitsToDefault = async (unprefixedName) => {
+  const resetLimitsToDefault = async (unprefixedName: string) => {
     const res = await fetch(
       `/plugins/signalk-container/api/containers/${encodeURIComponent(unprefixedName)}/resources`,
       { method: "DELETE" },
@@ -1243,7 +1313,7 @@ export default function PluginConfigurationPanel({ configuration, save }) {
     // To avoid overwriting that with stale React state, derive
     // containerOverrides from the server-reported overrideStates
     // (which the 5s poll keeps fresh). Skip null entries.
-    const overridesFromServer = {};
+    const overridesFromServer: Record<string, any> = {};
     for (const [name, ov] of Object.entries(overrideStates)) {
       if (ov && Object.keys(ov).length > 0) {
         overridesFromServer[name] = ov;
@@ -1262,7 +1332,7 @@ export default function PluginConfigurationPanel({ configuration, save }) {
     setStatusError(false);
   };
 
-  const startContainer = async (name) => {
+  const startContainer = async (name: string) => {
     setActionStatus(`Starting ${name}...`);
     setStatusError(false);
     try {
@@ -1279,12 +1349,12 @@ export default function PluginConfigurationPanel({ configuration, save }) {
         setStatusError(true);
       }
     } catch (e) {
-      setActionStatus(`Error: ${e.message}`);
+      setActionStatus(`Error: ${e instanceof Error ? e.message : String(e)}`);
       setStatusError(true);
     }
   };
 
-  const stopContainer = async (name) => {
+  const stopContainer = async (name: string) => {
     setActionStatus(`Stopping ${name}...`);
     setStatusError(false);
     try {
@@ -1301,12 +1371,12 @@ export default function PluginConfigurationPanel({ configuration, save }) {
         setStatusError(true);
       }
     } catch (e) {
-      setActionStatus(`Error: ${e.message}`);
+      setActionStatus(`Error: ${e instanceof Error ? e.message : String(e)}`);
       setStatusError(true);
     }
   };
 
-  const removeContainer = async (name, state) => {
+  const removeContainer = async (name: string, state: string) => {
     if (state === "running") {
       if (!window.confirm(`${name} is running. Stop and remove it?`)) return;
     }
@@ -1326,7 +1396,7 @@ export default function PluginConfigurationPanel({ configuration, save }) {
         setStatusError(true);
       }
     } catch (e) {
-      setActionStatus(`Error: ${e.message}`);
+      setActionStatus(`Error: ${e instanceof Error ? e.message : String(e)}`);
       setStatusError(true);
     }
   };
@@ -1351,7 +1421,7 @@ export default function PluginConfigurationPanel({ configuration, save }) {
         setStatusError(true);
       }
     } catch (e) {
-      setActionStatus(`Error: ${e.message}`);
+      setActionStatus(`Error: ${e instanceof Error ? e.message : String(e)}`);
       setStatusError(true);
     }
   };

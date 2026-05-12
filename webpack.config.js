@@ -12,15 +12,23 @@ module.exports = {
   module: {
     rules: [
       {
-        test: /\.jsx?$/,
+        test: /\.(jsx?|tsx?)$/,
         loader: "babel-loader",
         exclude: /node_modules/,
-        options: { presets: ["@babel/preset-react"] },
+        options: {
+          presets: [
+            "@babel/preset-react",
+            // No type-checking — the `tsc` step in `npm run build`
+            // catches type errors before webpack runs.  Here we
+            // just strip TS syntax to JS.
+            "@babel/preset-typescript",
+          ],
+        },
       },
     ],
   },
   resolve: {
-    extensions: [".js", ".jsx"],
+    extensions: [".tsx", ".ts", ".jsx", ".js"],
   },
   plugins: [
     new ModuleFederationPlugin({
