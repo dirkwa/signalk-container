@@ -290,6 +290,15 @@ export default function LogsModal({ name, onClose }: LogsModalProps) {
     if (!sentinel) return;
     programmaticScrollRef.current = true;
     sentinel.scrollIntoView({ block: "end", inline: "nearest" });
+    // Fail-safe: if scrollIntoView is a no-op (the sentinel was
+    // already in view) no scroll event fires, and the flag would
+    // otherwise stay set until the user's first manual scroll —
+    // which would then get ignored.  Clear on the next frame so
+    // the flag's "consume one scroll event" window doesn't outlive
+    // a single render.
+    requestAnimationFrame(() => {
+      programmaticScrollRef.current = false;
+    });
   }, [lines, autoScroll]);
 
   // Detect manual scroll-up so we stop pinning. Reset when the user
@@ -315,6 +324,11 @@ export default function LogsModal({ name, onClose }: LogsModalProps) {
         if (sentinel) {
           programmaticScrollRef.current = true;
           sentinel.scrollIntoView({ block: "end", inline: "nearest" });
+          // Same fail-safe as the layout effect — clear the flag
+          // on the next frame in case scrollIntoView was a no-op.
+          requestAnimationFrame(() => {
+            programmaticScrollRef.current = false;
+          });
         }
       }
       return next;
