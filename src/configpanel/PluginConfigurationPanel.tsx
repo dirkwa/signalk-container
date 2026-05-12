@@ -1,14 +1,11 @@
 import React, { CSSProperties, useCallback, useEffect, useState } from "react";
 import LogsModal from "./LogsModal";
-
-/* eslint-disable @typescript-eslint/no-explicit-any */
-// The configpanel consumes loosely-typed objects from the Signal K
-// admin host (the `configuration` prop) and from the
-// signalk-container REST surface (container info, effective resource
-// limits, update-status results).  Mapping those out as strict TS
-// interfaces would couple this PR to the entire server-side type
-// surface; leaving them as `any` matches the cross-plugin convention
-// used in src/index.ts (`(globalThis as any).__signalk_containerManager`).
+import type {
+  ContainerInfo,
+  ContainerResourceLimits,
+  ContainerRuntimeInfo,
+  PluginConfig,
+} from "../types";
 
 interface SelectOption {
   label: string;
@@ -30,19 +27,91 @@ interface ToggleFieldProps {
   hint?: string;
 }
 
+/**
+ * Form-state shape of the resource-limits editor: every
+ * `ContainerResourceLimits` key maps to a string (the input field's
+ * current text) OR `null` (explicit "unset this limit") OR `""`
+ * (empty / inherit default).  `buildLimitsPayload` converts these
+ * to the typed shape on submit.
+ */
+type ResourceLimitsFormState = Record<string, string | null>;
+
+/**
+ * Payload accepted by `POST /api/containers/:name/resources` and by
+ * the `applyLimits` parent callback: a partial limits shape with
+ * `null` meaning "explicitly unset" and missing keys meaning "leave
+ * unchanged".  Same shape `ContainerResourceLimits` already
+ * documents for null/undefined semantics.
+ */
+type ResourceLimitsPayload = Partial<
+  Record<keyof ContainerResourceLimits, number | string | null>
+>;
+
+/**
+ * Server response from POST/DELETE on the resources endpoint.
+ * Mirrors `UpdateResourcesResult` plus the optional `effective`
+ * field returned by the index.ts route handler.
+ */
+interface ApplyResult {
+  method?: "live" | "recreated";
+  warnings?: string[];
+  error?: string;
+  effective?: ContainerResourceLimits;
+}
+
+/**
+ * Update-check result as returned by `GET /api/updates`.  Shape is
+ * the consumer-plugin's `UpdateCheckResult` (not currently exported
+ * from `src/types.ts` — defining the fields locally to the extent
+ * the panel reads them).
+ */
+interface UpdateCheckResult {
+  containerName?: string;
+  pluginId?: string;
+  reason?:
+    | "up-to-date"
+    | "newer-version"
+    | "older-than-pinned"
+    | "digest-drift"
+    | "offline"
+    | "error"
+    | "unknown";
+  runningTag?: string;
+  currentVersion?: string;
+  latestVersion?: string;
+  updateAvailable?: boolean;
+  fromCache?: boolean;
+  error?: string;
+  /** ISO timestamp of the last successful check; populated by the
+   *  update service alongside the latest result.  Used by the
+   *  staleness indicator. */
+  lastSuccessfulCheckAt?: string;
+}
+
 interface PluginConfigurationPanelProps {
-  configuration: any;
-  save: (next: any) => void;
+  /** Persisted plugin config from the Signal K admin host.  May be
+   *  partial during first-time setup before the user has saved
+   *  anything. */
+  configuration: Partial<PluginConfig>;
+  /** Persistence callback supplied by the host.  Signal K's admin
+   *  UI invokes `start()` after this; the panel doesn't await it. */
+  save: (next: Partial<PluginConfig>) => void;
 }
 
 interface ResourceLimitsEditorProps {
   containerName: string;
-  effective: any;
-  initialOverride: any;
+  /** Merged plugin-default + user-override that's actually applied
+   *  to the running container. */
+  effective: Partial<ContainerResourceLimits>;
+  /** The stored override (may be absent → falls back to plugin
+   *  default). */
+  initialOverride: Partial<ContainerResourceLimits> | null | undefined;
   /** Receives the form-state payload; the parent already has the
-   *  unprefixed container name captured. */
-  onApply: (payload: any) => Promise<any>;
-  onResetToDefault: () => Promise<any>;
+   *  unprefixed container name captured.  Returns the server's
+   *  fresh post-action effective state so the editor can re-seed
+   *  its form inputs to match. */
+  onApply: (payload: ResourceLimitsPayload) => Promise<ApplyResult>;
+  onResetToDefault: () => Promise<ApplyResult>;
   onClose: () => void;
 }
 
@@ -517,7 +586,9 @@ function formatTimeAgo(isoTimestamp: string): string {
  * Format an UpdateCheckResult into a short human-readable status line
  * shown in the panel-wide actionStatus area after a manual check.
  */
-function formatUpdateStatus(result: any): string {
+function formatUpdateStatus(
+  result: UpdateCheckResult | null | undefined,
+): string {
   if (!result) return "No update data";
   const {
     runningTag,
@@ -558,7 +629,7 @@ function formatUpdateStatus(result: any): string {
  * hasn't fired yet). Colors mirror formatLimitBadge semantics.
  */
 function formatUpdateBadge(
-  result: any,
+  result: UpdateCheckResult | null | undefined,
 ): { label: string; bg: string; fg: string; title: string } | null {
   if (!result || !result.reason) return null;
   const { reason, runningTag, currentVersion, latestVersion, fromCache } =
@@ -618,22 +689,23 @@ function formatUpdateBadge(
  *   - text field → string as-is
  */
 function buildLimitsPayload(
-  formState: Record<string, any>,
-): Record<string, any> {
-  const out: Record<string, any> = {};
+  formState: ResourceLimitsFormState,
+): ResourceLimitsPayload {
+  const out: ResourceLimitsPayload = {};
   for (const f of RESOURCE_FIELDS) {
+    const key = f.key as keyof ContainerResourceLimits;
     const v = formState[f.key];
     if (v === null) {
-      out[f.key] = null;
+      out[key] = null;
       continue;
     }
     if (v === undefined || v === "") continue;
     if (f.type === "number") {
       const n = Number(v);
       if (!Number.isFinite(n)) continue;
-      out[f.key] = n;
+      out[key] = n;
     } else {
-      out[f.key] = v;
+      out[key] = v;
     }
   }
   return out;
@@ -643,7 +715,10 @@ function buildLimitsPayload(
  * Render a current effective limit as a compact badge string.
  * Returns null if the value is missing/empty.
  */
-function formatLimitBadge(key: string, value: any): string | null {
+function formatLimitBadge(
+  key: string,
+  value: number | string | null | undefined,
+): string | null {
   if (value === undefined || value === null || value === "") return null;
   switch (key) {
     case "cpus":
@@ -684,12 +759,16 @@ function ResourceLimitsEditor({
   // mount time; can be called with a fresh value returned from an
   // apply/reset action to re-sync the form to server truth without
   // waiting for React's prop update cycle.
-  const seedFrom = (eff: any): Record<string, any> => {
+  const seedFrom = (
+    eff: Partial<ContainerResourceLimits> | undefined,
+  ): ResourceLimitsFormState => {
     const src = eff ?? effective;
-    const s: Record<string, any> = {};
+    const s: ResourceLimitsFormState = {};
     for (const f of RESOURCE_FIELDS) {
-      if (src && src[f.key] !== undefined && src[f.key] !== null) {
-        s[f.key] = String(src[f.key]);
+      const key = f.key as keyof ContainerResourceLimits;
+      const v = src ? src[key] : undefined;
+      if (v !== undefined && v !== null) {
+        s[f.key] = String(v);
       } else {
         s[f.key] = "";
       }
@@ -697,7 +776,7 @@ function ResourceLimitsEditor({
     return s;
   };
 
-  const [formState, setFormState] = useState<Record<string, any>>(() =>
+  const [formState, setFormState] = useState<ResourceLimitsFormState>(() =>
     seedFrom(effective),
   );
   const [showAdvanced, setShowAdvanced] = useState(() => {
@@ -706,14 +785,16 @@ function ResourceLimitsEditor({
     // confused about where their cpuset went.
     if (!initialOverride) return false;
     return RESOURCE_FIELDS.some(
-      (f) => !f.primary && initialOverride[f.key] !== undefined,
+      (f) =>
+        !f.primary &&
+        initialOverride[f.key as keyof ContainerResourceLimits] !== undefined,
     );
   });
   const [applying, setApplying] = useState(false);
   const [resetting, setResetting] = useState(false);
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<ApplyResult | null>(null);
 
-  const updateField = (key: string, value: any) => {
+  const updateField = (key: string, value: string | null) => {
     setFormState((prev) => ({ ...prev, [key]: value }));
   };
 
@@ -973,8 +1054,10 @@ export default function PluginConfigurationPanel({
   save,
 }: PluginConfigurationPanelProps) {
   const cfg = configuration || {};
-  const [runtime, setRuntime] = useState(cfg.runtime || "auto");
-  const [pruneSchedule, setPruneSchedule] = useState(
+  // The select widgets surface these as plain strings; the narrower
+  // PluginConfig union types are reapplied on save via the spread.
+  const [runtime, setRuntime] = useState<string>(cfg.runtime || "auto");
+  const [pruneSchedule, setPruneSchedule] = useState<string>(
     cfg.pruneSchedule || "weekly",
   );
   // v0.1.5 schema fields — previously not rendered in this panel, meaning
@@ -992,16 +1075,18 @@ export default function PluginConfigurationPanel({
   // savePluginOptions inside updateResources. This React state is just a
   // cache for the Save button's round-trip.
   const [containerOverrides, setContainerOverrides] = useState<
-    Record<string, any>
+    Record<string, ContainerResourceLimits>
   >(cfg.containerOverrides || {});
 
-  const [runtimeInfo, setRuntimeInfo] = useState<any>(null);
-  const [containers, setContainers] = useState<any[]>([]);
+  const [runtimeInfo, setRuntimeInfo] = useState<ContainerRuntimeInfo | null>(
+    null,
+  );
+  const [containers, setContainers] = useState<ContainerInfo[]>([]);
   // Per-container effective resource limits, keyed by UNPREFIXED name.
   // Populated by fetchStatus() which hits /api/containers/:name/resources.
-  const [effectiveLimits, setEffectiveLimits] = useState<Record<string, any>>(
-    {},
-  );
+  const [effectiveLimits, setEffectiveLimits] = useState<
+    Record<string, Partial<ContainerResourceLimits>>
+  >({});
   // Per-container `override` field as reported by the server, keyed by
   // UNPREFIXED name. The "Override active" badge derives from THIS, not
   // from the React containerOverrides state, so a browser reload (which
@@ -1009,13 +1094,17 @@ export default function PluginConfigurationPanel({
   // badge correctly. A null value here means "no override recorded by
   // the server"; a non-null object (even an empty one) means "override
   // exists".
-  const [overrideStates, setOverrideStates] = useState<Record<string, any>>({});
+  const [overrideStates, setOverrideStates] = useState<
+    Record<string, Partial<ContainerResourceLimits> | null>
+  >({});
   // Update-check results from signalk-container's update service, keyed
   // by UNPREFIXED container name (not pluginId — so we can look them up
   // from the container list). Each value is an UpdateCheckResult from
   // /api/updates or null if no check has been performed yet.
   // Populated by fetchStatus() via GET /api/updates.
-  const [updateStates, setUpdateStates] = useState<Record<string, any>>({});
+  const [updateStates, setUpdateStates] = useState<
+    Record<string, UpdateCheckResult>
+  >({});
   // Name → pluginId map derived from /api/updates — used for the
   // "Check now" button which has to hit /api/updates/:pluginId/check.
   const [pluginIdByContainer, setPluginIdByContainer] = useState<
@@ -1030,7 +1119,11 @@ export default function PluginConfigurationPanel({
   const [loading, setLoading] = useState(true);
   const [actionStatus, setActionStatus] = useState("");
   const [statusError, setStatusError] = useState(false);
-  const [pruneResult, setPruneResult] = useState<any>(null);
+  const [pruneResult, setPruneResult] = useState<{
+    imagesRemoved?: number;
+    spaceReclaimed?: string;
+    error?: string;
+  } | null>(null);
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -1058,10 +1151,13 @@ export default function PluginConfigurationPanel({
       // badges rather than erroring the whole panel. Both fields are
       // keyed by the UNPREFIXED container name.
       if (ctList.length > 0) {
-        const limitsMap: Record<string, any> = {};
-        const overrideMap: Record<string, any> = {};
+        const limitsMap: Record<string, Partial<ContainerResourceLimits>> = {};
+        const overrideMap: Record<
+          string,
+          Partial<ContainerResourceLimits> | null
+        > = {};
         await Promise.all(
-          ctList.map(async (ct: any) => {
+          ctList.map(async (ct: ContainerInfo) => {
             const un = unprefixed(ct.name);
             try {
               const r = await fetch(
@@ -1092,8 +1188,8 @@ export default function PluginConfigurationPanel({
           const upList = await upRes.json();
           if (Array.isArray(upList)) {
             const pluginIdMap: Record<string, string> = {};
-            const freshMap: Record<string, any> = {};
-            for (const u of upList) {
+            const freshMap: Record<string, UpdateCheckResult> = {};
+            for (const u of upList as UpdateCheckResult[]) {
               if (u && u.containerName) {
                 freshMap[u.containerName] = u;
                 if (u.pluginId) pluginIdMap[u.containerName] = u.pluginId;
@@ -1152,7 +1248,10 @@ export default function PluginConfigurationPanel({
     });
   };
 
-  const applyLimits = async (unprefixedName: string, payload: any) => {
+  const applyLimits = async (
+    unprefixedName: string,
+    payload: ResourceLimitsPayload,
+  ): Promise<ApplyResult> => {
     const res = await fetch(
       `/plugins/signalk-container/api/containers/${encodeURIComponent(unprefixedName)}/resources`,
       {
@@ -1258,7 +1357,9 @@ export default function PluginConfigurationPanel({
     });
   };
 
-  const resetLimitsToDefault = async (unprefixedName: string) => {
+  const resetLimitsToDefault = async (
+    unprefixedName: string,
+  ): Promise<ApplyResult> => {
     const res = await fetch(
       `/plugins/signalk-container/api/containers/${encodeURIComponent(unprefixedName)}/resources`,
       { method: "DELETE" },
@@ -1313,16 +1414,20 @@ export default function PluginConfigurationPanel({
     // To avoid overwriting that with stale React state, derive
     // containerOverrides from the server-reported overrideStates
     // (which the 5s poll keeps fresh). Skip null entries.
-    const overridesFromServer: Record<string, any> = {};
+    const overridesFromServer: Record<string, ContainerResourceLimits> = {};
     for (const [name, ov] of Object.entries(overrideStates)) {
       if (ov && Object.keys(ov).length > 0) {
-        overridesFromServer[name] = ov;
+        overridesFromServer[name] = ov as ContainerResourceLimits;
       }
     }
     save({
       ...cfg,
-      runtime,
-      pruneSchedule,
+      // The select widgets type these as plain strings; the schema
+      // constrains them to the narrower union, and the host
+      // validates on its end.  Cast here rather than threading the
+      // union all the way back through `<SelectField>`.
+      runtime: runtime as PluginConfig["runtime"],
+      pruneSchedule: pruneSchedule as PluginConfig["pruneSchedule"],
       maxConcurrentJobs: cfg.maxConcurrentJobs || 2,
       updateCheckInterval,
       backgroundUpdateChecks,
@@ -1553,7 +1658,10 @@ export default function PluginConfigurationPanel({
           // returns live cgroup state so the badges show real values.
           const isJobContainer = un.startsWith("job-");
           const badges = RESOURCE_FIELDS.map((f) =>
-            formatLimitBadge(f.key, eff[f.key]),
+            formatLimitBadge(
+              f.key,
+              eff[f.key as keyof ContainerResourceLimits],
+            ),
           ).filter(Boolean);
           // Update-check state from signalk-container's update service.
           // Only containers whose plugin has migrated to v0.1.6+ appear

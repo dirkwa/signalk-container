@@ -255,7 +255,7 @@ The subscription survives auto-recreate (the tail re-attaches to the fresh conta
 
 End users get the same stream via the **Logs** button on every managed-container card in the config panel, regardless of whether your plugin wired `onContainerLog`.
 
-For an explicit one-shot fetch (e.g. attaching log context to a health-check failure), use `containers.getLogs(name, { tail })` — returns the last N lines as a `Promise<string[]>`.
+For an explicit one-shot fetch (e.g. attaching log context to a health-check failure), use `containers.getLogs(name, { tail })` — returns the last N lines as a `Promise<string[]>`. One-shot output is grouped by stream (stdout lines first, then stderr), not true chronological interleave — the runtime CLI emits the two streams on separate fds and the OS-level ordering is lost before we see them. Use `onContainerLog` if you need real-time per-line ordering.
 
 Both are available in signalk-container 1.7.0+.
 
