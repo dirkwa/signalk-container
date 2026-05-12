@@ -1944,8 +1944,16 @@ module.exports = (app: App) => {
             }
           },
           onClose: (reason) => {
-            res.write(`event: end\ndata: ${reason}\n\n`);
-            res.end();
+            // Same race as onLine: client may have disconnected
+            // before this fires.  res.write/res.end on an ended
+            // response throws ERR_STREAM_WRITE_AFTER_END.
+            if (res.writableEnded || res.destroyed) return;
+            try {
+              res.write(`event: end\ndata: ${reason}\n\n`);
+              res.end();
+            } catch {
+              /* connection already gone */
+            }
           },
         });
 

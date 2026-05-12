@@ -43,7 +43,7 @@ The plugin embeds a React config panel in the Signal K Admin UI (via Module Fede
 
 - Container name, image, state, and port mappings
 - **Start** / **Stop** / **Logs** / **Remove** buttons appropriate to the current state
-- **Logs** opens a live-streaming popup of the container's stdout+stderr (SSE). Backfills recent history on open; supports auto-scroll, copy-to-clipboard, and download-as-text. Works for both running and stopped containers (stopped shows the last lines before exit).
+- **Logs** opens a live-streaming popup of the container's combined stdout/stderr — works for both running and stopped containers
 - **Current effective resource limits** shown as compact badges (e.g. `1.5 CPU · 512m · 200 PIDs`)
 - **Override active** amber badge when the user has configured a resource override for the container
 - **Updates row** (when the consumer plugin has registered with the update service):
