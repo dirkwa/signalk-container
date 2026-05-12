@@ -1874,12 +1874,22 @@ module.exports = (app: App) => {
       // broker; auto-disconnects when the client goes away.  Closes
       // with `event: end` when the container is removed or the plugin
       // is stopped.  See `LogStreamBroker` for fan-out semantics.
-      router.get("/api/containers/:name/logs/stream", (req, res) => {
+      router.get("/api/containers/:name/logs/stream", async (req, res) => {
         if (!runtimeInfo) {
           res.status(503).json({ error: "No container runtime available" });
           return;
         }
         const { name } = req.params;
+        // Preflight: don't open the SSE stream against a container
+        // that doesn't exist.  Otherwise the client connects, gets
+        // 200, and immediately receives `event: end` from the
+        // broker's `onTailError` — visually confusing and wastes a
+        // round-trip on an obvious 404.
+        const state = await getContainerState(runtimeInfo, name);
+        if (state === "missing") {
+          res.status(404).json({ error: `No such container: ${name}` });
+          return;
+        }
         res.writeHead(200, {
           "Content-Type": "text/event-stream",
           "Cache-Control": "no-cache",

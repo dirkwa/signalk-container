@@ -18,6 +18,34 @@ const runtimeStub: ContainerRuntimeInfo = {
 
 const skipOnWindows = process.platform === "win32";
 
+/**
+ * Bounded poll for a condition.  Rejects with a clear error after
+ * `timeoutMs`, so a flaky/missing signal fails the test fast
+ * instead of hanging the suite indefinitely.
+ */
+function waitFor(
+  cond: () => boolean,
+  label: string,
+  timeoutMs = 3000,
+  intervalMs = 20,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const deadline = Date.now() + timeoutMs;
+    const tick = () => {
+      if (cond()) {
+        resolve();
+        return;
+      }
+      if (Date.now() >= deadline) {
+        reject(new Error(`waitFor timed out (${timeoutMs}ms): ${label}`));
+        return;
+      }
+      setTimeout(tick, intervalMs);
+    };
+    tick();
+  });
+}
+
 describe("spawnRuntimeStreaming", { skip: skipOnWindows }, () => {
   it("emits each line via onLine in order", async () => {
     const lines: string[] = [];
@@ -27,15 +55,7 @@ describe("spawnRuntimeStreaming", { skip: skipOnWindows }, () => {
       (line) => lines.push(line),
       { binary: "/bin/bash" },
     );
-    // Wait for the child to exit naturally (no -f flag, so it
-    // will).  Drain microtasks via a short setImmediate loop.
-    await new Promise<void>((resolve) => {
-      const tick = () => {
-        if (lines.length >= 3) resolve();
-        else setTimeout(tick, 20);
-      };
-      tick();
-    });
+    await waitFor(() => lines.length >= 3, "expected 3 lines");
     handle.stop();
     assert.deepEqual(lines, ["a", "b", "c"]);
   });
@@ -66,17 +86,9 @@ describe("spawnRuntimeStreaming", { skip: skipOnWindows }, () => {
       },
     );
     handle.stop();
-    // Wait up to 3s for the exit event (SIGTERM with 2s grace,
-    // then SIGKILL — should be well under 3s).
-    await new Promise<void>((resolve) => {
-      const tick = (n: number) => {
-        if (exitCode !== undefined) resolve();
-        else if (n >= 30) resolve();
-        else setTimeout(() => tick(n + 1), 100);
-      };
-      tick(0);
-    });
-    assert.notEqual(exitCode, undefined, "child should have exited");
+    // SIGTERM with 2s grace, then SIGKILL — should be well under 3s.
+    await waitFor(() => exitCode !== undefined, "child should exit");
+    assert.notEqual(exitCode, undefined);
   });
 
   it("stop() is idempotent", () => {
@@ -87,7 +99,6 @@ describe("spawnRuntimeStreaming", { skip: skipOnWindows }, () => {
       { binary: "/bin/bash" },
     );
     handle.stop();
-    // Second call must not throw.
     handle.stop();
     handle.stop();
   });
@@ -104,35 +115,32 @@ describe("spawnRuntimeStreaming", { skip: skipOnWindows }, () => {
         onError: (msg) => errors.push(msg),
       },
     );
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await waitFor(
+      () => lines.length >= 1 && errors.length >= 1,
+      "expected one stdout line and one stderr line",
+    );
     assert.deepEqual(lines, ["one"]);
-    // Stderr arrives as one chunk (trimmed); we deliberately don't
-    // line-split it.
     assert.equal(errors.length, 1);
     assert.equal(errors[0], "two");
   });
 
   it("buffers partial lines across data events via makeLineSplitter", async () => {
-    // `printf 'a'` followed by `printf 'bc\\n'` from the same bash
-    // process emits two writes, the first without a newline.  The
-    // splitter must hold "a" until "bc\n" arrives and then emit
-    // "abc".
     const lines: string[] = [];
+    let exitCode: number | null | undefined;
     spawnRuntimeStreaming(
       runtimeStub,
-      [
-        "-c",
-        // The exact two-write pattern is shell-dependent; this is a
-        // best-effort approach using a short sleep to encourage the
-        // pipe to flush between writes.  If it doesn't trigger the
-        // partial-line path on every system, the test still passes
-        // (one combined "abc" emission).
-        "printf 'a'; sleep 0.05; printf 'bc\\n'",
-      ],
+      ["-c", "printf 'a'; sleep 0.05; printf 'bc\\n'"],
       (line) => lines.push(line),
-      { binary: "/bin/bash" },
+      {
+        binary: "/bin/bash",
+        onExit: (code) => {
+          exitCode = code;
+        },
+      },
     );
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    // Wait for the child to exit so we know all output has been
+    // flushed and the splitter has emitted whatever it can.
+    await waitFor(() => exitCode !== undefined, "child should exit");
     assert.deepEqual(lines, ["abc"]);
   });
 
@@ -144,7 +152,7 @@ describe("spawnRuntimeStreaming", { skip: skipOnWindows }, () => {
         exitCode = code;
       },
     });
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await waitFor(() => exitCode !== undefined, "child should exit");
     assert.equal(exitCode, 0);
   });
 
@@ -156,11 +164,11 @@ describe("spawnRuntimeStreaming", { skip: skipOnWindows }, () => {
         exitCode = code;
       },
     });
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await waitFor(() => exitCode !== undefined, "child should exit");
     assert.equal(exitCode, 7);
   });
 
-  it("synchronous spawn failure (bad binary) routes via onError, returns no-op stop", () => {
+  it("synchronous spawn failure (bad binary) routes via onError, returns no-op stop", async () => {
     let err: string | undefined;
     const handle = spawnRuntimeStreaming(runtimeStub, [], () => {}, {
       binary: "/this/path/definitely/does/not/exist",
@@ -168,28 +176,28 @@ describe("spawnRuntimeStreaming", { skip: skipOnWindows }, () => {
         err = msg;
       },
     });
-    // node's spawn dispatches ENOENT via the 'error' event (not
-    // a sync throw on most modern node builds), so onError fires
-    // asynchronously.  Either way the stop-handle must be safe.
     handle.stop();
     handle.stop();
-    // Give the error event a tick.
-    return new Promise<void>((resolve) => {
-      setTimeout(() => {
-        assert.ok(err !== undefined, "spawn failure must surface via onError");
-        resolve();
-      }, 100);
-    });
+    await waitFor(
+      () => err !== undefined,
+      "spawn failure must surface via onError",
+    );
   });
 
   it("stop() after natural exit is harmless", async () => {
+    let exitCode: number | null | undefined;
     const handle = spawnRuntimeStreaming(
       runtimeStub,
       ["-c", "exit 0"],
       () => {},
-      { binary: "/bin/bash" },
+      {
+        binary: "/bin/bash",
+        onExit: (code) => {
+          exitCode = code;
+        },
+      },
     );
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await waitFor(() => exitCode !== undefined, "child should exit");
     handle.stop(); // should not throw
   });
 });
