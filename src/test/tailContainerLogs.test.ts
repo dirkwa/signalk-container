@@ -241,7 +241,7 @@ describe("getContainerLogs", () => {
     );
   });
 
-  it("strips trailing empty line caused by training newline", async () => {
+  it("strips trailing empty line caused by trailing newline", async () => {
     // Real `podman logs` output typically has a trailing newline,
     // which our split would otherwise turn into an empty array
     // entry.  Verify we drop it.

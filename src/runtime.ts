@@ -290,12 +290,6 @@ export async function execRuntimeLong(
 }
 
 /**
- * Handle returned by `spawnRuntimeStreaming`.  The caller MUST call
- * `stop()` when done — the underlying process does not exit on its
- * own for `-f`/follow-style commands.  `pid` is exposed for debug
- * logging only; do not signal it directly.
- */
-/**
  * Grace period between SIGTERM and SIGKILL when `stop()`-ing a
  * streaming child.  Long enough for `podman logs -f` to flush its
  * buffers (sub-second in practice) but short enough that a stuck
@@ -303,11 +297,18 @@ export async function execRuntimeLong(
  */
 export const SIGTERM_GRACE_PERIOD_MS = 2000;
 
+/**
+ * Handle returned by `spawnRuntimeStreaming`.  The caller MUST call
+ * `stop()` when done — the underlying process does not exit on its
+ * own for `-f`/follow-style commands.
+ */
 export interface StreamingProcessHandle {
   /** Stop the child.  Sends SIGTERM, then SIGKILL after a grace
    *  period if the process is still alive.  Idempotent. */
   stop(): void;
-  /** Child PID, or undefined if the process never started. */
+  /** Child PID, or undefined if the process never started (e.g.
+   *  synchronous spawn failure).  Exposed for debug logging only;
+   *  do not signal it directly. */
   pid: number | undefined;
 }
 
@@ -393,7 +394,10 @@ export function spawnRuntimeStreaming(
   const stop = () => {
     if (stopped) return;
     stopped = true;
-    if (!proc || proc.exitCode !== null || proc.killed) return;
+    // `proc.killed` reflects "have we delivered a signal yet", not
+    // "is the child dead" — only `exitCode === null` tells us the
+    // process is still alive and worth signalling.
+    if (!proc || proc.exitCode !== null) return;
     try {
       proc.kill("SIGTERM");
     } catch {
@@ -402,8 +406,14 @@ export function spawnRuntimeStreaming(
     // Grace period — give the child time to exit cleanly before
     // SIGKILL.  See SIGTERM_GRACE_PERIOD_MS.  `unref()` so the timer
     // doesn't hold the event loop open.
+    //
+    // Don't gate on `proc.killed` — Node flips that to true the
+    // moment `proc.kill()` *delivers* a signal, not when the child
+    // actually exits.  After the SIGTERM above, `proc.killed` is
+    // already true, so the only reliable "child is still alive"
+    // check is `proc.exitCode === null` (process hasn't exited).
     setTimeout(() => {
-      if (proc && proc.exitCode === null && !proc.killed) {
+      if (proc && proc.exitCode === null) {
         try {
           proc.kill("SIGKILL");
         } catch {

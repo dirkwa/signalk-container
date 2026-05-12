@@ -110,7 +110,7 @@ export function createLogStreamBroker(
   const respawnDelayMs = options?.respawnDelayMs ?? RESPAWN_DELAY_MS;
 
   const subscribers = new Set<LogSubscriber>();
-  let tail: { stop: () => void } | null = null;
+  let tail: { stop: () => void; pid: number | undefined } | null = null;
   let closed = false;
   // Pending auto-respawn timer.  Tracked so `close()` and `stopTail()`
   // can cancel it cleanly.
@@ -177,8 +177,7 @@ export function createLogStreamBroker(
     // arrives and would otherwise null `tail` (clobbering handle
     // #2) and schedule a respawn (eventually spawning a stale
     // tail #3).
-    let thisTail: { stop: () => void } | null = null;
-    thisTail = spawnTail(runtime, name, fanOut, {
+    const thisTail = spawnTail(runtime, name, fanOut, {
       startTail,
       onError: onTailError,
       onExit: () => {
@@ -187,6 +186,18 @@ export function createLogStreamBroker(
         scheduleRespawn();
       },
     });
+    // `spawnRuntimeStreaming` returns a no-op handle with
+    // `pid === undefined` when `spawn()` fails synchronously (bad
+    // binary, ENOENT, etc.).  No child process exists, so `onExit`
+    // will NEVER fire — caching this handle would wedge the broker
+    // forever (subscribers attached, no live tail, no respawn).
+    // Treat it as a failed spawn: surface via onTailError (already
+    // done synchronously by spawnRuntimeStreaming) and schedule a
+    // backoff-respawn instead of storing the dead handle.
+    if (thisTail.pid === undefined) {
+      scheduleRespawn();
+      return;
+    }
     tail = thisTail;
   };
 

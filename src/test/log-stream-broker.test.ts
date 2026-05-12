@@ -474,4 +474,59 @@ describe("LogStreamBroker — auto-respawn after tail exit", () => {
     );
     broker.close("container-removed");
   });
+
+  it("treats pid:undefined as a failed spawn — schedules respawn instead of wedging", async () => {
+    // Regression for: spawnRuntimeStreaming returns a no-op handle
+    // with pid===undefined on synchronous spawn failures (bad
+    // binary, ENOENT).  No child process exists so `onExit` never
+    // fires.  Without the guard, the broker would cache that dead
+    // handle, leaving subscribers attached but the broker silent
+    // forever.  With the guard: treat as a failed spawn and let
+    // the backoff retry — second attempt succeeds and lines flow.
+    let attempt = 0;
+    type Handle = {
+      stop: () => void;
+      pid: number | undefined;
+      onExit?: () => void;
+      onLine?: (l: string) => void;
+    };
+    const handles: Handle[] = [];
+    const spawnTail: typeof import("../containers").tailContainerLogs = (
+      _runtime,
+      _name,
+      onLine,
+      options,
+    ) => {
+      attempt++;
+      if (attempt === 1) {
+        // Simulate synchronous spawn failure path.
+        return { stop: () => {}, pid: undefined };
+      }
+      const handle: Handle = {
+        stop: () => {},
+        pid: 1234,
+        onExit: options?.onExit ? () => options.onExit?.(0) : undefined,
+        onLine,
+      };
+      handles.push(handle);
+      return { stop: handle.stop, pid: handle.pid };
+    };
+
+    const broker = createLogStreamBroker(runtime, "foo", {
+      spawnTail,
+      respawnDelayMs: TEST_RESPAWN_DELAY_MS,
+    });
+    const lines: string[] = [];
+    broker.subscribe({ onLine: (l) => lines.push(l) });
+    // First spawn attempt failed (pid:undefined).  The broker
+    // should have scheduled a backoff respawn rather than caching
+    // the dead handle.
+    assert.equal(attempt, 1);
+    // After backoff, the second attempt succeeds.
+    await waitFor(() => attempt === 2, "broker retries after pid:undefined");
+    // Feed a line into the new tail and verify the subscriber gets it.
+    handles[0].onLine?.("hello");
+    assert.deepEqual(lines, ["hello"]);
+    broker.close("container-removed");
+  });
 });
