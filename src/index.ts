@@ -1915,27 +1915,30 @@ module.exports = (app: App) => {
           });
           return;
         }
-        res.writeHead(200, {
-          "Content-Type": "text/event-stream",
-          "Cache-Control": "no-cache",
-          Connection: "keep-alive",
-          // Tells nginx (and most reverse proxies) not to buffer the
-          // response so each line reaches the browser immediately.
-          "X-Accel-Buffering": "no",
-          // Explicitly opt out of compression — some Express
-          // middleware stacks (including older Signal K builds)
-          // buffer up to the gzip block size before flushing,
-          // which silently delays the first SSE frame past the
-          // 30s timeout in EventSource client implementations.
-          "Content-Encoding": "identity",
-        });
+        // Use setHeader (not writeHead's headers object) so the
+        // headers are locked onto the response object before any
+        // upstream compression middleware sees the first chunk.
+        // `compression` (which Signal K applies globally) respects
+        // `Cache-Control: no-transform` and skips compressing —
+        // without this directive, observed in the wild:
+        //
+        //   Content-Encoding: gzip
+        //
+        // overriding our `identity` header.  Gzip buffers bytes
+        // until it has a full block to emit, so the `hello` frame
+        // sits unsent and the modal stays at "Backfilled — opening
+        // live stream…" forever.
+        res.setHeader("Content-Type", "text/event-stream");
+        res.setHeader("Cache-Control", "no-cache, no-transform");
+        res.setHeader("Connection", "keep-alive");
+        res.setHeader("X-Accel-Buffering", "no");
+        res.setHeader("Content-Encoding", "identity");
+        res.statusCode = 200;
         // Force the headers (and any queued body) onto the wire
         // now — without this, Express keeps the response in a
         // "wait for more" state until `res.end()` or a sufficient
         // body chunk arrives.  For SSE that means the `hello`
-        // frame below would sit in the kernel send buffer instead
-        // of reaching the client, leaving the modal stuck at
-        // "Backfilled — opening live stream…".
+        // frame below would sit in the kernel send buffer.
         res.flushHeaders();
         res.write("event: hello\ndata: connected\n\n");
 
