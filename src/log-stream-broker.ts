@@ -149,25 +149,25 @@ export function createLogStreamBroker(
 
   const spawnIfNeeded = () => {
     if (tail !== null || closed) return;
-    tail = spawnTail(runtime, name, fanOut, {
+    // Capture the handle in a closure-local so a late onExit from
+    // *this* tail can't clobber a newer one.  Scenario this guards
+    // against: unsub-to-zero stops the tail (SIGTERM the child) and
+    // sets `tail = null`; a fresh subscribe spawns tail #2 BEFORE
+    // tail #1's `close` event has fired; tail #1's onExit then
+    // arrives and would otherwise null `tail` (clobbering handle
+    // #2) and schedule a respawn (eventually spawning a stale
+    // tail #3).
+    let thisTail: { stop: () => void } | null = null;
+    thisTail = spawnTail(runtime, name, fanOut, {
       startTail,
       onError: onTailError,
       onExit: () => {
-        // Underlying child died — most commonly because the
-        // container was removed (auto-recreate, manual rm, host
-        // restart).  Null the handle, then auto-respawn after a
-        // short delay if subscribers are still attached and the
-        // broker hasn't been explicitly closed.  Without this an
-        // SSE-only consumer (no plugin onContainerLog re-subscribe
-        // event) would sit silent forever after auto-recreate or
-        // a transient daemon glitch.  The delay debounces the
-        // restart loop when the container is genuinely gone:
-        // `containers.remove(name)` in the wrapper races to call
-        // `close()`, which clears the pending timer.
+        if (tail !== thisTail) return;
         tail = null;
         scheduleRespawn();
       },
     });
+    tail = thisTail;
   };
 
   const stopTail = () => {

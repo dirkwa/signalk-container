@@ -67,6 +67,15 @@ function makeFakeTail() {
       a.stopped = true;
       a.onExit?.(0);
     },
+    /** Fire onExit for a specific (possibly stale) spawn index,
+     *  simulating a late `close` event from an older child after a
+     *  newer one has already started. */
+    fireOnExitFor: (idx: number) => {
+      const a = actives[idx];
+      if (!a) return;
+      a.stopped = true;
+      a.onExit?.(0);
+    },
     spawnCount: () => actives.length,
     stopCount: (idx?: number) =>
       idx === undefined
@@ -349,5 +358,35 @@ describe("LogStreamBroker — auto-respawn after tail exit", () => {
     broker.close("container-removed");
     await new Promise((r) => setTimeout(r, POLL_MS));
     assert.equal(fake.spawnCount(), 1);
+  });
+
+  it("ignores a stale onExit from an older tail instance", async () => {
+    // Regression for the "late-exit from a previous child clobbers
+    // the live handle" race.  The scenario: unsub-to-0 stops the
+    // tail and clears `tail`; a fresh subscribe spawns tail #2
+    // before tail #1's `close` event fires; if onExit didn't check
+    // its own identity, tail #1's late exit would null `tail` again
+    // and trigger a spurious respawn into tail #3.
+    const fake = makeFakeTail();
+    const broker = createLogStreamBroker(runtime, "foo", {
+      spawnTail: fake.spawnTail,
+      respawnDelayMs: TEST_RESPAWN_DELAY_MS,
+    });
+    const unsub = broker.subscribe({ onLine: () => {} });
+    assert.equal(fake.spawnCount(), 1);
+    // Drop to zero → broker stops the tail (synchronously sets
+    // `tail = null`); the underlying child hasn't actually emitted
+    // its close event yet.
+    unsub();
+    // New subscriber arrives — broker spawns tail #2.
+    broker.subscribe({ onLine: () => {} });
+    assert.equal(fake.spawnCount(), 2);
+    // Tail #1's `close` event finally arrives.  Without the
+    // identity guard this would null the live handle and schedule
+    // another respawn.
+    fake.fireOnExitFor(0);
+    await new Promise((r) => setTimeout(r, POLL_MS));
+    assert.equal(fake.spawnCount(), 2);
+    broker.close("container-removed");
   });
 });
