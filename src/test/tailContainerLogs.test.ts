@@ -258,6 +258,24 @@ describe("getContainerLogs", () => {
     assert.deepEqual(lines, ["a", "b"]);
   });
 
+  it("does not synthesize a phantom blank line between stdout and stderr", async () => {
+    // stdout already ends with `\n` and stderr is non-empty.  A
+    // naive `[stdout, stderr].join("\n")` would produce
+    // "out1\nout2\n\nerr1", splitting to ["out1","out2","","err1"]
+    // — a blank line nobody actually emitted.
+    const exec = async (): Promise<{
+      stdout: string;
+      stderr: string;
+      exitCode: number;
+    }> => ({
+      stdout: "out1\nout2\n",
+      stderr: "err1",
+      exitCode: 0,
+    });
+    const lines = await getContainerLogs(runtime, "foo", undefined, exec);
+    assert.deepEqual(lines, ["out1", "out2", "err1"]);
+  });
+
   it("does not emit a phantom leading empty line when one side is empty", async () => {
     // A naive `${stdout}\n${stderr}` concat injects "\n" + "err"
     // when stdout=="", producing ["", "err"].  Verify the filter

@@ -1,4 +1,29 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, {
+  CSSProperties,
+  KeyboardEvent as ReactKeyboardEvent,
+  MouseEvent as ReactMouseEvent,
+  UIEvent as ReactUIEvent,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
+
+interface LogsModalProps {
+  /** Container name as it appears in the `/api/containers` listing
+   *  (already `sk-`-prefixed by convention; the modal does not
+   *  add/strip the prefix). */
+  name: string;
+  /** Called when the user dismisses the modal (close button, ESC,
+   *  or overlay click). */
+  onClose: () => void;
+}
+
+type ConnectionStatus =
+  | "connecting"
+  | "backfill"
+  | "streaming"
+  | "disconnected";
 
 /**
  * Modal that streams a managed container's stdout/stderr log
@@ -25,7 +50,7 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 const MAX_LINES = 10000;
 const INITIAL_TAIL = 200;
 
-const S = {
+const S: Record<string, CSSProperties> = {
   overlay: {
     position: "fixed",
     inset: 0,
@@ -116,24 +141,23 @@ const S = {
   },
 };
 
-export default function LogsModal({ name, onClose }) {
-  const [lines, setLines] = useState([]);
-  // 'connecting' | 'backfill' | 'streaming' | 'disconnected'
-  const [status, setStatus] = useState("connecting");
-  const [endReason, setEndReason] = useState(null);
+export default function LogsModal({ name, onClose }: LogsModalProps) {
+  const [lines, setLines] = useState<string[]>([]);
+  const [status, setStatus] = useState<ConnectionStatus>("connecting");
+  const [endReason, setEndReason] = useState<string | null>(null);
   const [autoScroll, setAutoScroll] = useState(true);
   const [copied, setCopied] = useState(false);
 
-  const bodyRef = useRef(null);
-  const esRef = useRef(null);
+  const bodyRef = useRef<HTMLPreElement | null>(null);
+  const esRef = useRef<EventSource | null>(null);
   const userScrolledUpRef = useRef(false);
-  const modalRef = useRef(null);
-  const closeBtnRef = useRef(null);
-  const previouslyFocusedRef = useRef(null);
+  const modalRef = useRef<HTMLDivElement | null>(null);
+  const closeBtnRef = useRef<HTMLButtonElement | null>(null);
+  const previouslyFocusedRef = useRef<Element | null>(null);
 
   // Append helper — caps the buffer so unbounded growth can't pin
   // the DOM.
-  const append = useCallback((newLines) => {
+  const append = useCallback((newLines: string[]) => {
     setLines((prev) => {
       const combined = prev.concat(newLines);
       if (combined.length > MAX_LINES) {
@@ -186,7 +210,7 @@ export default function LogsModal({ name, onClose }) {
         setStatus("streaming");
       });
 
-      es.onmessage = (ev) => {
+      es.onmessage = (ev: MessageEvent<string>) => {
         if (cancelled) return;
         // Preserve empty lines — the container really did print
         // `\n`, and the modal should mirror what `podman logs` shows.
@@ -195,7 +219,10 @@ export default function LogsModal({ name, onClose }) {
 
       es.addEventListener("end", (ev) => {
         if (cancelled) return;
-        setEndReason(ev.data || "stream ended");
+        // Custom SSE event types come through as plain `Event`; the
+        // `data` field is present on the underlying MessageEvent.
+        const data = (ev as MessageEvent<string>).data;
+        setEndReason(data || "stream ended");
         setStatus("disconnected");
         es.close();
       });
@@ -237,7 +264,7 @@ export default function LogsModal({ name, onClose }) {
 
   // Detect manual scroll-up so we stop pinning. Reset when the user
   // toggles auto-scroll back on.
-  const onBodyScroll = useCallback(() => {
+  const onBodyScroll = useCallback((_e: ReactUIEvent<HTMLPreElement>) => {
     const el = bodyRef.current;
     if (!el) return;
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 8; // ~one line
@@ -284,7 +311,7 @@ export default function LogsModal({ name, onClose }) {
 
   // ESC to close.
   useEffect(() => {
-    const onKey = (e) => {
+    const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
     window.addEventListener("keydown", onKey);
@@ -304,7 +331,7 @@ export default function LogsModal({ name, onClose }) {
     return () => {
       clearTimeout(t);
       const prev = previouslyFocusedRef.current;
-      if (prev && typeof prev.focus === "function") {
+      if (prev instanceof HTMLElement) {
         try {
           prev.focus();
         } catch {
@@ -318,37 +345,40 @@ export default function LogsModal({ name, onClose }) {
   // elements so keyboard users can't tab out into the config panel
   // behind.  Listen on the modal container; let other keys bubble
   // (ESC is handled by the window listener above).
-  const onModalKeyDown = useCallback((e) => {
-    if (e.key !== "Tab") return;
-    const root = modalRef.current;
-    if (!root) return;
-    // Visible, focusable elements only.  Buttons + the <pre> are
-    // sufficient for this modal — no inputs or links.
-    const focusable = Array.from(
-      root.querySelectorAll(
-        'button:not([disabled]), [tabindex]:not([tabindex="-1"])',
-      ),
-    ).filter((el) => el.offsetParent !== null);
-    if (focusable.length === 0) return;
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    const active = document.activeElement;
-    if (e.shiftKey) {
-      if (active === first || !root.contains(active)) {
-        e.preventDefault();
-        last.focus();
+  const onModalKeyDown = useCallback(
+    (e: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (e.key !== "Tab") return;
+      const root = modalRef.current;
+      if (!root) return;
+      // Visible, focusable elements only.  Buttons + the <pre> are
+      // sufficient for this modal — no inputs or links.
+      const focusable = Array.from(
+        root.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      ).filter((el) => el.offsetParent !== null);
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement;
+      if (e.shiftKey) {
+        if (active === first || !root.contains(active)) {
+          e.preventDefault();
+          last.focus();
+        }
+      } else {
+        if (active === last) {
+          e.preventDefault();
+          first.focus();
+        }
       }
-    } else {
-      if (active === last) {
-        e.preventDefault();
-        first.focus();
-      }
-    }
-  }, []);
+    },
+    [],
+  );
 
   // Close on overlay click (but not when clicking inside the modal).
   const onOverlayClick = useCallback(
-    (e) => {
+    (e: ReactMouseEvent<HTMLDivElement>) => {
       if (e.target === e.currentTarget) onClose();
     },
     [onClose],

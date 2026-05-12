@@ -11,7 +11,12 @@
     "resolveJsonModule": true,
     "declaration": true,
     "declarationMap": true,
-    "sourceMap": true
+    "sourceMap": true,
+    // configpanel/ uses React JSX; `tsc` type-checks the TSX
+    // files alongside server-side TS but webpack bundles them
+    // through babel-loader for `public/`.  The emitted
+    // dist/configpanel/ files are harmless artefacts.
+    "jsx": "react"
   },
   "include": ["src"],
   "exclude": ["node_modules", "dist"]

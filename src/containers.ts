@@ -321,11 +321,20 @@ export function parsePositiveIntQuery(
 }
 
 /**
- * Capture the last `tail` lines of a managed container's combined
- * stdout/stderr log via `podman logs --tail <N>` (no `-f`).  Returns
- * the array of lines.  Caps `tail` at 10000 to prevent
- * runaway-buffer requests against very chatty containers; `since` is
- * a unix-epoch-seconds filter passed through to the runtime.
+ * Capture the last `tail` lines of a managed container's stdout
+ * and stderr via `podman logs --tail <N>` (no `-f`).  Returns the
+ * array of lines.  Caps `tail` at 10000 to prevent runaway-buffer
+ * requests against very chatty containers; `since` is a unix-epoch-
+ * seconds filter passed through to the runtime.
+ *
+ * Ordering caveat: `execFile` reads the runtime's stdout and stderr
+ * into separate buffers — the OS-level chronological interleave
+ * between the two is lost before we see them.  We return stdout
+ * lines (in order) followed by stderr lines (in order); a stderr
+ * line the container actually emitted between two stdout lines
+ * will appear after the stdout chunk.  This is a known limitation
+ * of one-shot capture; per-line `--timestamps` parsing would be
+ * the only way to reconstruct true chronology and is out of scope.
  *
  * Used both by the `GET /containers/:name/logs` REST route and by
  * `ContainerManagerApi.getLogs` for in-process consumer-plugin calls.
@@ -350,18 +359,18 @@ export async function getContainerLogs(
   if (result.exitCode !== 0) {
     throw new Error(result.stderr || `logs ${name}: exit ${result.exitCode}`);
   }
-  // The runtime may emit stdout (container's stdout) and stderr
-  // (container's stderr) — both interleaved here.  Combine them
-  // in order: stdout first, then stderr.  Use a Boolean filter so
-  // an empty side doesn't inject a phantom leading/separator
-  // empty line (e.g. stdout="" + stderr="err" would otherwise
-  // split to ["", "err"]).  Empty trailing newlines become empty
-  // array entries; pop them so the consumer never sees a phantom
-  // blank line at the end either.
-  const combined = [result.stdout, result.stderr].filter(Boolean).join("\n");
-  const lines = combined.split(/\r?\n/);
-  while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
-  return lines;
+  // Split each stream independently and concat — never `.join("\n")`
+  // them because if stdout already ended with `\n` we'd synthesize
+  // a phantom empty line between the two.  Trailing empties from
+  // each side get popped (matches real `podman logs` semantics
+  // where the runtime adds a final newline to the last line).
+  const toLines = (chunk: string): string[] => {
+    if (!chunk) return [];
+    const split = chunk.split(/\r?\n/);
+    while (split.length > 0 && split[split.length - 1] === "") split.pop();
+    return split;
+  };
+  return [...toLines(result.stdout), ...toLines(result.stderr)];
 }
 
 export function qualifyImage(
