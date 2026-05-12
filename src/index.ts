@@ -96,6 +96,13 @@ interface App {
   [key: string]: unknown;
 }
 
+/**
+ * SSE comment-frame heartbeat interval.  30s is comfortably below
+ * common reverse-proxy idle-read timeouts (nginx default 60s) but
+ * not so frequent that quiet streams pay a noticeable cost.
+ */
+const SSE_HEARTBEAT_MS = 30_000;
+
 module.exports = (app: App) => {
   let runtimeInfo: ContainerRuntimeInfo | null = null;
   let pruneTimer: NodeJS.Timeout | null = null;
@@ -955,9 +962,15 @@ module.exports = (app: App) => {
       } else {
         // Caller explicitly removed onContainerLog this call —
         // drop any prior subscription so we don't keep feeding a
-        // detached callback.
+        // detached callback.  If that drains the broker, evict it
+        // from the Map so a fresh subscriber later spawns a clean
+        // tail (mirrors the SSE-disconnect cleanup below).
         perCallOnContainerLogUnsub.get(name)?.();
         perCallOnContainerLogUnsub.delete(name);
+        const broker = logStreamBrokers.get(name);
+        if (broker && !broker.isClosed() && broker.subscriberCount() === 0) {
+          logStreamBrokers.delete(name);
+        }
       }
 
       if (options?.healthCheck) {
@@ -1917,7 +1930,18 @@ module.exports = (app: App) => {
             // frames are line-oriented and our upstream splitter
             // already emits one line at a time, so this is defensive.
             const safeLine = line.replace(/[\r\n]+/g, " ");
-            res.write(`data: ${safeLine}\n\n`);
+            // Guard the write: a client disconnect can fire between
+            // the broker emitting a line and node delivering it to
+            // this callback, and `res.write` on an ended/destroyed
+            // response throws ERR_STREAM_WRITE_AFTER_END.  Without
+            // this guard the throw would propagate up through the
+            // broker fan-out and noisily route via `onTailError`.
+            if (res.writableEnded || res.destroyed) return;
+            try {
+              res.write(`data: ${safeLine}\n\n`);
+            } catch {
+              /* connection already gone; req.close handler will fire */
+            }
           },
           onClose: (reason) => {
             res.write(`event: end\ndata: ${reason}\n\n`);
@@ -1925,19 +1949,18 @@ module.exports = (app: App) => {
           },
         });
 
-        // Heartbeat every 30s — keeps reverse-proxy idle timeouts at
-        // bay during quiet container periods.  Sent as an SSE
-        // comment frame (single `:` line) — clients ignore it.
-        // `unref()` so the timer doesn't hold the event loop open
-        // during shutdown; req.on("close") clears it on normal
-        // disconnect.
+        // Heartbeat keeps reverse-proxy idle timeouts at bay during
+        // quiet container periods.  Sent as an SSE comment frame
+        // (single `:` line) — clients ignore it.  `unref()` so the
+        // timer doesn't hold the event loop open during shutdown;
+        // req.on("close") clears it on normal disconnect.
         const heartbeat = setInterval(() => {
           try {
             res.write(": heartbeat\n\n");
           } catch {
             /* connection already gone; req.close handler will fire */
           }
-        }, 30000);
+        }, SSE_HEARTBEAT_MS);
         heartbeat.unref();
 
         req.on("close", () => {

@@ -352,10 +352,14 @@ export async function getContainerLogs(
   }
   // The runtime may emit stdout (container's stdout) and stderr
   // (container's stderr) — both interleaved here.  Combine them
-  // in order: stdout first, then stderr.  Empty trailing newlines
-  // become empty array entries; filter them so the consumer never
-  // sees a phantom blank line at the end.
-  const lines = `${result.stdout}\n${result.stderr}`.split(/\r?\n/);
+  // in order: stdout first, then stderr.  Use a Boolean filter so
+  // an empty side doesn't inject a phantom leading/separator
+  // empty line (e.g. stdout="" + stderr="err" would otherwise
+  // split to ["", "err"]).  Empty trailing newlines become empty
+  // array entries; pop them so the consumer never sees a phantom
+  // blank line at the end either.
+  const combined = [result.stdout, result.stderr].filter(Boolean).join("\n");
+  const lines = combined.split(/\r?\n/);
   while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
   return lines;
 }

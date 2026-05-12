@@ -147,6 +147,7 @@ export default function LogsModal({ name, onClose }) {
   useEffect(() => {
     let cancelled = false;
     const init = async () => {
+      let backfillFatal = false;
       try {
         const res = await fetch(
           `/plugins/signalk-container/api/containers/${encodeURIComponent(name)}/logs?tail=${INITIAL_TAIL}`,
@@ -155,17 +156,26 @@ export default function LogsModal({ name, onClose }) {
         if (res.ok) {
           const data = await res.json();
           append(Array.isArray(data.lines) ? data.lines : []);
+          setStatus("backfill");
+        } else if (res.status === 404) {
+          // Container doesn't exist — the SSE endpoint would also
+          // 404, and EventSource auto-retries on initial errors
+          // forever.  Surface the failure and stop here.
+          append([`[error] container not found (HTTP 404)`]);
+          setEndReason("container not found");
+          setStatus("disconnected");
+          backfillFatal = true;
         } else {
           append([`[error] backfill failed: HTTP ${res.status}`]);
+          setStatus("backfill");
         }
-        setStatus("backfill");
       } catch (e) {
         if (cancelled) return;
         const msg = e instanceof Error ? e.message : String(e);
         append([`[error] backfill failed: ${msg}`]);
       }
 
-      if (cancelled) return;
+      if (cancelled || backfillFatal) return;
       const es = new EventSource(
         `/plugins/signalk-container/api/containers/${encodeURIComponent(name)}/logs/stream`,
       );

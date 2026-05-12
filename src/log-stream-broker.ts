@@ -58,7 +58,6 @@ export interface LogStreamBroker {
   /** Force-close: stops the tail, notifies every subscriber via
    *  `onClose`, drops the subscriber set.  Idempotent. */
   close(reason: "container-removed" | "plugin-stopped"): void;
-  /** Has `close()` been called? */
   isClosed(): boolean;
 }
 

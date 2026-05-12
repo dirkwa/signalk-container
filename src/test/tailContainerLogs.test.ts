@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { tailContainerLogs, getContainerLogs } from "../containers";
+import { tailContainerLogs, getContainerLogs, MAX_TAIL } from "../containers";
 import type { ContainerRuntimeInfo } from "../types";
 
 const runtime: ContainerRuntimeInfo = {
@@ -104,9 +104,9 @@ describe("tailContainerLogs", () => {
     const stub = makeStubSpawn();
     tailContainerLogs(runtime, "foo", () => {}, {
       spawn: stub.spawn,
-      startTail: 99999999,
+      startTail: MAX_TAIL + 1,
     });
-    assert.equal(stub.calls[0].args[3], "10000");
+    assert.equal(stub.calls[0].args[3], String(MAX_TAIL));
   });
 });
 
@@ -138,7 +138,7 @@ describe("getContainerLogs", () => {
     assert.equal(calls[0][2], "200");
   });
 
-  it("caps tail at MAX_TAIL (10000)", async () => {
+  it("caps tail at MAX_TAIL", async () => {
     const calls: string[][] = [];
     const exec = async (
       _r: ContainerRuntimeInfo,
@@ -147,8 +147,8 @@ describe("getContainerLogs", () => {
       calls.push([...args]);
       return { stdout: "", stderr: "", exitCode: 0 };
     };
-    await getContainerLogs(runtime, "foo", { tail: 99999 }, exec);
-    assert.equal(calls[0][2], "10000");
+    await getContainerLogs(runtime, "foo", { tail: MAX_TAIL + 1000 }, exec);
+    assert.equal(calls[0][2], String(MAX_TAIL));
   });
 
   it("floors tail to 0 when negative", async () => {
@@ -256,5 +256,26 @@ describe("getContainerLogs", () => {
     });
     const lines = await getContainerLogs(runtime, "foo", undefined, exec);
     assert.deepEqual(lines, ["a", "b"]);
+  });
+
+  it("does not emit a phantom leading empty line when one side is empty", async () => {
+    // A naive `${stdout}\n${stderr}` concat injects "\n" + "err"
+    // when stdout=="", producing ["", "err"].  Verify the filter
+    // suppresses that.  Symmetrical for stderr=="".
+    for (const fixture of [
+      { stdout: "", stderr: "err1\nerr2" },
+      { stdout: "out1\nout2", stderr: "" },
+    ]) {
+      const exec = async (): Promise<{
+        stdout: string;
+        stderr: string;
+        exitCode: number;
+      }> => ({ ...fixture, exitCode: 0 });
+      const lines = await getContainerLogs(runtime, "foo", undefined, exec);
+      assert.ok(
+        !lines.some((l) => l === ""),
+        `no empty lines expected, got ${JSON.stringify(lines)}`,
+      );
+    }
   });
 });
