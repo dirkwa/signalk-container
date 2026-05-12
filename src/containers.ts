@@ -260,11 +260,27 @@ export function tailContainerLogs(
 ): StreamingProcessHandle {
   const spawnFn = options?.spawn ?? spawnRuntimeStreaming;
   const fullName = prefixedName(name);
-  const tail = String(options?.startTail ?? 0);
+  const tail = String(normalizeTail(options?.startTail, 0));
   return spawnFn(runtime, ["logs", "-f", "--tail", tail, fullName], onLine, {
     onError: options?.onError,
     onExit: options?.onExit,
   });
+}
+
+/** Upper bound for `--tail N` accepted at the public boundary. */
+export const MAX_TAIL = 10000;
+
+/**
+ * Coerce an optional caller-supplied tail count to a finite,
+ * non-negative integer so a buggy or hostile caller can never
+ * forward `NaN`, `Infinity`, or a negative value into a runtime
+ * argv (`--tail NaN` would otherwise reach `podman`/`docker`).
+ * Falls back to `fallback` for `undefined` / non-finite / fractional
+ * shapes; `MAX_TAIL` caps unbounded requests.
+ */
+function normalizeTail(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value)) return fallback;
+  return Math.min(Math.max(0, Math.floor(value)), MAX_TAIL);
 }
 
 /**
@@ -320,11 +336,13 @@ export async function getContainerLogs(
   options?: { tail?: number; since?: number },
   exec: ExecFn = execRuntime,
 ): Promise<string[]> {
-  const MAX_TAIL = 10000;
-  const requested = options?.tail ?? 200;
-  const tail = Math.min(Math.max(0, Math.floor(requested)), MAX_TAIL);
+  const tail = normalizeTail(options?.tail, 200);
   const args = ["logs", "--tail", String(tail)];
-  if (options?.since !== undefined && Number.isFinite(options.since)) {
+  if (
+    options?.since !== undefined &&
+    Number.isFinite(options.since) &&
+    options.since >= 0
+  ) {
     args.push("--since", String(Math.floor(options.since)));
   }
   args.push(prefixedName(name));

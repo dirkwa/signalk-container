@@ -12,10 +12,11 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
  *     ref-count drops on the server side and it stops the tail
  *     when no other subscribers remain.
  *   - The user can toggle auto-scroll, copy the visible text, or
- *     download a `<name>-<ts>.log` file.  `name` is whatever the
- *     server returned for the container; today it's already
- *     `sk-`-prefixed because that's the convention but the modal
- *     doesn't depend on the prefix.
+ *     download a `<name>-<ts>.log` file.  `name` is the prop passed
+ *     in by the parent panel — the container name as it appears in
+ *     the `/api/containers` listing.  The modal never adds or strips
+ *     the `sk-` prefix itself; whatever it receives is used as-is in
+ *     the URL paths and in the download filename.
  *
  * Capped at MAX_LINES in memory so a chatty container left open
  * for hours doesn't pin a noticeable amount of DOM.
@@ -177,7 +178,9 @@ export default function LogsModal({ name, onClose }) {
 
       es.onmessage = (ev) => {
         if (cancelled) return;
-        if (ev.data) append([ev.data]);
+        // Preserve empty lines — the container really did print
+        // `\n`, and the modal should mirror what `podman logs` shows.
+        if (ev.data != null) append([ev.data]);
       };
 
       es.addEventListener("end", (ev) => {
@@ -190,9 +193,14 @@ export default function LogsModal({ name, onClose }) {
       es.onerror = () => {
         if (cancelled) return;
         // EventSource will auto-reconnect; surface as 'connecting'
-        // so the dot turns amber instead of green. Only flip to
-        // 'disconnected' when we explicitly receive the 'end' event.
-        setStatus((s) => (s === "streaming" ? "connecting" : s));
+        // so the dot turns amber instead of green.  Cover both the
+        // mid-stream drop ('streaming' → 'connecting') and the
+        // initial-failure case where the stream never reached
+        // 'streaming' after backfill — otherwise the banner would
+        // stay on "Backfilled — opening live stream…" forever while
+        // the browser silently retries.  Only 'disconnected' is
+        // sticky (set when we receive an explicit 'end' event).
+        setStatus((s) => (s === "disconnected" ? s : "connecting"));
       };
     };
 
@@ -404,6 +412,7 @@ export default function LogsModal({ name, onClose }) {
           style={S.body}
           onScroll={onBodyScroll}
           aria-label="Container log output"
+          tabIndex={0}
         >
           {lines.length === 0 ? "(no log lines yet)" : lines.join("\n")}
         </pre>

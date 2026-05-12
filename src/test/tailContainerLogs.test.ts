@@ -84,6 +84,30 @@ describe("tailContainerLogs", () => {
     handle.stop();
     assert.equal(stub.stopCount(), 2);
   });
+
+  it("normalizes NaN/Infinity/negative startTail to 0", () => {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, -7]) {
+      const stub = makeStubSpawn();
+      tailContainerLogs(runtime, "foo", () => {}, {
+        spawn: stub.spawn,
+        startTail: bad,
+      });
+      assert.equal(
+        stub.calls[0].args[3],
+        "0",
+        `startTail=${bad} should normalize to "0"`,
+      );
+    }
+  });
+
+  it("caps absurd startTail at MAX_TAIL", () => {
+    const stub = makeStubSpawn();
+    tailContainerLogs(runtime, "foo", () => {}, {
+      spawn: stub.spawn,
+      startTail: 99999999,
+    });
+    assert.equal(stub.calls[0].args[3], "10000");
+  });
 });
 
 describe("getContainerLogs", () => {
@@ -152,6 +176,39 @@ describe("getContainerLogs", () => {
     await getContainerLogs(runtime, "foo", { since: 1700000000 }, exec);
     assert.ok(calls[0].includes("--since"));
     assert.equal(calls[0][calls[0].indexOf("--since") + 1], "1700000000");
+  });
+
+  it("omits --since when negative, NaN or Infinity", async () => {
+    for (const bad of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const calls: string[][] = [];
+      const exec = async (
+        _r: ContainerRuntimeInfo,
+        args: string[],
+      ): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
+        calls.push([...args]);
+        return { stdout: "", stderr: "", exitCode: 0 };
+      };
+      await getContainerLogs(runtime, "foo", { since: bad }, exec);
+      assert.ok(
+        !calls[0].includes("--since"),
+        `since=${bad} should not become --since`,
+      );
+    }
+  });
+
+  it("falls back to default 200 when tail is NaN or Infinity", async () => {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY]) {
+      const calls: string[][] = [];
+      const exec = async (
+        _r: ContainerRuntimeInfo,
+        args: string[],
+      ): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
+        calls.push([...args]);
+        return { stdout: "", stderr: "", exitCode: 0 };
+      };
+      await getContainerLogs(runtime, "foo", { tail: bad }, exec);
+      assert.equal(calls[0][2], "200", `tail=${bad} should fall back to "200"`);
+    }
   });
 
   it("merges stdout and stderr into the line array", async () => {
