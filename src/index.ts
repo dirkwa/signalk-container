@@ -1884,10 +1884,21 @@ module.exports = (app: App) => {
         // that doesn't exist.  Otherwise the client connects, gets
         // 200, and immediately receives `event: end` from the
         // broker's `onTailError` — visually confusing and wastes a
-        // round-trip on an obvious 404.
-        const state = await getContainerState(runtimeInfo, name);
-        if (state === "missing") {
-          res.status(404).json({ error: `No such container: ${name}` });
+        // round-trip on an obvious 404.  Wrap the inspect call —
+        // `getContainerState` can throw if the runtime is busy or
+        // exec itself fails, and we still want a clean JSON error.
+        try {
+          const state = await getContainerState(runtimeInfo, name);
+          if (state === "missing") {
+            res.status(404).json({ error: `No such container: ${name}` });
+            return;
+          }
+        } catch (err) {
+          res.status(503).json({
+            error: `Failed to inspect container runtime: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          });
           return;
         }
         res.writeHead(200, {

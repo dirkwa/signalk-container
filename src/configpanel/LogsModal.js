@@ -157,7 +157,8 @@ export default function LogsModal({ name, onClose }) {
         setStatus("backfill");
       } catch (e) {
         if (cancelled) return;
-        append([`[error] backfill failed: ${e.message}`]);
+        const msg = e instanceof Error ? e.message : String(e);
+        append([`[error] backfill failed: ${msg}`]);
       }
 
       if (cancelled) return;
