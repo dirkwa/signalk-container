@@ -2,15 +2,19 @@ import { tailContainerLogs } from "./containers";
 import { ContainerRuntimeInfo } from "./types";
 
 /**
- * Delay between an underlying tail exiting and the broker trying
- * to respawn it, when subscribers are still attached.  Long enough
- * that the wrapper's `containers.remove(name)` → `close()` race
- * can win on the explicit-remove path; short enough that an
- * auto-recreate gap stays imperceptible.  When the new container
- * doesn't materialise (true removal), each cycle costs one wasted
- * spawn-and-exit per second until `close()` lands.
+ * Base delay between an underlying tail exiting and the broker
+ * trying to respawn it, when subscribers are still attached.  Long
+ * enough that the wrapper's `containers.remove(name)` → `close()`
+ * race can win on the explicit-remove path; short enough that an
+ * auto-recreate gap stays imperceptible.  Successive exits without
+ * any line being delivered apply exponential backoff (×2 per try)
+ * capped at `MAX_RESPAWN_DELAY_MS`, so a permanently-broken tail
+ * doesn't churn the daemon at 1 spawn/sec indefinitely.  A single
+ * delivered line resets the budget — that's our signal the new
+ * tail is healthy.
  */
 const RESPAWN_DELAY_MS = 1000;
+const MAX_RESPAWN_DELAY_MS = 30_000;
 
 /**
  * Why this exists / when the user is at risk
@@ -111,8 +115,14 @@ export function createLogStreamBroker(
   // Pending auto-respawn timer.  Tracked so `close()` and `stopTail()`
   // can cancel it cleanly.
   let respawnTimer: ReturnType<typeof setTimeout> | null = null;
+  // Consecutive respawns since the last delivered line; drives
+  // exponential backoff so a permanently-broken tail doesn't churn.
+  let consecutiveRespawns = 0;
 
   const fanOut = (line: string) => {
+    // A line delivered means the new tail is healthy — reset the
+    // backoff so the *next* exit gets the fast 1s recovery again.
+    consecutiveRespawns = 0;
     let i = 0;
     for (const sub of subscribers) {
       try {
@@ -127,6 +137,16 @@ export function createLogStreamBroker(
   const scheduleRespawn = () => {
     if (respawnTimer !== null || closed) return;
     if (subscribers.size === 0) return;
+    // Exponential backoff capped at MAX_RESPAWN_DELAY_MS in
+    // production.  Tests inject a tiny `respawnDelayMs`; we cap at
+    // `respawnDelayMs * 30` for that case so test backoff stays
+    // bounded without forcing the test to wait 30s.
+    const cap =
+      respawnDelayMs >= RESPAWN_DELAY_MS
+        ? MAX_RESPAWN_DELAY_MS
+        : respawnDelayMs * 30;
+    const delay = Math.min(respawnDelayMs * 2 ** consecutiveRespawns, cap);
+    consecutiveRespawns++;
     respawnTimer = setTimeout(() => {
       respawnTimer = null;
       // Re-check at fire time: a subscriber may have unsubscribed
@@ -135,7 +155,7 @@ export function createLogStreamBroker(
       // closed; the subscriber-count guard is here.
       if (subscribers.size === 0) return;
       spawnIfNeeded();
-    }, respawnDelayMs);
+    }, delay);
     // Don't pin the event loop open during shutdown.
     (respawnTimer as { unref?: () => void }).unref?.();
   };

@@ -360,6 +360,35 @@ describe("LogStreamBroker — auto-respawn after tail exit", () => {
     assert.equal(fake.spawnCount(), 1);
   });
 
+  it("applies exponential backoff on repeated exits; a delivered line resets it", async () => {
+    const fake = makeFakeTail();
+    const broker = createLogStreamBroker(runtime, "foo", {
+      spawnTail: fake.spawnTail,
+      respawnDelayMs: TEST_RESPAWN_DELAY_MS,
+    });
+    broker.subscribe({ onLine: () => {} });
+    assert.equal(fake.spawnCount(), 1);
+    // Three back-to-back exits with no lines delivered.  Successive
+    // respawn delays scale: 5ms, 10ms, 20ms; total ~35ms.
+    fake.killCurrentTail();
+    await new Promise((r) => setTimeout(r, POLL_MS));
+    assert.equal(fake.spawnCount(), 2);
+    fake.killCurrentTail();
+    await new Promise((r) => setTimeout(r, POLL_MS + 10));
+    assert.equal(fake.spawnCount(), 3);
+    fake.killCurrentTail();
+    await new Promise((r) => setTimeout(r, POLL_MS + 30));
+    assert.equal(fake.spawnCount(), 4);
+    // A delivered line marks the tail healthy and resets the
+    // counter.  Next exit goes back to the 5ms base — verify the
+    // respawn lands within POLL_MS, not the next backoff step.
+    fake.emit("hello");
+    fake.killCurrentTail();
+    await new Promise((r) => setTimeout(r, POLL_MS));
+    assert.equal(fake.spawnCount(), 5);
+    broker.close("container-removed");
+  });
+
   it("ignores a stale onExit from an older tail instance", async () => {
     // Regression for the "late-exit from a previous child clobbers
     // the live handle" race.  The scenario: unsub-to-0 stops the
