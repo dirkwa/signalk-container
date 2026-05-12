@@ -41,6 +41,7 @@ import {
   imageExists,
   listContainers,
   findSelfContainerId,
+  parsePositiveIntQuery,
   pruneImages,
   pullImage,
   qualifyImage as qualifyImageForRuntime,
@@ -1827,29 +1828,15 @@ module.exports = (app: App) => {
         // Validate query params at the boundary.  Reject non-integer
         // and negative values with 400 — `getContainerLogs` clamps
         // server-side but that's a fallback, not a substitute for
-        // input validation at the public surface.
-        const parsePositiveInt = (
-          raw: unknown,
-          field: string,
-        ): { value: number | undefined; error?: string } => {
-          if (raw === undefined || raw === "") return { value: undefined };
-          if (typeof raw !== "string")
-            return { value: undefined, error: `${field} must be a string` };
-          const n = Number(raw);
-          if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) {
-            return {
-              value: undefined,
-              error: `${field} must be a non-negative integer (got ${JSON.stringify(raw)})`,
-            };
-          }
-          return { value: n };
-        };
-        const tailParse = parsePositiveInt(req.query.tail, "tail");
+        // input validation at the public surface.  See
+        // `parsePositiveIntQuery` in containers.ts (exported so it
+        // can be tested in isolation).
+        const tailParse = parsePositiveIntQuery(req.query.tail, "tail");
         if (tailParse.error) {
           res.status(400).json({ error: tailParse.error });
           return;
         }
-        const sinceParse = parsePositiveInt(req.query.since, "since");
+        const sinceParse = parsePositiveIntQuery(req.query.since, "since");
         if (sinceParse.error) {
           res.status(400).json({ error: sinceParse.error });
           return;

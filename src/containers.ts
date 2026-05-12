@@ -268,6 +268,34 @@ export function tailContainerLogs(
 }
 
 /**
+ * Validate an optional unsigned-integer query parameter (e.g.
+ * `?tail=200`, `?since=1700000000`) at the public REST boundary.
+ * Returns `{ value }` on success (or `undefined` when the input
+ * was omitted/empty) and `{ error }` with a human-readable
+ * message for non-integer, negative, or non-finite inputs.
+ *
+ * Used by the `/logs` route to reject malformed inputs with 400
+ * instead of forwarding silently-coerced values to runtime-facing
+ * logic.  Exported so the parser is testable in isolation.
+ */
+export function parsePositiveIntQuery(
+  raw: unknown,
+  field: string,
+): { value: number | undefined; error?: string } {
+  if (raw === undefined || raw === "") return { value: undefined };
+  if (typeof raw !== "string")
+    return { value: undefined, error: `${field} must be a string` };
+  const n = Number(raw);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) {
+    return {
+      value: undefined,
+      error: `${field} must be a non-negative integer (got ${JSON.stringify(raw)})`,
+    };
+  }
+  return { value: n };
+}
+
+/**
  * Capture the last `tail` lines of a managed container's combined
  * stdout/stderr log via `podman logs --tail <N>` (no `-f`).  Returns
  * the array of lines.  Caps `tail` at 10000 to prevent
