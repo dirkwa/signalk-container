@@ -184,7 +184,7 @@ const S: Record<string, CSSProperties> = {
     gap: 6,
     flexShrink: 0,
   },
-  // Resource-limits editor styles (v0.1.7)
+  // Resource-limits editor styles
   containerCard: {
     // Wraps the existing containerItem + the optional inline editor
     // so they visually read as one card.
@@ -447,7 +447,7 @@ function ToggleField({ label, value, onChange, hint }: ToggleFieldProps) {
 }
 
 // ---------------------------------------------------------------------------
-// Resource limits editor (v0.1.7)
+// Resource limits editor
 // ---------------------------------------------------------------------------
 
 /**
@@ -1394,7 +1394,10 @@ export default function PluginConfigurationPanel({
     const overridesFromServer: Record<string, ContainerResourceLimits> = {};
     for (const [name, ov] of Object.entries(overrideStates)) {
       if (ov && Object.keys(ov).length > 0) {
-        overridesFromServer[name] = ov as ContainerResourceLimits;
+        // No cast needed — every `ContainerResourceLimits` field is
+        // already optional, so `Partial<ContainerResourceLimits>` is
+        // structurally identical and assigns cleanly.
+        overridesFromServer[name] = ov;
       }
     }
     save({
