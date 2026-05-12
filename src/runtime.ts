@@ -1,4 +1,4 @@
-import { execFile } from "child_process";
+import { ChildProcess, execFile, spawn } from "child_process";
 import { existsSync } from "fs";
 import { ContainerRuntimeInfo, RuntimeName, RuntimePreference } from "./types";
 
@@ -287,4 +287,122 @@ export async function execRuntimeLong(
       reject(err);
     });
   });
+}
+
+/**
+ * Handle returned by `spawnRuntimeStreaming`.  The caller MUST call
+ * `stop()` when done — the underlying process does not exit on its
+ * own for `-f`/follow-style commands.  `pid` is exposed for debug
+ * logging only; do not signal it directly.
+ */
+export interface StreamingProcessHandle {
+  /** Stop the child.  Sends SIGTERM, then SIGKILL after a grace
+   *  period if the process is still alive.  Idempotent. */
+  stop(): void;
+  /** Child PID, or undefined if the process never started. */
+  pid: number | undefined;
+}
+
+/**
+ * Spawn a long-running runtime command (typically `podman logs -f`
+ * or `docker logs -f`) and stream its stdout line-by-line into
+ * `onLine`.  Stderr is funneled to `onError` so the caller can
+ * surface runtime diagnostics (`podman logs died with exit 137`)
+ * without interleaving them into the container's log stream.
+ *
+ * Unlike `execRuntimeLong`, this function returns synchronously
+ * with a stop-handle — its primary use case is following streams
+ * that never naturally exit.  The line splitter handles `\n`,
+ * `\r\n`, and bare `\r`; partial lines across reads are buffered
+ * via the existing `makeLineSplitter`.
+ *
+ * Optional `onExit` fires once when the underlying process exits
+ * for any reason (natural EOF, `stop()` called, child crash).
+ * Used by `LogStreamBroker` to detect that its tail died on its
+ * own (e.g. the container was removed) and null out its cached
+ * handle so the next subscribe respawns.
+ *
+ * `binary` and `env` are exposed for testability; production
+ * callers go through `tailContainerLogs` which fills them in.
+ */
+export function spawnRuntimeStreaming(
+  info: ContainerRuntimeInfo,
+  args: string[],
+  onLine: (line: string) => void,
+  options?: {
+    onError?: (msg: string) => void;
+    onExit?: (code: number | null) => void;
+    /** Test injection: override the binary path.  Production uses
+     *  `runtimeCmd(info)`. */
+    binary?: string;
+    /** Test injection: override the env (or test-only stdin). */
+    env?: NodeJS.ProcessEnv;
+  },
+): StreamingProcessHandle {
+  const cmd = options?.binary ?? runtimeCmd(info);
+  const env = options?.env ?? cleanEnv();
+
+  let stopped = false;
+  let proc: ChildProcess | null = null;
+  try {
+    proc = spawn(cmd, args, {
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (err) {
+    // spawn() throws synchronously on ENOENT only in some node
+    // builds; on others the error arrives via the 'error' event.
+    // Surface either flavour to onError and return a handle whose
+    // stop() is a no-op.
+    options?.onError?.(err instanceof Error ? err.message : String(err));
+    return { stop: () => {}, pid: undefined };
+  }
+
+  const splitter = makeLineSplitter(onLine);
+
+  proc.stdout?.on("data", (chunk: Buffer | string) => {
+    splitter.push(chunk.toString());
+  });
+
+  // Stderr from `logs -f` is usually empty.  When it isn't, the
+  // line is almost always a single short diagnostic ("Error: no
+  // such container") so don't bother splitting — trim and route
+  // verbatim.
+  proc.stderr?.on("data", (chunk: Buffer | string) => {
+    const text = chunk.toString().trimEnd();
+    if (text.length > 0) options?.onError?.(text);
+  });
+
+  proc.on("error", (err) => {
+    options?.onError?.(err.message);
+  });
+
+  proc.on("close", (code) => {
+    splitter.flush();
+    options?.onExit?.(code);
+  });
+
+  const stop = () => {
+    if (stopped) return;
+    stopped = true;
+    if (!proc || proc.exitCode !== null || proc.killed) return;
+    try {
+      proc.kill("SIGTERM");
+    } catch {
+      /* already dead */
+    }
+    // Grace period — give the child 2s to exit cleanly before SIGKILL.
+    // `unref()` so the timer doesn't hold the event loop open.
+    setTimeout(() => {
+      if (proc && proc.exitCode === null && !proc.killed) {
+        try {
+          proc.kill("SIGKILL");
+        } catch {
+          /* already dead */
+        }
+      }
+    }, 2000).unref();
+  };
+
+  return { stop, pid: proc.pid };
 }

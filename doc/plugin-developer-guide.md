@@ -236,6 +236,31 @@ Named volumes (sources without a leading `/`) always pass through regardless of 
 
 `onVolumeIssue` accepts either a synchronous handler or an `async` one. signalk-container fires the call but does not await it; both synchronous throws and rejected promises are caught and logged at error level so handler bugs cannot break container lifecycle. Keep handlers fast and side-effect-only (set plugin status, log).
 
+### Streaming container logs into your plugin's debug channel
+
+When the user enables debug for your plugin (the toggle on the plugin configuration page), Signal K's `app.debug` lines appear in the server log. Without help, those lines show only what your plugin code logs — never the container's own stdout/stderr. Pass `onContainerLog` to fold the container's output into the same stream:
+
+```typescript
+await containers.ensureRunning("questdb", config, {
+  onContainerLog: (line) => app.debug(`[questdb] ${line}`),
+  // optional: backfill the last 100 lines on plugin restart so
+  // you don't lose context when SK was restarted mid-run
+  onContainerLogStartTail: 100,
+});
+```
+
+signalk-container spawns one `podman logs -f` (or `docker logs -f`) child per container — multiple subscribers (your callback plus any open Logs modal in the config panel) share the same underlying tail. The tail is torn down and respawned automatically on auto-recreate, removed on `containers.remove()`, and stopped on plugin `stop()`.
+
+Lines are combined stdout+stderr (the same shape `podman logs <name>` produces). Per-stream separation isn't supported in this release.
+
+`onContainerLog` accepts either a synchronous handler or an `async` one. Both synchronous throws and rejected promises are caught and logged at error level — handler bugs cannot break container lifecycle.
+
+End users get the same stream via the **Logs** button on every managed-container card in the config panel (live SSE; backfill of last 200 lines; copy + download). The button works for any container regardless of whether your plugin wired `onContainerLog`.
+
+For an explicit one-shot fetch (e.g. attaching log context to a health-check failure), use `containers.getLogs(name, { tail })` — it bypasses the streaming broker and returns the last N lines as a `Promise<string[]>`.
+
+Both are available in signalk-container 1.7.0+.
+
 ---
 
 ## Stopping Containers When Plugin is Disabled
@@ -296,6 +321,8 @@ Available in signalk-container 1.6.0+.
 Creates and starts a container if missing; starts it if stopped. If the container is already running OR stopped with **drifted config** (image, tag, command, networkMode, env, volumes, or ports differ from the requested config), it is removed and recreated transparently. Resource limits changes are applied live where possible — see [Resource Limits](#resource-limits).
 
 Volumes accept either a bare host-path string (auto-create — runtime creates the host dir if missing) or a `VolumeSpec` object `{ source, ifMissing: "create" | "skip" | "abort" }` for per-volume policy. `options` is an `EnsureRunningOptions` (a superset of `HealthCheckOptions`) which also accepts an `onVolumeIssue` event handler. See [Optional and required volumes](#optional-and-required-volumes) for the full pattern.
+
+`options` also accepts `onContainerLog` to stream the container's stdout/stderr into your plugin's debug channel — see [Streaming container logs](#streaming-container-logs-into-your-plugins-debug-channel).
 
 ```typescript
 await containers.ensureRunning("my-db", {
@@ -379,6 +406,17 @@ if (result.status === "completed") {
   console.log("Output:", result.log);
 }
 ```
+
+### `getLogs(name, options?): Promise<string[]>`
+
+One-shot capture of a managed container's combined stdout/stderr log. Mirrors `podman logs --tail <N> [--since <ts>] sk-<name>`. Useful for attaching log context to a health-check failure, or for backfill scenarios that bypass the streaming broker.
+
+```typescript
+const lines = await containers.getLogs("questdb", { tail: 50 });
+console.log(lines.join("\n"));
+```
+
+`tail` defaults to 200, max 10000 (enforced server-side). `since` is unix-epoch seconds (optional). Throws if the container doesn't exist or the runtime isn't initialised. For live streaming see [`onContainerLog`](#streaming-container-logs-into-your-plugins-debug-channel) in `ensureRunning` options. Available in signalk-container 1.7.0+.
 
 ### `cleanupOrphanedJobs(filter): Promise<CleanupOrphansResult>`
 
@@ -832,6 +870,8 @@ interface EnsureRunningOptions {
   healthCheck?: () => Promise<boolean>;
   onUnhealthy?: (name: string, error: string) => void;
   onVolumeIssue?: (event: VolumeIssue) => void | Promise<void>;
+  onContainerLog?: (line: string) => void | Promise<void>;
+  onContainerLogStartTail?: number;
 }
 interface ContainerManagerApi {
   getRuntime: () => { runtime: string; version: string } | null;
@@ -853,6 +893,10 @@ interface ContainerManagerApi {
   ) => Promise<void>;
   imageExists: (image: string) => Promise<boolean>;
   getImageDigest: (imageOrContainer: string) => Promise<string | null>;
+  getLogs: (
+    name: string,
+    options?: { tail?: number; since?: number },
+  ) => Promise<string[]>;
   updateResources: (
     name: string,
     limits: unknown,

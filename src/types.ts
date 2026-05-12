@@ -456,6 +456,59 @@ export interface EnsureRunningOptions extends HealthCheckOptions {
    * etc.) — they are invoked in the lifecycle hot path.
    */
   onVolumeIssue?: (event: VolumeIssue) => void | Promise<void>;
+
+  /**
+   * Called for every line the managed container writes to stdout
+   * or stderr (combined, the same shape a human gets from
+   * `podman logs sk-<name>` or `docker logs sk-<name>`).
+   * signalk-container spawns a `logs -f` child when the container
+   * is running and forwards lines to the callback.  The tail is
+   * torn down and respawned automatically on auto-recreate,
+   * removed on `containers.remove()`, and stopped on plugin
+   * `stop()`.
+   *
+   * Synchronous and asynchronous handlers are both supported.
+   * `ensureRunning` does not await the handler — fire-and-forget.
+   * Both synchronous throws and rejected promises are caught and
+   * logged at error level; handler bugs cannot break container
+   * lifecycle.  Keep handlers fast and side-effect-only — they
+   * are invoked per line on the runtime log stream.
+   *
+   * Typical use: wire to `app.debug` so the lines are visible in
+   * the Signal K server log whenever the user enables debug for
+   * the consumer plugin:
+   *
+   *   onContainerLog: (line) => app.debug(`[questdb] ${line}`)
+   *
+   * Multiple subscribers share a single underlying tail process
+   * (a per-container broker fans out lines), so wiring this
+   * callback never doubles the runtime daemon's work even when
+   * a user has the in-panel Logs modal open simultaneously.
+   *
+   * Combined stdout+stderr only; per-stream separation is not
+   * supported in this release.  Available in signalk-container
+   * 1.7.0+.
+   */
+  onContainerLog?: (line: string) => void | Promise<void>;
+
+  /**
+   * Number of recent log lines to deliver via `onContainerLog`
+   * when the tail attaches.  Defaults to 0 — only live lines
+   * (everything after attach) flow.  Set to e.g. 100 to
+   * backfill recent history on plugin restart against an
+   * already-running container.  Maps to `podman logs --tail=N`
+   * / `docker logs --tail=N`.
+   *
+   * Caveat: if the broker for this container already exists
+   * (another subscriber spawned it first), the new subscriber
+   * starts from "now" — `startTail` is per-broker, applied at
+   * first-subscribe time only.  Use `containers.getLogs(name,
+   * { tail })` for an explicit one-shot backfill regardless of
+   * broker state.
+   *
+   * Has no effect when `onContainerLog` is not set.
+   */
+  onContainerLogStartTail?: number;
 }
 
 export interface ContainerManagerApi {
@@ -568,6 +621,23 @@ export interface ContainerManagerApi {
   remove(name: string): Promise<void>;
   getState(name: string): Promise<ContainerState>;
   runJob(config: ContainerJobConfig): Promise<ContainerJobResult>;
+  /**
+   * One-shot capture of the last `tail` lines of a managed
+   * container's combined stdout/stderr log.  Mirrors
+   * `podman logs --tail <N> [--since <ts>] sk-<name>`.  Useful
+   * for attaching log context to a health-check failure or for
+   * explicit backfill that bypasses the streaming broker.
+   *
+   * `tail` defaults to 200, max 10000.  `since` is unix-epoch
+   * seconds (optional, both runtimes support it).  Returns the
+   * lines in order; throws on inspect failure.
+   *
+   * Available in signalk-container 1.7.0+.
+   */
+  getLogs(
+    name: string,
+    options?: { tail?: number; since?: number },
+  ): Promise<string[]>;
   /**
    * Reap `sk-job-*` containers leaked by a previous server lifecycle
    * (Signal K crashed or restarted mid-job, the helper container kept

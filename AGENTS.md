@@ -57,6 +57,26 @@ These are non-obvious rules baked into the runtime layer. Breaking them produces
 
 Named volumes (source without leading `/`) always pass through; `ifMissing` only applies to host paths. `volumeSource()` in `containers.ts` is the single narrower from the union back to bare-string for the two call sites that consume `config.volumes` after classification (`buildRunArgs`, `diffContainerConfig`).
 
+### Container log streaming
+
+Three-layer structure (`src/runtime.ts` → `src/containers.ts` → `src/log-stream-broker.ts`):
+
+1. `spawnRuntimeStreaming` (`src/runtime.ts`) — primitive that wraps `child_process.spawn(podman/docker, args)` with a `stop()` handle and a `makeLineSplitter`-fed `onLine` callback. Used for any long-running runtime command that needs streaming output; `tailContainerLogs` is its only current caller. Returns synchronously with a stop-handle — unlike `execRuntimeLong` which awaits process exit.
+2. `tailContainerLogs` (`src/containers.ts`) — thin helper that composes `["logs", "-f", "--tail", N, prefixedName(name)]` and delegates to `spawnRuntimeStreaming`. `getContainerLogs` is the one-shot sibling (no `-f`, returns a `string[]`).
+3. `LogStreamBroker` (`src/log-stream-broker.ts`) — per-container fan-out. First subscribe spawns the tail; last unsubscribe stops it; tail exit nulls the cached handle so the next subscribe respawns (self-healing). Brokers are stored in a `Map<containerName, LogStreamBroker>` on the wrapper.
+
+Consumer surfaces:
+
+- `EnsureRunningOptions.onContainerLog` — plugin authors wire it into `app.debug`. Subscribed in the post-`ensureRunning` block alongside the recovery event emission. `perCallOnContainerLogUnsub` tracks the latest unsubscribe fn per container so auto-recreate (or re-calls with a different callback) cancels the prior subscription before installing the new one.
+- `GET /api/containers/:name/logs/stream` — Server-Sent Events. Each subscribed handler writes `data: <line>\n\n` to the response. A 30s comment-frame heartbeat keeps reverse-proxy idle timeouts at bay. `event: end` fires on container removal / plugin stop. Client disconnect unsubscribes; broker ref-counts down.
+- `GET /api/containers/:name/logs?tail=N&since=ts` — one-shot, used by the UI for initial backfill before opening the SSE stream. Caps `tail` at 10000 server-side.
+
+Lifecycle:
+
+- `containers.remove(name)` and `plugin.stop()` force-close brokers (`close('container-removed')` / `close('plugin-stopped')` respectively); SSE clients get a final `event: end` frame.
+- `safeInvokeContainerLog` in `containers.ts` mirrors `safeInvokeVolumeIssue` exactly: sync `try/catch` + `Promise.resolve(...).catch(...)` so both sync throws and async rejections from plugin handlers route to `app.error` and never propagate.
+- Combined stdout+stderr (matches `podman logs <name>` semantics). Per-stream separation is out of scope for v1.
+
 ### Podman image qualification
 
 `qualifyImage("foo/bar:tag", podmanRuntime)` prefixes `docker.io/` when needed (podman requires fully qualified names unless `unqualified-search-registries` is set). Docker passes through. Use this everywhere we feed an image string to a runtime command.

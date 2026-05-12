@@ -9,7 +9,13 @@ import {
   VolumeIssue,
   VolumeSpec,
 } from "./types";
-import { execRuntime, execRuntimeLong, isContainerized } from "./runtime";
+import {
+  StreamingProcessHandle,
+  execRuntime,
+  execRuntimeLong,
+  isContainerized,
+  spawnRuntimeStreaming,
+} from "./runtime";
 import { resourceFlagsForRun } from "./resources";
 
 const CONTAINER_PREFIX = "sk-";
@@ -206,6 +212,97 @@ export function safeInvokeVolumeIssue(
     // the handler is something weird like a Proxy.
     reportError(err);
   }
+}
+
+/**
+ * Invoke an `onContainerLog` callback safely.  Synchronous throws AND
+ * rejected promises both route to `reportError`, so handler bugs (in
+ * either flavour) never escape as unhandled rejections.  Same shape
+ * and rationale as `safeInvokeVolumeIssue` — see that helper's
+ * doc for why the `try { Promise.resolve(...).catch(...) }` dance
+ * is needed.
+ */
+export function safeInvokeContainerLog(
+  handler: ((line: string) => void | Promise<void>) | undefined,
+  line: string,
+  reportError: (err: unknown) => void,
+): void {
+  if (!handler) return;
+  try {
+    void Promise.resolve(handler(line)).catch(reportError);
+  } catch (err) {
+    reportError(err);
+  }
+}
+
+/**
+ * Spawn `podman logs -f --tail=N sk-<name>` (or `docker logs -f`)
+ * and emit each line to `onLine`.  Returns a stop-handle; the caller
+ * manages lifecycle (start after the container is running; stop on
+ * remove or recreate).
+ *
+ * `startTail` controls history-backfill on attach.  Default 0 →
+ * only live lines after attach.  Set to e.g. 100 for "last 100 +
+ * live" semantics.  Both runtime CLIs accept `--tail` identically.
+ *
+ * `spawn` is exposed for tests (defaults to `spawnRuntimeStreaming`).
+ */
+export function tailContainerLogs(
+  runtime: ContainerRuntimeInfo,
+  name: string,
+  onLine: (line: string) => void,
+  options?: {
+    startTail?: number;
+    onError?: (msg: string) => void;
+    onExit?: (code: number | null) => void;
+    spawn?: typeof spawnRuntimeStreaming;
+  },
+): StreamingProcessHandle {
+  const spawnFn = options?.spawn ?? spawnRuntimeStreaming;
+  const fullName = prefixedName(name);
+  const tail = String(options?.startTail ?? 0);
+  return spawnFn(runtime, ["logs", "-f", "--tail", tail, fullName], onLine, {
+    onError: options?.onError,
+    onExit: options?.onExit,
+  });
+}
+
+/**
+ * Capture the last `tail` lines of a managed container's combined
+ * stdout/stderr log via `podman logs --tail <N>` (no `-f`).  Returns
+ * the array of lines.  Caps `tail` at 10000 to prevent
+ * runaway-buffer requests against very chatty containers; `since` is
+ * a unix-epoch-seconds filter passed through to the runtime.
+ *
+ * Used both by the `GET /containers/:name/logs` REST route and by
+ * `ContainerManagerApi.getLogs` for in-process consumer-plugin calls.
+ */
+export async function getContainerLogs(
+  runtime: ContainerRuntimeInfo,
+  name: string,
+  options?: { tail?: number; since?: number },
+  exec: ExecFn = execRuntime,
+): Promise<string[]> {
+  const MAX_TAIL = 10000;
+  const requested = options?.tail ?? 200;
+  const tail = Math.min(Math.max(0, Math.floor(requested)), MAX_TAIL);
+  const args = ["logs", "--tail", String(tail)];
+  if (options?.since !== undefined && Number.isFinite(options.since)) {
+    args.push("--since", String(Math.floor(options.since)));
+  }
+  args.push(prefixedName(name));
+  const result = await exec(runtime, args);
+  if (result.exitCode !== 0) {
+    throw new Error(result.stderr || `logs ${name}: exit ${result.exitCode}`);
+  }
+  // The runtime may emit stdout (container's stdout) and stderr
+  // (container's stderr) — both interleaved here.  Combine them
+  // in order: stdout first, then stderr.  Empty trailing newlines
+  // become empty array entries; filter them so the consumer never
+  // sees a phantom blank line at the end.
+  const lines = `${result.stdout}\n${result.stderr}`.split(/\r?\n/);
+  while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  return lines;
 }
 
 export function qualifyImage(

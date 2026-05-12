@@ -19,6 +19,7 @@ Instead of each plugin implementing its own container orchestration, they delega
 - **Zero-config container service connectivity** -- `signalkAccessiblePorts` lets the SignalK process connect back to a service running inside a managed container (e.g. an HTTP or TCP server). signalk-container picks the right networking strategy automatically — port binding on the host loopback for bare-metal deployments, or a shared Docker network with DNS for containerised ones. No host ports are exposed unnecessarily.
 - **SELinux support** -- `:Z` volume flags for Podman bind mounts on Fedora/RHEL; named volumes are handled correctly (`:Z` is not applied)
 - **Per-volume host-source policy** -- volumes accept `{ source, ifMissing: "skip" | "abort" }` for user-managed (USB drives, NFS) or deployment-required (TLS certs) mounts. Plugins subscribe to `onVolumeIssue` events for `'skipped'`, `'aborted'`, and `'recovered'` actions; signalk-container auto-recreates the container when a previously-missing source reappears. See the [developer guide](doc/plugin-developer-guide.md#optional-and-required-volumes).
+- **Container log streaming** -- click **Logs** on any managed-container card to open a live-streaming popup of the container's stdout+stderr (combined, the same shape `podman logs <name>` produces). Plugin authors can also wire `onContainerLog` in `ensureRunning` options to forward the same stream into their plugin's `app.debug` channel — visible in the Signal K server log when debug is enabled. Multiple subscribers share a single underlying tail process. See the [developer guide](doc/plugin-developer-guide.md#streaming-container-logs-into-your-plugins-debug-channel).
 - **Podman image qualification** -- automatically prefixes `docker.io/` for short image names
 - **Cross-plugin API** -- other plugins use `globalThis.__signalk_containerManager`
 
@@ -41,7 +42,8 @@ The plugin embeds a React config panel in the Signal K Admin UI (via Module Fede
 ### Managed Containers (one card per running or stopped container)
 
 - Container name, image, state, and port mappings
-- **Start** / **Stop** / **Remove** buttons appropriate to the current state
+- **Start** / **Stop** / **Logs** / **Remove** buttons appropriate to the current state
+- **Logs** opens a live-streaming popup of the container's stdout+stderr (SSE). Backfills the last 200 lines on open; supports auto-scroll, copy-to-clipboard, and download-as-text. Works for both running and stopped containers (stopped shows the last lines before exit).
 - **Current effective resource limits** shown as compact badges (e.g. `1.5 CPU · 512m · 200 PIDs`)
 - **Override active** amber badge when the user has configured a resource override for the container
 - **Updates row** (when the consumer plugin has registered with the update service):
@@ -125,6 +127,7 @@ See [doc/plugin-developer-guide.md](doc/plugin-developer-guide.md) for the full 
 | `remove(name)`                          | Stop and remove a container                                                                                                                                   |
 | `getState(name)`                        | Returns `running`, `stopped`, `missing`, or `no-runtime`                                                                                                      |
 | `runJob(config)`                        | Execute a one-shot container job                                                                                                                              |
+| `getLogs(name, options?)`               | One-shot fetch of the last N lines of a container's combined stdout+stderr log. `tail` defaults to 200, max 10000; `since` is unix-epoch seconds              |
 | `prune()`                               | Remove dangling images                                                                                                                                        |
 | `listContainers()`                      | List all `sk-` prefixed containers                                                                                                                            |
 | `execInContainer(name, command)`        | Run a command inside a running container                                                                                                                      |
@@ -146,21 +149,23 @@ See [doc/plugin-developer-guide.md](doc/plugin-developer-guide.md) for the full 
 
 All mounted at `/plugins/signalk-container/api/`:
 
-| Method | Path                          | Description                                                                                                                   |
-| ------ | ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| GET    | `/runtime`                    | Detected runtime info                                                                                                         |
-| GET    | `/containers`                 | List managed containers                                                                                                       |
-| GET    | `/containers/:name/state`     | Container state                                                                                                               |
-| POST   | `/containers/:name/start`     | Start a stopped container                                                                                                     |
-| POST   | `/containers/:name/stop`      | Stop a running container                                                                                                      |
-| POST   | `/containers/:name/remove`    | Stop and remove a container                                                                                                   |
-| POST   | `/prune`                      | Prune dangling images                                                                                                         |
-| GET    | `/updates`                    | List last update-check results                                                                                                |
-| GET    | `/updates/:pluginId`          | Last update-check result for one plugin                                                                                       |
-| POST   | `/updates/:pluginId/check`    | Force a fresh update check (HTTP 200 even when offline)                                                                       |
-| GET    | `/containers/:name/resources` | Effective resource limits + user override                                                                                     |
-| POST   | `/containers/:name/resources` | Apply new resource limits (live or recreate). Body is a `ContainerResourceLimits` diff against the consumer plugin's default. |
-| DELETE | `/containers/:name/resources` | Clear any user override and restore the consumer plugin's pristine default limits to the running container.                   |
+| Method | Path                                     | Description                                                                                                                   |
+| ------ | ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/runtime`                               | Detected runtime info                                                                                                         |
+| GET    | `/containers`                            | List managed containers                                                                                                       |
+| GET    | `/containers/:name/state`                | Container state                                                                                                               |
+| POST   | `/containers/:name/start`                | Start a stopped container                                                                                                     |
+| POST   | `/containers/:name/stop`                 | Stop a running container                                                                                                      |
+| POST   | `/containers/:name/remove`               | Stop and remove a container                                                                                                   |
+| GET    | `/containers/:name/logs?tail=N&since=ts` | Last N lines of the container's combined stdout+stderr log (one-shot). `tail` defaults 200, max 10000                         |
+| GET    | `/containers/:name/logs/stream`          | Server-Sent Events stream of live log lines. Closes when the container is removed or the client disconnects                   |
+| POST   | `/prune`                                 | Prune dangling images                                                                                                         |
+| GET    | `/updates`                               | List last update-check results                                                                                                |
+| GET    | `/updates/:pluginId`                     | Last update-check result for one plugin                                                                                       |
+| POST   | `/updates/:pluginId/check`               | Force a fresh update check (HTTP 200 even when offline)                                                                       |
+| GET    | `/containers/:name/resources`            | Effective resource limits + user override                                                                                     |
+| POST   | `/containers/:name/resources`            | Apply new resource limits (live or recreate). Body is a `ContainerResourceLimits` diff against the consumer plugin's default. |
+| DELETE | `/containers/:name/resources`            | Clear any user override and restore the consumer plugin's pristine default limits to the running container.                   |
 
 ## Configuration
 
