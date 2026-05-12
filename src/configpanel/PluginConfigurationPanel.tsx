@@ -1065,9 +1065,10 @@ export default function PluginConfigurationPanel({
   // UNPREFIXED name. The "Override active" badge derives from THIS, not
   // from the React containerOverrides state, so a browser reload (which
   // wipes local state and re-reads from the server) still shows the
-  // badge correctly. A null value here means "no override recorded by
-  // the server"; a non-null object (even an empty one) means "override
-  // exists".
+  // badge correctly. A null value means no override. An override is
+  // considered "present" only when the object is non-empty (i.e.,
+  // Object.keys(override).length > 0); the badge and persistence logic
+  // rely on this non-empty check.
   const [overrideStates, setOverrideStates] = useState<
     Record<string, Partial<ContainerResourceLimits> | null>
   >({});
