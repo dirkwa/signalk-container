@@ -341,6 +341,16 @@ export function spawnRuntimeStreaming(
   options?: {
     onError?: (msg: string) => void;
     onExit?: (code: number | null) => void;
+    /** Route stderr through the same line splitter as stdout so
+     *  both streams reach `onLine`.  Needed for `podman logs -f`
+     *  / `docker logs -f` where the runtime forwards the
+     *  container's stdout and stderr on its own stdout and stderr
+     *  fds respectively — without this, anything the container
+     *  writes to stderr (which for many Rust/Go apps is *every*
+     *  log line) never reaches the consumer.  Default false to
+     *  preserve the original semantics where stderr was treated
+     *  as runtime diagnostics. */
+    mergeStderr?: boolean;
     /** Test injection: override the binary path.  Production uses
      *  `runtimeCmd(info)`. */
     binary?: string;
@@ -350,6 +360,7 @@ export function spawnRuntimeStreaming(
 ): StreamingProcessHandle {
   const cmd = options?.binary ?? runtimeCmd(info);
   const env = options?.env ?? cleanEnv();
+  const mergeStderr = options?.mergeStderr ?? false;
 
   let stopped = false;
   let proc: ChildProcess | null = null;
@@ -373,14 +384,25 @@ export function spawnRuntimeStreaming(
     splitter.push(chunk.toString());
   });
 
-  // Stderr from `logs -f` is usually empty.  When it isn't, the
-  // line is almost always a single short diagnostic ("Error: no
-  // such container") so don't bother splitting — trim and route
-  // verbatim.
-  proc.stderr?.on("data", (chunk: Buffer | string) => {
-    const text = chunk.toString().trimEnd();
-    if (text.length > 0) options?.onError?.(text);
-  });
+  if (mergeStderr) {
+    // Container stderr lines join the line stream alongside stdout.
+    // Runtime-level diagnostics (e.g. "Error: no such container")
+    // arrive on the same channel; they're indistinguishable from
+    // container output without per-line metadata, but in practice
+    // they're rare and clearly recognizable.
+    proc.stderr?.on("data", (chunk: Buffer | string) => {
+      splitter.push(chunk.toString());
+    });
+  } else {
+    // Stderr is treated as out-of-band runtime diagnostics.  Usually
+    // empty; when non-empty the line is almost always a single
+    // short message ("Error: no such container") so don't bother
+    // splitting — trim and route verbatim.
+    proc.stderr?.on("data", (chunk: Buffer | string) => {
+      const text = chunk.toString().trimEnd();
+      if (text.length > 0) options?.onError?.(text);
+    });
+  }
 
   proc.on("error", (err) => {
     options?.onError?.(err.message);

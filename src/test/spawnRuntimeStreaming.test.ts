@@ -128,7 +128,7 @@ describe("spawnRuntimeStreaming", { skip: skipOnUnstable }, () => {
     await waitFor(() => exitCode !== undefined, "child should exit");
   });
 
-  it("routes stderr to onError without splitting", async () => {
+  it("routes stderr to onError without splitting (default)", async () => {
     const errors: string[] = [];
     const lines: string[] = [];
     spawnRuntimeStreaming(
@@ -147,6 +147,34 @@ describe("spawnRuntimeStreaming", { skip: skipOnUnstable }, () => {
     assert.deepEqual(lines, ["one"]);
     assert.equal(errors.length, 1);
     assert.equal(errors[0], "two");
+  });
+
+  it("merges stderr into onLine when mergeStderr is set", async () => {
+    // Regression for the bug where Rust/Go apps that log to stderr
+    // (mayara is the canonical example) appeared silent in the SSE
+    // modal while spamming SK's server log as `tail error: ...`.
+    const errors: string[] = [];
+    const lines: string[] = [];
+    let exitCode: number | null | undefined;
+    spawnRuntimeStreaming(
+      runtimeStub,
+      ["-c", "printf 'one\\n'; printf 'two\\n' 1>&2; printf 'three\\n'"],
+      (line) => lines.push(line),
+      {
+        binary: "/bin/bash",
+        mergeStderr: true,
+        onError: (msg) => errors.push(msg),
+        onExit: (code) => {
+          exitCode = code;
+        },
+      },
+    );
+    await waitFor(() => exitCode !== undefined, "child should exit");
+    // Both stdout and stderr lines reach onLine; onError is never
+    // invoked for the stderr content.  Order between the two
+    // streams is best-effort (OS scheduling) — assert as a set.
+    assert.deepEqual(lines.slice().sort(), ["one", "three", "two"]);
+    assert.deepEqual(errors, []);
   });
 
   it("buffers partial lines across data events via makeLineSplitter", async () => {

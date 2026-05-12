@@ -5,6 +5,7 @@ import React, {
   UIEvent as ReactUIEvent,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
 } from "react";
@@ -58,7 +59,11 @@ const S: Record<string, CSSProperties> = {
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
-    zIndex: 1000,
+    // SK admin UI's left sidebar uses a high z-index for its docked
+    // panel.  1000 wasn't enough — the sidebar bled through the
+    // overlay.  Stay below the max int but well above anything
+    // Bootstrap/MUI/Ant ever ship.
+    zIndex: 99999,
   },
   modal: {
     background: "#fff",
@@ -149,8 +154,21 @@ export default function LogsModal({ name, onClose }: LogsModalProps) {
   const [copied, setCopied] = useState(false);
 
   const bodyRef = useRef<HTMLPreElement | null>(null);
+  // Sentinel at the end of the log buffer.  `scrollIntoView` on
+  // this element is the standard React chat-window pattern for
+  // reliable auto-scroll — it survives text-content replacement,
+  // works even when content arrives faster than React effects can
+  // run, and doesn't depend on us reading `scrollHeight` at the
+  // right moment.
+  const endSentinelRef = useRef<HTMLDivElement | null>(null);
   const esRef = useRef<EventSource | null>(null);
   const userScrolledUpRef = useRef(false);
+  // True only for the brief window after our auto-scroll effect
+  // wrote `el.scrollTop` / called `scrollIntoView`.  Lets the
+  // `onScroll` handler ignore the resulting synthetic scroll event
+  // so it doesn't misclassify our own pin-to-bottom as a manual
+  // user scroll-up.
+  const programmaticScrollRef = useRef(false);
   const modalRef = useRef<HTMLDivElement | null>(null);
   const closeBtnRef = useRef<HTMLButtonElement | null>(null);
   const previouslyFocusedRef = useRef<Element | null>(null);
@@ -253,18 +271,43 @@ export default function LogsModal({ name, onClose }: LogsModalProps) {
   }, [name, append]);
 
   // Auto-scroll: when lines grow and the user hasn't scrolled away,
-  // pin to bottom.
-  useEffect(() => {
+  // pin to bottom.  `useLayoutEffect` runs synchronously after the
+  // DOM is updated but BEFORE the browser paints — so the user
+  // never sees the brief "scroll-top reset → re-pin" flash a plain
+  // `useEffect` could produce when React replaces the `<pre>`'s
+  // text content.
+  //
+  // Scroll the sentinel into view rather than poking
+  // `el.scrollTop` directly — the latter depends on the browser
+  // having committed the new content's height to `scrollHeight` at
+  // the exact moment we read it, which can race with React's text-
+  // node replacement on the `<pre>`.  `scrollIntoView` on a
+  // post-content sentinel is layout-agnostic.
+  useLayoutEffect(() => {
     if (!autoScroll) return;
     if (userScrolledUpRef.current) return;
-    const el = bodyRef.current;
-    if (!el) return;
-    el.scrollTop = el.scrollHeight;
+    const sentinel = endSentinelRef.current;
+    if (!sentinel) return;
+    programmaticScrollRef.current = true;
+    sentinel.scrollIntoView({ block: "end", inline: "nearest" });
+    // Fail-safe: if scrollIntoView is a no-op (the sentinel was
+    // already in view) no scroll event fires, and the flag would
+    // otherwise stay set until the user's first manual scroll —
+    // which would then get ignored.  Clear on the next frame so
+    // the flag's "consume one scroll event" window doesn't outlive
+    // a single render.
+    requestAnimationFrame(() => {
+      programmaticScrollRef.current = false;
+    });
   }, [lines, autoScroll]);
 
   // Detect manual scroll-up so we stop pinning. Reset when the user
   // toggles auto-scroll back on.
   const onBodyScroll = useCallback((_e: ReactUIEvent<HTMLPreElement>) => {
+    if (programmaticScrollRef.current) {
+      programmaticScrollRef.current = false;
+      return;
+    }
     const el = bodyRef.current;
     if (!el) return;
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 8; // ~one line
@@ -275,22 +318,66 @@ export default function LogsModal({ name, onClose }: LogsModalProps) {
     setAutoScroll((prev) => {
       const next = !prev;
       if (next) {
-        // Re-pin to bottom immediately.
+        // Re-pin to bottom immediately via the sentinel.
         userScrolledUpRef.current = false;
-        const el = bodyRef.current;
-        if (el) el.scrollTop = el.scrollHeight;
+        const sentinel = endSentinelRef.current;
+        if (sentinel) {
+          programmaticScrollRef.current = true;
+          sentinel.scrollIntoView({ block: "end", inline: "nearest" });
+          // Same fail-safe as the layout effect — clear the flag
+          // on the next frame in case scrollIntoView was a no-op.
+          requestAnimationFrame(() => {
+            programmaticScrollRef.current = false;
+          });
+        }
       }
       return next;
     });
   }, []);
 
   const doCopy = useCallback(async () => {
-    try {
-      await navigator.clipboard.writeText(lines.join("\n"));
+    const text = lines.join("\n");
+    // Prefer the modern async Clipboard API.  It only works in a
+    // secure context (HTTPS / localhost) — Signal K servers are
+    // commonly served over plain HTTP on a LAN, where
+    // `navigator.clipboard` is undefined.  Fall back to the legacy
+    // `execCommand("copy")` trick (deprecated but still universally
+    // supported) so the button does something useful instead of
+    // silently failing.
+    const tryAsync = async (): Promise<boolean> => {
+      if (typeof navigator === "undefined" || !navigator.clipboard)
+        return false;
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const tryLegacy = (): boolean => {
+      if (typeof document === "undefined") return false;
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      // Keep it off-screen + unfocused so the page doesn't visibly jump.
+      ta.style.position = "fixed";
+      ta.style.top = "-1000px";
+      ta.style.left = "-1000px";
+      ta.setAttribute("readonly", "");
+      document.body.appendChild(ta);
+      ta.select();
+      let ok = false;
+      try {
+        ok = document.execCommand("copy");
+      } catch {
+        ok = false;
+      }
+      document.body.removeChild(ta);
+      return ok;
+    };
+    const ok = (await tryAsync()) || tryLegacy();
+    if (ok) {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
-    } catch {
-      /* clipboard API may be unavailable; ignore silently */
     }
   }, [lines]);
 
@@ -455,6 +542,11 @@ export default function LogsModal({ name, onClose }: LogsModalProps) {
           tabIndex={0}
         >
           {lines.length === 0 ? "(no log lines yet)" : lines.join("\n")}
+          {/* Sentinel for auto-scroll-to-bottom — see the
+              useLayoutEffect above.  `aria-hidden` because it's a
+              layout-only element with no semantic meaning to
+              screen readers. */}
+          <div ref={endSentinelRef} aria-hidden="true" />
         </pre>
         {endReason && <div style={S.endBanner}>Stream ended: {endReason}</div>}
       </div>
