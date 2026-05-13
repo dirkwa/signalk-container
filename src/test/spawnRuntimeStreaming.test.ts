@@ -177,6 +177,44 @@ describe("spawnRuntimeStreaming", { skip: skipOnUnstable }, () => {
     assert.deepEqual(errors, []);
   });
 
+  it("does not splice partial stdout and stderr chunks together (mergeStderr)", async () => {
+    // Regression for the splitter-race bug: with a SINGLE shared
+    // line splitter, stdout emitting "a" (no newline) followed by
+    // stderr emitting "X\n" before stdout's own newline would
+    // produce a spliced "aX" line and an orphan "b\n" line.  With
+    // per-stream splitters each stream's partial chunks stay in
+    // its own buffer until that stream supplies the newline.
+    //
+    // The script prints stdout "a" without newline, sleeps so the
+    // OS scheduler hands control to the stderr write, then writes
+    // "X\n" on stderr, then sleeps again, then completes stdout
+    // with "b\n".  Under the buggy single-splitter design this
+    // reliably produced ["aX", "b"]; with two splitters it must
+    // produce ["ab", "X"] (any order).
+    const lines: string[] = [];
+    let exitCode: number | null | undefined;
+    spawnRuntimeStreaming(
+      runtimeStub,
+      [
+        "-c",
+        "printf 'a'; sleep 0.05; printf 'X\\n' 1>&2; sleep 0.05; printf 'b\\n'",
+      ],
+      (line) => lines.push(line),
+      {
+        binary: "/bin/bash",
+        mergeStderr: true,
+        onExit: (code) => {
+          exitCode = code;
+        },
+      },
+    );
+    await waitFor(() => exitCode !== undefined, "child should exit");
+    // Order between the two streams is best-effort; the assertion
+    // is that NO line contains the spliced byte from the OTHER
+    // stream's buffer.
+    assert.deepEqual(lines.slice().sort(), ["X", "ab"]);
+  });
+
   it("buffers partial lines across data events via makeLineSplitter", async () => {
     const lines: string[] = [];
     let exitCode: number | null | undefined;

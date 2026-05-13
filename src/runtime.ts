@@ -378,20 +378,31 @@ export function spawnRuntimeStreaming(
     return { stop: () => {}, pid: undefined };
   }
 
-  const splitter = makeLineSplitter(onLine);
+  // Each stream gets its own line splitter so partial chunks from
+  // one stream can't be appended to a partial chunk from the other.
+  // Without this, if stdout writes "abc" (no `\n` yet) and stderr
+  // writes "XYZ\n" before stdout completes its line, a single
+  // shared splitter would emit "abcXYZ" as one line — splicing
+  // bytes from two unrelated streams.  Both splitters feed the
+  // same `onLine` callback in merged-stderr mode, so cross-stream
+  // ordering is best-effort (whichever stream completes a line
+  // first emits first), but each stream's own ordering is
+  // preserved and no characters bleed across.
+  const stdoutSplitter = makeLineSplitter(onLine);
+  const stderrSplitter = mergeStderr ? makeLineSplitter(onLine) : null;
 
   proc.stdout?.on("data", (chunk: Buffer | string) => {
-    splitter.push(chunk.toString());
+    stdoutSplitter.push(chunk.toString());
   });
 
-  if (mergeStderr) {
+  if (stderrSplitter) {
     // Container stderr lines join the line stream alongside stdout.
     // Runtime-level diagnostics (e.g. "Error: no such container")
     // arrive on the same channel; they're indistinguishable from
     // container output without per-line metadata, but in practice
     // they're rare and clearly recognizable.
     proc.stderr?.on("data", (chunk: Buffer | string) => {
-      splitter.push(chunk.toString());
+      stderrSplitter.push(chunk.toString());
     });
   } else {
     // Stderr is treated as out-of-band runtime diagnostics.  Usually
@@ -409,7 +420,8 @@ export function spawnRuntimeStreaming(
   });
 
   proc.on("close", (code) => {
-    splitter.flush();
+    stdoutSplitter.flush();
+    stderrSplitter?.flush();
     options?.onExit?.(code);
   });
 
