@@ -13,6 +13,39 @@ import {
 const MAX_HISTORY = 20;
 
 /**
+ * Allowed pluginId shapes. Validated at `recordResolution` time so
+ * that the filename produced by `pathFor` is always safe and
+ * reversible. Three accepted forms:
+ *   - npm package name:    `signalk-questdb`, `mayara`
+ *   - scoped npm package:  `@signalk/foo`
+ *   - synthetic fallback:  `container:foo` (used when the caller
+ *                          didn't pass `options.pluginId`).
+ *
+ * Note: hyphens, dots, and underscores are allowed in the segments
+ * to match the actual npm package-name grammar; uppercase is not, to
+ * match modern npm (which lowercases names on publish).
+ */
+const SEGMENT = "[a-z0-9][a-z0-9._-]*";
+const PLUGIN_ID_RE = new RegExp(
+  `^(?:${SEGMENT}|@${SEGMENT}/${SEGMENT}|container:${SEGMENT})$`,
+);
+
+/**
+ * Bijective filename encoding for the allowed pluginId set. The only
+ * two characters that need transformation are `/` (legal in scoped
+ * names) and `:` (legal in the synthetic fallback); both are
+ * NTFS-illegal and the `/` would also escape the manifests directory
+ * if joined raw. Percent-encoding is reversible and easy to read.
+ */
+function encodeForFilename(pluginId: string): string {
+  return pluginId.replace(/\//g, "%2F").replace(/:/g, "%3A");
+}
+
+function decodeFromFilename(filename: string): string {
+  return filename.replace(/%2F/g, "/").replace(/%3A/g, ":");
+}
+
+/**
  * Persistent per-plugin manifests written to
  * `${dataDir}/signalk-container-manifests/<pluginId>.json`.
  *
@@ -60,7 +93,7 @@ export class ManifestStore {
     const out: ConsumerManifest[] = [];
     for (const entry of entries) {
       if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
-      const pluginId = entry.name.slice(0, -".json".length);
+      const pluginId = decodeFromFilename(entry.name.slice(0, -".json".length));
       const m = await this.get(pluginId);
       if (m) out.push(m);
     }
@@ -83,6 +116,16 @@ export class ManifestStore {
     resolved: ResolveResult;
     reason: HistoryEntry["reason"];
   }): Promise<void> {
+    // Validate at the system boundary. Allowed shapes (see PLUGIN_ID_RE):
+    // npm package name, scoped npm package, or `container:<name>`.
+    // Anything else (path-traversal `../`, control chars, unicode,
+    // etc.) is rejected with a clear error instead of silently
+    // sharing a filename with another id.
+    if (!PLUGIN_ID_RE.test(params.pluginId)) {
+      throw new Error(
+        `Invalid pluginId for manifest: ${JSON.stringify(params.pluginId)} (must be an npm package name, "@scope/name", or "container:<name>")`,
+      );
+    }
     // Run after the previous queued operation completes (success or
     // failure). The queue tail stores a fulfilled promise so a single
     // failure doesn't poison subsequent writes; the caller still gets
@@ -165,12 +208,12 @@ export class ManifestStore {
   }
 
   private pathFor(pluginId: string): string {
-    // Filename-safe across POSIX and Windows: collapse characters that
-    // NTFS reserves (< > : " / \ | ? *) into `_`. Real plugin ids are
-    // npm package names ([a-z0-9-._~]) and the synthetic fallback uses
-    // `container--<name>`, so this is purely defensive. The canonical
-    // pluginId is the one inside the JSON file, not the filename.
-    const safe = pluginId.replace(/[<>:"/\\|?*]/g, "_");
-    return join(this.baseDir, `${safe}.json`);
+    // Bijective encoding so two distinct allowed pluginIds can never
+    // share a filename. The boundary check in `recordResolution`
+    // guarantees only `/` and `:` need encoding; other characters are
+    // already filesystem-safe. `get()` is also called with pluginIds
+    // sourced from `list()`'s filename-decode round-trip, which
+    // produces canonical values.
+    return join(this.baseDir, `${encodeForFilename(pluginId)}.json`);
   }
 }

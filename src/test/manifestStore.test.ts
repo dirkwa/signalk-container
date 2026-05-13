@@ -258,4 +258,89 @@ describe("ManifestStore", () => {
     const store = new ManifestStore(subdir, () => {});
     assert.deepEqual(await store.list(), []);
   });
+
+  it("accepts a scoped npm pluginId (`@scope/name`)", async () => {
+    const store = new ManifestStore(baseDir, () => {});
+    await store.recordResolution({
+      ...commonParams(DIGEST_A),
+      pluginId: "@signalk/foo",
+    });
+    const list = await store.list();
+    assert.equal(list.length, 1);
+    assert.equal(list[0].pluginId, "@signalk/foo");
+    // Filename encoding round-trips: list() decodes from the on-disk
+    // name back to the canonical pluginId.
+    const files = readdirSync(baseDir);
+    assert.ok(files.includes("@signalk%2Ffoo.json"));
+  });
+
+  it("encodes : in synthetic pluginId so the filename works on NTFS", async () => {
+    const store = new ManifestStore(baseDir, () => {});
+    await store.recordResolution({
+      ...commonParams(DIGEST_A),
+      pluginId: "container:questdb",
+    });
+    const files = readdirSync(baseDir);
+    assert.ok(files.includes("container%3Aquestdb.json"));
+  });
+
+  it("rejects pluginId containing path-traversal", async () => {
+    const store = new ManifestStore(baseDir, () => {});
+    await assert.rejects(
+      () =>
+        store.recordResolution({
+          ...commonParams(DIGEST_A),
+          pluginId: "../escape",
+        }),
+      /Invalid pluginId/,
+    );
+  });
+
+  it("rejects pluginId with control characters", async () => {
+    const store = new ManifestStore(baseDir, () => {});
+    await assert.rejects(
+      () =>
+        store.recordResolution({
+          ...commonParams(DIGEST_A),
+          pluginId: "weird\0null",
+        }),
+      /Invalid pluginId/,
+    );
+  });
+
+  it("rejects pluginId starting with a hyphen or dot", async () => {
+    const store = new ManifestStore(baseDir, () => {});
+    await assert.rejects(
+      () =>
+        store.recordResolution({
+          ...commonParams(DIGEST_A),
+          pluginId: "-bad",
+        }),
+      /Invalid pluginId/,
+    );
+    await assert.rejects(
+      () =>
+        store.recordResolution({
+          ...commonParams(DIGEST_A),
+          pluginId: ".bad",
+        }),
+      /Invalid pluginId/,
+    );
+  });
+
+  it("distinct allowed pluginIds get distinct filenames (no aliasing)", async () => {
+    const store = new ManifestStore(baseDir, () => {});
+    await store.recordResolution({
+      ...commonParams(DIGEST_A),
+      pluginId: "@signalk/foo",
+    });
+    await store.recordResolution({
+      ...commonParams(DIGEST_B),
+      pluginId: "container:foo",
+    });
+    const list = await store.list();
+    assert.equal(list.length, 2);
+    const ids = list.map((m) => m.pluginId).sort();
+    assert.deepEqual(ids, ["@signalk/foo", "container:foo"]);
+  });
 });

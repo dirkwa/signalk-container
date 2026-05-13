@@ -534,6 +534,10 @@ export interface EnsureRunningOptions extends HealthCheckOptions {
    * records this container against the plugin so the UI and REST API
    * can surface "which plugin pinned this".
    *
+   * Must be a valid npm package name (e.g. `signalk-questdb`) or a
+   * scoped form (e.g. `@signalk/foo`). Anything else is rejected at
+   * the manifest-write boundary with a clear error.
+   *
    * Optional for backward compatibility — when absent, the manifest is
    * keyed under the synthetic id `container:<name>`, so the
    * per-container history view continues to work. Strongly recommended

@@ -243,7 +243,7 @@ export default (app: App) => {
     const configPath = app.config?.configPath;
     if (!configPath) {
       throw new Error(
-        "signalkConfigRootMount requires app.config.configPath, which is unavailable",
+        "signalkConfigRootMount requires the Signal K server configPath, which is unavailable",
       );
     }
     const inflight = resolveSignalkDataSource(
@@ -923,14 +923,24 @@ export default (app: App) => {
       // effective reason based on the actual transition
       // (plugin-install vs plugin-update).
       if (manifestStore) {
-        const liveDigest = await getLiveContainerDigest(runtimeInfo, name);
-        const liveResolved: ResolveResult = liveDigest
-          ? {
+        let liveResolved: ResolveResult = resolved;
+        try {
+          const liveDigest = await getLiveContainerDigest(runtimeInfo, name);
+          if (liveDigest) {
+            liveResolved = {
               pullSpec: resolved.pullSpec,
               resolvedDigest: liveDigest,
               source: resolved.source,
-            }
-          : resolved;
+            };
+          }
+        } catch (err) {
+          // Manifest recording is best-effort — a transient inspect
+          // failure must not reject the ensureRunning call. Fall back
+          // to the pre-resolve digest.
+          app.error(
+            `ensureRunning(${name}): live digest probe failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
         manifestStore
           .recordResolution({
             pluginId: options?.pluginId ?? `container:${name}`,

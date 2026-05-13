@@ -388,12 +388,17 @@ export function qualifyImage(
   // Podman requires fully qualified image names when unqualified-search
   // registries are not configured. Prefix docker.io/ if missing.
   if (runtime.runtime === "podman") {
-    const parts = image.split("/");
+    // Strip any `@sha256:...` digest before splitting — for an
+    // unqualified ref like `alpine@sha256:abc...` the digest's `:`
+    // would otherwise make us think the first segment is `host:port`.
+    const refWithoutDigest = image.split("@", 1)[0];
+    const parts = refWithoutDigest.split("/");
     // Treat first component as a registry only if it has a dot, a colon
-    // (port), or is exactly "localhost". Otherwise, prefix docker.io/.
+    // (port) appearing in a multi-segment ref, or is exactly "localhost".
+    // Otherwise, prefix docker.io/.
     const looksLikeRegistry =
       parts[0].includes(".") ||
-      parts[0].includes(":") ||
+      (parts.length > 1 && parts[0].includes(":")) ||
       parts[0] === "localhost";
     if (parts.length <= 2 && !looksLikeRegistry) {
       return `docker.io/${image}`;
@@ -423,10 +428,11 @@ export async function imageExists(
 export async function getImageDigest(
   runtime: ContainerRuntimeInfo,
   imageOrContainer: string,
+  exec: ExecFn = execRuntime,
 ): Promise<string | null> {
   // Try image inspect first; fall back to container inspect for names.
   const qualified = qualifyImage(imageOrContainer, runtime);
-  const imgResult = await execRuntime(runtime, [
+  const imgResult = await exec(runtime, [
     "image",
     "inspect",
     "--format",
@@ -438,7 +444,7 @@ export async function getImageDigest(
   }
 
   // Maybe it's a container name; .Image on a container returns the image ID.
-  const ctrResult = await execRuntime(runtime, [
+  const ctrResult = await exec(runtime, [
     "inspect",
     "--format",
     "{{.Image}}",
@@ -504,10 +510,11 @@ export async function getRepoDigest(
 export async function getLiveContainerDigest(
   runtime: ContainerRuntimeInfo,
   containerName: string,
+  exec: ExecFn = execRuntime,
 ): Promise<string | null> {
-  const imageId = await getImageDigest(runtime, containerName);
+  const imageId = await getImageDigest(runtime, containerName, exec);
   if (!imageId) return null;
-  const repoDigest = await getRepoDigest(runtime, imageId);
+  const repoDigest = await getRepoDigest(runtime, imageId, exec);
   if (repoDigest) return repoDigest;
   // Locally-built image with no RepoDigests — return the local id
   // under the same `local:` namespace the resolver uses.
