@@ -1,6 +1,10 @@
-import { ChildProcess, execFile, spawn } from "child_process";
-import { existsSync } from "fs";
-import { ContainerRuntimeInfo, RuntimeName, RuntimePreference } from "./types";
+import { ChildProcess, execFile, spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import {
+  ContainerRuntimeInfo,
+  RuntimeName,
+  RuntimePreference,
+} from "./types.js";
 
 /**
  * Detect if the Signal K server is itself running inside a container.

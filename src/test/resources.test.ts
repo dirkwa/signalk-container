@@ -10,8 +10,8 @@ import {
   resourceLimitsEqual,
   tryLiveUpdate,
   type ExecRuntimeFn,
-} from "../resources";
-import type { ContainerRuntimeInfo } from "../types";
+} from "../resources.js";
+import type { ContainerRuntimeInfo } from "../types.js";
 
 // "Default" runtime: no probed cgroup controllers, treats all
 // fields as supported. Matches docker (where we don't probe) and

@@ -1,7 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { diffContainerConfig, type LiveContainerConfig } from "../containers";
-import type { ContainerConfig, ContainerRuntimeInfo } from "../types";
+import {
+  diffContainerConfig,
+  type LiveContainerConfig,
+} from "../containers.js";
+import type { ContainerConfig, ContainerRuntimeInfo } from "../types.js";
 
 const podman: ContainerRuntimeInfo = {
   runtime: "podman",

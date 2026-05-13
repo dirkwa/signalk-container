@@ -1,10 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { registerUpdateRoutes } from "../updates/routes";
-import { UpdateService } from "../updates/service";
-import { MemoryUpdateCache } from "../updates/cache";
-import type { ContainerRuntimeInfo, ContainerState } from "../types";
-import type { VersionSource, VersionSourceResult } from "../updates/types";
+import { registerUpdateRoutes } from "../updates/routes.js";
+import { UpdateService } from "../updates/service.js";
+import { MemoryUpdateCache } from "../updates/cache.js";
+import type { ContainerRuntimeInfo, ContainerState } from "../types.js";
+import type { VersionSource, VersionSourceResult } from "../updates/types.js";
 
 // ---------- minimal Express stub ----------
 

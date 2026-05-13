@@ -5,15 +5,15 @@ import {
   type ContainerDeps,
   type AppDeps,
   type ClockDeps,
-} from "../updates/service";
-import { MemoryUpdateCache } from "../updates/cache";
-import type { ContainerRuntimeInfo, ContainerState } from "../types";
+} from "../updates/service.js";
+import { MemoryUpdateCache } from "../updates/cache.js";
+import type { ContainerRuntimeInfo, ContainerState } from "../types.js";
 import type {
   UpdateRegistration,
   VersionSource,
   VersionSourceResult,
   UpdateCheckResult,
-} from "../updates/types";
+} from "../updates/types.js";
 
 // ---------- test doubles ----------
 

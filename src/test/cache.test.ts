@@ -1,10 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "fs";
-import { tmpdir } from "os";
-import { join } from "path";
-import { FileUpdateCache, MemoryUpdateCache } from "../updates/cache";
-import type { UpdateCheckResult } from "../updates/types";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { FileUpdateCache, MemoryUpdateCache } from "../updates/cache.js";
+import type { UpdateCheckResult } from "../updates/types.js";
 
 function sampleResult(pluginId: string): UpdateCheckResult {
   return {

@@ -1,14 +1,14 @@
-import { randomUUID } from "crypto";
+import { randomUUID } from "node:crypto";
 import {
   ContainerJobConfig,
   ContainerJobResult,
   ContainerRuntimeInfo,
   CleanupOrphansResult,
   OrphanJobInfo,
-} from "./types";
-import { execRuntime, execRuntimeLong } from "./runtime";
-import { volumeArg } from "./containers";
-import { resourceFlagsForRun } from "./resources";
+} from "./types.js";
+import { execRuntime, execRuntimeLong } from "./runtime.js";
+import { volumeArg } from "./containers.js";
+import { resourceFlagsForRun } from "./resources.js";
 
 /**
  * Resolve the host caller's UID/GID at flag-emit time.  Wrapped so

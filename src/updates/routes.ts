@@ -1,5 +1,5 @@
 import type { IRouter, Request, Response } from "express";
-import type { UpdateService } from "./service";
+import type { UpdateService } from "./service.js";
 
 /**
  * Express sub-router exposing the update service over HTTP. Mounted

@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { collectRecoveredVolumes } from "../containers";
+import { collectRecoveredVolumes } from "../containers.js";
 
 describe("collectRecoveredVolumes — no prior state", () => {
   it("returns [] when prior is undefined", () => {

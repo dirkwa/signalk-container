@@ -1,5 +1,5 @@
 import { IRouter } from "express";
-import path from "path";
+import path from "node:path";
 import {
   CleanupOrphansResult,
   ContainerConfig,
@@ -15,7 +15,7 @@ import {
   PruneResult,
   UpdateResourcesResult,
   VolumeIssue,
-} from "./types";
+} from "./types.js";
 import {
   fieldsRequiringRecreateForUnset,
   filterUnsupportedLimits,
@@ -23,8 +23,8 @@ import {
   minimizeOverride,
   resourceLimitsEqual,
   tryLiveUpdate,
-} from "./resources";
-import { detectRuntime, isContainerized } from "./runtime";
+} from "./resources.js";
+import { detectRuntime, isContainerized } from "./runtime.js";
 import {
   classifyVolumeSources,
   collectRecoveredVolumes,
@@ -57,12 +57,12 @@ import {
   startContainer,
   stopContainer,
   tailContainerLogs,
-} from "./containers";
-import { createLogStreamBroker, LogStreamBroker } from "./log-stream-broker";
-import { runJob, cleanupOrphanedJobs } from "./jobs";
-import { UpdateService } from "./updates/service";
-import { FileUpdateCache } from "./updates/cache";
-import { registerUpdateRoutes } from "./updates/routes";
+} from "./containers.js";
+import { createLogStreamBroker, LogStreamBroker } from "./log-stream-broker.js";
+import { runJob, cleanupOrphanedJobs } from "./jobs.js";
+import { UpdateService } from "./updates/service.js";
+import { FileUpdateCache } from "./updates/cache.js";
+import { registerUpdateRoutes } from "./updates/routes.js";
 
 interface App {
   debug: (...args: unknown[]) => void;
@@ -103,7 +103,7 @@ interface App {
  */
 const SSE_HEARTBEAT_MS = 30_000;
 
-module.exports = (app: App) => {
+export default (app: App) => {
   let runtimeInfo: ContainerRuntimeInfo | null = null;
   let pruneTimer: NodeJS.Timeout | null = null;
   const healthTimers = new Map<string, NodeJS.Timeout>();

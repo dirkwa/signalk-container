@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { dockerHubTags, githubReleases } from "../updates/sources";
-import type { ContainerRuntimeInfo } from "../types";
+import { dockerHubTags, githubReleases } from "../updates/sources.js";
+import type { ContainerRuntimeInfo } from "../types.js";
 
 const dummyRuntime: ContainerRuntimeInfo = {
   runtime: "podman",

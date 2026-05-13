@@ -1,5 +1,5 @@
-import { tailContainerLogs } from "./containers";
-import { ContainerRuntimeInfo } from "./types";
+import { tailContainerLogs } from "./containers.js";
+import { ContainerRuntimeInfo } from "./types.js";
 
 /**
  * Base delay between an underlying tail exiting and the broker

@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { getLiveResources } from "../containers";
-import type { ContainerRuntimeInfo } from "../types";
+import { getLiveResources } from "../containers.js";
+import type { ContainerRuntimeInfo } from "../types.js";
 
 const dummyRuntime: ContainerRuntimeInfo = {
   runtime: "podman",

@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { classifyTag } from "../updates/tagClassifier";
-import type { TagKind } from "../updates/types";
+import { classifyTag } from "../updates/tagClassifier.js";
+import type { TagKind } from "../updates/types.js";
 
 describe("classifyTag", () => {
   const cases: Array<[string, TagKind, string]> = [

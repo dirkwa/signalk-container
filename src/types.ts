@@ -679,7 +679,7 @@ export interface ContainerManagerApi {
    * scheduling, caching, and offline-tolerance.
    * See doc/plugin-developer-guide.md "Update detection" for usage.
    */
-  updates: import("./updates/types").UpdateServiceApi;
+  updates: import("./updates/types.js").UpdateServiceApi;
 }
 
 export interface PluginConfig {

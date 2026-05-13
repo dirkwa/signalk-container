@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { compareVersions } from "../updates/semver";
+import { compareVersions } from "../updates/semver.js";
 
 describe("compareVersions", () => {
   const cases: Array<[string, string, -1 | 0 | 1, string]> = [

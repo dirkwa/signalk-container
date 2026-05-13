@@ -1,7 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { tailContainerLogs, getContainerLogs, MAX_TAIL } from "../containers";
-import type { ContainerRuntimeInfo } from "../types";
+import {
+  tailContainerLogs,
+  getContainerLogs,
+  MAX_TAIL,
+} from "../containers.js";
+import type { ContainerRuntimeInfo } from "../types.js";
 
 const runtime: ContainerRuntimeInfo = {
   runtime: "podman",
@@ -22,7 +26,7 @@ interface SpawnCall {
 function makeStubSpawn() {
   const calls: SpawnCall[] = [];
   let stopCount = 0;
-  const stub: typeof import("../runtime").spawnRuntimeStreaming = (
+  const stub: typeof import("../runtime.js").spawnRuntimeStreaming = (
     _runtime,
     args,
     _onLine,

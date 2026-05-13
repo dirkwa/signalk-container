@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { resolveHostPathFromMounts } from "../containers";
-import type { InspectedMount } from "../containers";
+import { resolveHostPathFromMounts } from "../containers.js";
+import type { InspectedMount } from "../containers.js";
 
 const bind = (source: string, dest: string): InspectedMount => ({
   type: "bind",

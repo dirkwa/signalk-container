@@ -1,4 +1,4 @@
-import type { TagKind } from "./types";
+import type { TagKind } from "./types.js";
 
 const FLOATING_TAG_NAMES = new Set([
   "latest",

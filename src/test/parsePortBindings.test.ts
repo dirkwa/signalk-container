@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parsePortBindings } from "../containers";
+import { parsePortBindings } from "../containers.js";
 
 describe("parsePortBindings", () => {
   it("parses a typical podman bare-metal entry", () => {

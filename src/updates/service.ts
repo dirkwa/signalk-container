@@ -1,16 +1,16 @@
-import type { ContainerRuntimeInfo, ContainerState } from "../types";
+import type { ContainerRuntimeInfo, ContainerState } from "../types.js";
 import type {
   TagKind,
   UpdateCheckResult,
   UpdateRegistration,
   UpdateServiceApi,
   VersionSourceResult,
-} from "./types";
-import { compareVersions } from "./semver";
-import { classifyTag } from "./tagClassifier";
-import { isOfflineError } from "./offline";
-import type { UpdateCache } from "./cache";
-import { dockerHubTags, githubReleases } from "./sources";
+} from "./types.js";
+import { compareVersions } from "./semver.js";
+import { classifyTag } from "./tagClassifier.js";
+import { isOfflineError } from "./offline.js";
+import type { UpdateCache } from "./cache.js";
+import { dockerHubTags, githubReleases } from "./sources.js";
 
 export interface AppDeps {
   debug: (msg: string, ...args: unknown[]) => void;

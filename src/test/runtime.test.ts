@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { detectRuntime } from "../runtime";
+import { detectRuntime } from "../runtime.js";
 
 describe("detectRuntime", () => {
   it("returns a runtime info object when podman or docker is available", async () => {

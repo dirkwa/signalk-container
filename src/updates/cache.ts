@@ -1,6 +1,6 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
-import { dirname } from "path";
-import type { UpdateCacheFile, UpdateCheckResult } from "./types";
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import type { UpdateCacheFile, UpdateCheckResult } from "./types.js";
 
 /**
  * Persistent storage for the most recent successful UpdateCheckResult

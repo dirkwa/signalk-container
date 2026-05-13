@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   parseSelfContainerIdFromCgroup,
   parseSelfContainerIdsFromCgroupFile,
-} from "../containers";
+} from "../containers.js";
 
 describe("parseSelfContainerIdFromCgroup", () => {
   // Real-world cgroup entries collected from various deployments.

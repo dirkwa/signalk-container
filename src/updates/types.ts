@@ -1,4 +1,4 @@
-import type { ContainerRuntimeInfo } from "../types";
+import type { ContainerRuntimeInfo } from "../types.js";
 
 /**
  * Result returned by a VersionSource.fetch() call. Either a parsed
