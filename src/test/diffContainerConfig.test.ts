@@ -30,8 +30,9 @@ function liveBase(
     env: new Map(),
     binds: [],
     portBindings: new Map(),
+    extraHosts: new Map(),
     ...overrides,
-  };
+  } as LiveContainerConfig;
 }
 
 function reqBase(overrides: Partial<ContainerConfig> = {}): ContainerConfig {
