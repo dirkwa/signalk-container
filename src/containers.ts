@@ -839,6 +839,7 @@ export interface LiveContainerConfig {
   env: Map<string, string>;
   binds: Array<{ host: string; container: string }>;
   portBindings: Map<string, PortBinding[]>;
+  extraHosts: Map<string, string>;
 }
 
 /**
@@ -871,14 +872,16 @@ export async function getLiveContainerConfig(
     SEP +
     "{{json .Config.Env}}" +
     SEP +
-    "{{json .HostConfig.PortBindings}}";
+    "{{json .HostConfig.PortBindings}}" +
+    SEP +
+    "{{json .HostConfig.ExtraHosts}}";
   const result = await exec(runtime, ["inspect", "--format", fmt, fullName]);
   if (result.exitCode !== 0) return null;
 
   const parts = result.stdout.split(SEP);
-  if (parts.length !== 6) return null;
+  if (parts.length !== 7) return null;
 
-  const [rawImage, rawCmd, rawNetworkMode, rawBinds, rawEnv, rawPortBindings] =
+  const [rawImage, rawCmd, rawNetworkMode, rawBinds, rawEnv, rawPortBindings, rawExtraHosts] =
     parts;
 
   // Split image into image+tag (and optional digest). Config.Image can
@@ -964,6 +967,24 @@ export async function getLiveContainerConfig(
 
   const portBindings = parsePortBindingsFromJsonString(rawPortBindings);
 
+  const extraHosts = new Map<string, string>();
+  try {
+    const parsed = JSON.parse(rawExtraHosts);
+    if (Array.isArray(parsed)) {
+      for (const entry of parsed) {
+        if (typeof entry !== "string") continue;
+        // ExtraHosts format: "hostname:ipaddress"
+        const colon = entry.indexOf(":");
+        if (colon < 0) continue;
+        const hostname = entry.slice(0, colon);
+        const ip = entry.slice(colon + 1);
+        extraHosts.set(hostname, ip);
+      }
+    }
+  } catch {
+    // leave empty
+  }
+
   return {
     image,
     tag,
@@ -973,6 +994,7 @@ export async function getLiveContainerConfig(
     env,
     binds,
     portBindings,
+    extraHosts,
   };
 }
 
@@ -1216,6 +1238,28 @@ export function diffContainerConfig(
   }
   if (portsDrift) drifted.push("ports");
 
+  // ExtraHosts: build canonical Map<hostname, ip> for each side.
+  const requestedExtraHosts = new Map<string, string>();
+  if (requested.extraHosts) {
+    for (const [hostname, ip] of Object.entries(requested.extraHosts)) {
+      requestedExtraHosts.set(hostname, ip);
+    }
+  }
+  // Docker automatically adds host.containers.internal:host-gateway mapping
+  if (runtime.runtime === "docker") {
+    requestedExtraHosts.set("host.containers.internal", "host-gateway");
+  }
+  let extraHostsDrift = requestedExtraHosts.size !== live.extraHosts.size;
+  if (!extraHostsDrift) {
+    for (const [hostname, ip] of requestedExtraHosts) {
+      if (live.extraHosts.get(hostname) !== ip) {
+        extraHostsDrift = true;
+        break;
+      }
+    }
+  }
+  if (extraHostsDrift) drifted.push("extraHosts");
+
   return { drifted };
 }
 
@@ -1258,6 +1302,18 @@ function buildRunArgs(
     for (const [key, value] of Object.entries(config.env)) {
       args.push("-e", `${key}=${value}`);
     }
+  }
+
+  // Add extra hosts: user-provided + Docker's automatic host.containers.internal
+  if (config.extraHosts) {
+    for (const [hostname, ip] of Object.entries(config.extraHosts)) {
+      args.push("--add-host", `${hostname}:${ip}`);
+    }
+  }
+  // Docker doesn't automatically map host.containers.internal to host-gateway
+  // like Podman does, so add it here for Docker only
+  if (runtime.runtime === "docker") {
+    args.push("--add-host", "host.containers.internal:host-gateway");
   }
 
   // Resource limits (--cpus, --memory, --pids-limit, etc.)
