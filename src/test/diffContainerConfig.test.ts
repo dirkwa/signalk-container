@@ -24,6 +24,7 @@ function liveBase(
   return {
     image: "questdb/questdb",
     tag: "9.0.0",
+    digest: null,
     command: null,
     networkMode: "bridge",
     env: new Map(),
