@@ -783,9 +783,11 @@ export interface ManifestApi {
 // src/manifest/schema.ts (single source of truth for the on-disk
 // shape); re-exported here so consumer plugins can import everything
 // from "signalk-container/types".
-export type {
-  HistoryEntry,
-  ContainerManifestEntry,
+// Imported for local use in `ManifestApi` above; re-exported so
+// consumer plugins can pull every manifest type from "signalk-container".
+import type {
   ConsumerManifest,
+  ContainerManifestEntry,
+  HistoryEntry,
 } from "./manifest/schema.js";
-import type { ConsumerManifest, HistoryEntry } from "./manifest/schema.js";
+export type { ConsumerManifest, ContainerManifestEntry, HistoryEntry };

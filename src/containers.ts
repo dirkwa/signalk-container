@@ -488,6 +488,32 @@ export async function getRepoDigest(
   return /^sha256:[a-f0-9]{64}$/.test(digest) ? digest : null;
 }
 
+/**
+ * Return the digest of the image a *running* container is actually
+ * using, in the form `sha256:<hex>` or `local:<image-id>`.
+ *
+ * Distinct from "what `image:tag` resolves to right now": if someone
+ * `podman pull`'d the image after the container started, the local
+ * tag moved but the container is still on the old bits. This walks
+ * from the container's image-id (immutable for its lifetime) to its
+ * RepoDigests.
+ *
+ * Returns null if the container doesn't exist or the runtime can't
+ * read its image-id.
+ */
+export async function getLiveContainerDigest(
+  runtime: ContainerRuntimeInfo,
+  containerName: string,
+): Promise<string | null> {
+  const imageId = await getImageDigest(runtime, containerName);
+  if (!imageId) return null;
+  const repoDigest = await getRepoDigest(runtime, imageId);
+  if (repoDigest) return repoDigest;
+  // Locally-built image with no RepoDigests — return the local id
+  // under the same `local:` namespace the resolver uses.
+  return `local:${imageId}`;
+}
+
 export async function pullImage(
   runtime: ContainerRuntimeInfo,
   image: string,

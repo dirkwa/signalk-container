@@ -83,16 +83,22 @@ export class ManifestStore {
     resolved: ResolveResult;
     reason: HistoryEntry["reason"];
   }): Promise<void> {
+    // Run after the previous queued operation completes (success or
+    // failure). The queue tail stores a fulfilled promise so a single
+    // failure doesn't poison subsequent writes; the caller still gets
+    // the original rejecting promise, so a `.catch()` on the wrapper
+    // side observes the actual error.
     const prev = this.queue.get(params.pluginId) ?? Promise.resolve();
-    const next = prev
-      .then(() => this.doRecord(params))
-      .catch((err) => {
+    const op = prev.catch(() => undefined).then(() => this.doRecord(params));
+    this.queue.set(
+      params.pluginId,
+      op.catch((err) => {
         this.debug(
           `[manifest] ${params.pluginId}: record failed (${err instanceof Error ? err.message : err})`,
         );
-      });
-    this.queue.set(params.pluginId, next);
-    return next;
+      }),
+    );
+    return op;
   }
 
   private async doRecord(params: {
@@ -159,6 +165,12 @@ export class ManifestStore {
   }
 
   private pathFor(pluginId: string): string {
-    return join(this.baseDir, `${pluginId}.json`);
+    // Filename-safe across POSIX and Windows: collapse characters that
+    // NTFS reserves (< > : " / \ | ? *) into `_`. Real plugin ids are
+    // npm package names ([a-z0-9-._~]) and the synthetic fallback uses
+    // `container--<name>`, so this is purely defensive. The canonical
+    // pluginId is the one inside the JSON file, not the filename.
+    const safe = pluginId.replace(/[<>:"/\\|?*]/g, "_");
+    return join(this.baseDir, `${safe}.json`);
   }
 }

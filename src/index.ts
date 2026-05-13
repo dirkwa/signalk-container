@@ -16,6 +16,7 @@ import {
   ManifestApi,
   PluginConfig,
   PruneResult,
+  ResolveResult,
   UpdateResourcesResult,
   VolumeIssue,
 } from "./types.js";
@@ -40,6 +41,7 @@ import {
   getContainerLogs,
   getContainerState,
   getImageDigest,
+  getLiveContainerDigest,
   getLiveResources,
   getRepoDigest,
   imageExists,
@@ -907,11 +909,28 @@ export default (app: App) => {
         }
       }
 
-      // Record the resolved digest in the manifest. Fire-and-forget:
-      // a failed write is logged but does not fail the ensureRunning
-      // call. recordResolution() decides the effective reason based
-      // on the actual transition (plugin-install vs plugin-update).
+      // Record what's actually running in the manifest. Read the
+      // live container's digest (via its immutable image-id) rather
+      // than the pre-ensureRunning resolver output: if `ensureRunning`
+      // took the no-drift path while the local `image:tag` was
+      // refreshed out-of-band, the resolver's digest reflects the
+      // local tag state, not the running container. Falling back to
+      // the resolver's digest only happens when the inspect race
+      // means we can't read the live id.
+      //
+      // Fire-and-forget: a failed write is logged but does not fail
+      // the ensureRunning call. recordResolution() decides the
+      // effective reason based on the actual transition
+      // (plugin-install vs plugin-update).
       if (manifestStore) {
+        const liveDigest = await getLiveContainerDigest(runtimeInfo, name);
+        const liveResolved: ResolveResult = liveDigest
+          ? {
+              pullSpec: resolved.pullSpec,
+              resolvedDigest: liveDigest,
+              source: resolved.source,
+            }
+          : resolved;
         manifestStore
           .recordResolution({
             pluginId: options?.pluginId ?? `container:${name}`,
@@ -923,7 +942,7 @@ export default (app: App) => {
               digest: effectiveConfig.digest,
               updateChannel: effectiveConfig.updateChannel,
             },
-            resolved,
+            resolved: liveResolved,
             reason: "plugin-install",
           })
           .catch((err) =>
