@@ -11,7 +11,8 @@
     "appIcon": "./icon.svg",
     "screenshots": [
       "./doc/screenshots/signalk-container-1.png",
-      "./doc/screenshots/signalk-container-2.png"
+      "./doc/screenshots/signalk-container-2.png",
+      "./doc/screenshots/signalk-container-3.png"
     ]
   },
   "signalk-plugin-enabled-by-default": true,
