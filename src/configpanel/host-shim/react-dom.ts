@@ -1,5 +1,5 @@
 /// <reference path="./types.d.ts" />
-import type ReactDOMNS from "react-dom";
+import type * as ReactDOMNS from "react-dom";
 
 const host = globalThis.__SK_REACT_DOM__;
 if (!host) {

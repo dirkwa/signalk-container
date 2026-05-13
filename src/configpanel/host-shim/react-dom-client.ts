@@ -1,5 +1,5 @@
 /// <reference path="./types.d.ts" />
-import type ReactDOMClientNS from "react-dom/client";
+import type * as ReactDOMClientNS from "react-dom/client";
 
 const host = globalThis.__SK_REACT_DOM_CLIENT__;
 if (!host) {

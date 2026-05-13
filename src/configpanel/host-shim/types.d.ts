@@ -3,7 +3,7 @@
 // in this directory read them and re-export so the plugin's `import
 // 'react'` (aliased via vite.config.ts) resolves to the host's React
 // instance instead of bundling a second copy. Contract is owned by
-// SignalK/signalk-server (PR #2669, shipped in 2.27.0).
+// SignalK/signalk-server.
 declare global {
   interface Window {
     __SK_REACT__?: typeof import("react");
