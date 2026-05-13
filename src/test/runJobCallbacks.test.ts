@@ -1,10 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { execFile } from "child_process";
-import { promisify } from "util";
-import { makeLineSplitter } from "../runtime";
-import { runJob } from "../jobs";
-import type { ContainerRuntimeInfo } from "../types";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { makeLineSplitter } from "../runtime.js";
+import { runJob } from "../jobs.js";
+import type { ContainerRuntimeInfo } from "../types.js";
 
 const execFileP = promisify(execFile);
 

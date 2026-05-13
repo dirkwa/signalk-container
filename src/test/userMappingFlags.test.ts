@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { userMappingFlags } from "../jobs";
-import type { ContainerRuntimeInfo } from "../types";
+import { userMappingFlags } from "../jobs.js";
+import type { ContainerRuntimeInfo } from "../types.js";
 
 const dockerRuntime: ContainerRuntimeInfo = {
   runtime: "docker",

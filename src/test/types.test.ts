@@ -5,7 +5,7 @@ import type {
   ContainerManagerApi,
   ContainerRuntimeInfo,
   ContainerState,
-} from "../types";
+} from "../types.js";
 
 describe("type contracts", () => {
   it("ContainerConfig accepts valid config", () => {

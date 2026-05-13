@@ -1,4 +1,4 @@
-import * as net from "net";
+import * as net from "node:net";
 import { existsSync, readFileSync } from "node:fs";
 import {
   ContainerConfig,
@@ -8,15 +8,15 @@ import {
   HealthCheckOptions,
   VolumeIssue,
   VolumeSpec,
-} from "./types";
+} from "./types.js";
 import {
   StreamingProcessHandle,
   execRuntime,
   execRuntimeLong,
   isContainerized,
   spawnRuntimeStreaming,
-} from "./runtime";
-import { resourceFlagsForRun } from "./resources";
+} from "./runtime.js";
+import { resourceFlagsForRun } from "./resources.js";
 
 const CONTAINER_PREFIX = "sk-";
 
@@ -544,7 +544,7 @@ export async function getLiveResources(
   runtime: ContainerRuntimeInfo,
   name: string,
   exec: ExecFn = execRuntime,
-): Promise<import("./types").ContainerResourceLimits> {
+): Promise<import("./types.js").ContainerResourceLimits> {
   const fullName = prefixedName(name);
   // Use Go-template format for reliable parsing across podman/docker.
   // Each line is one numeric or string value; empty/zero means "unset".
@@ -574,7 +574,7 @@ export async function getLiveResources(
     oomScoreAdj,
   ] = parts;
 
-  const out: import("./types").ContainerResourceLimits = {};
+  const out: import("./types.js").ContainerResourceLimits = {};
 
   const nano = Number(nanoCpus);
   if (Number.isFinite(nano) && nano > 0) {

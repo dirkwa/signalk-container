@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { classifyVolumeSources } from "../containers";
+import { classifyVolumeSources } from "../containers.js";
 
 /**
  * Probe stub used across all tests. `/missing` and `/also-missing`

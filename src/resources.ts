@@ -1,5 +1,5 @@
-import type { ContainerResourceLimits, ContainerRuntimeInfo } from "./types";
-import { execRuntime } from "./runtime";
+import type { ContainerResourceLimits, ContainerRuntimeInfo } from "./types.js";
+import { execRuntime } from "./runtime.js";
 
 /**
  * Resource limits known to be applyable via `podman update` /

@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { safeInvokeVolumeIssue } from "../containers";
-import type { VolumeIssue } from "../types";
+import { safeInvokeVolumeIssue } from "../containers.js";
+import type { VolumeIssue } from "../types.js";
 
 const baseEvent: VolumeIssue = {
   containerPath: "/usb",

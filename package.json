@@ -16,11 +16,12 @@
     ]
   },
   "signalk-plugin-enabled-by-default": true,
+  "type": "module",
   "main": "dist/index.js",
   "scripts": {
     "clean": "rimraf dist",
-    "build": "npm run clean && tsc && webpack",
-    "build:config": "webpack",
+    "build": "npm run clean && tsc && webpack --config webpack.config.cjs",
+    "build:config": "webpack --config webpack.config.cjs",
     "watch": "tsc --watch",
     "prettier": "prettier --write .",
     "lint": "eslint --fix",

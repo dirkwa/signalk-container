@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { createLogStreamBroker } from "../log-stream-broker";
-import type { ContainerRuntimeInfo } from "../types";
+import { createLogStreamBroker } from "../log-stream-broker.js";
+import type { ContainerRuntimeInfo } from "../types.js";
 
 const runtime: ContainerRuntimeInfo = {
   runtime: "podman",
@@ -31,7 +31,7 @@ function makeFakeTail() {
   const actives: Active[] = [];
   const stopCounts: number[] = [];
 
-  const spawnTail: typeof import("../containers").tailContainerLogs = (
+  const spawnTail: typeof import("../containers.js").tailContainerLogs = (
     _runtime,
     _name,
     onLine,
@@ -293,15 +293,11 @@ describe("LogStreamBroker — close()", () => {
 describe("LogStreamBroker — startTail propagation", () => {
   it("passes startTail through to tailContainerLogs on first subscribe", () => {
     let observedStartTail: number | undefined;
-    const capturingSpawn: typeof import("../containers").tailContainerLogs = (
-      _runtime,
-      _name,
-      _onLine,
-      options,
-    ) => {
-      observedStartTail = options?.startTail;
-      return { stop: () => {}, pid: 1 };
-    };
+    const capturingSpawn: typeof import("../containers.js").tailContainerLogs =
+      (_runtime, _name, _onLine, options) => {
+        observedStartTail = options?.startTail;
+        return { stop: () => {}, pid: 1 };
+      };
     const broker = createLogStreamBroker(runtime, "foo", {
       spawnTail: capturingSpawn,
       startTail: 100,
@@ -492,7 +488,7 @@ describe("LogStreamBroker — auto-respawn after tail exit", () => {
       onLine?: (l: string) => void;
     };
     const handles: Handle[] = [];
-    const spawnTail: typeof import("../containers").tailContainerLogs = (
+    const spawnTail: typeof import("../containers.js").tailContainerLogs = (
       _runtime,
       _name,
       onLine,

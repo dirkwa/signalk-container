@@ -1,4 +1,4 @@
-import type { VersionSource, VersionSourceResult } from "./types";
+import type { VersionSource, VersionSourceResult } from "./types.js";
 
 export type FetchImpl = typeof fetch;
 

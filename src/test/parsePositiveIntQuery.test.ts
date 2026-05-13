@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parsePositiveIntQuery } from "../containers";
+import { parsePositiveIntQuery } from "../containers.js";
 
 /**
  * Validator used by the `/api/containers/:name/logs` route for the

@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseOrphanLine } from "../jobs";
+import { parseOrphanLine } from "../jobs.js";
 
 describe("parseOrphanLine", () => {
   it("parses a well-formed line with all our labels", () => {

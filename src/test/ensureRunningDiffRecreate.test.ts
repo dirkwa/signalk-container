@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { ensureRunning } from "../containers";
-import type { ContainerConfig, ContainerRuntimeInfo } from "../types";
+import { ensureRunning } from "../containers.js";
+import type { ContainerConfig, ContainerRuntimeInfo } from "../types.js";
 
 const docker: ContainerRuntimeInfo = {
   runtime: "docker",

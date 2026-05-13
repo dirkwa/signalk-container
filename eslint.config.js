@@ -1,10 +1,10 @@
-const { defineConfig, globalIgnores } = require("eslint/config");
-const js = require("@eslint/js");
-const tseslint = require("typescript-eslint");
-const prettier = require("eslint-config-prettier/flat");
-const globals = require("globals");
+import { defineConfig, globalIgnores } from "eslint/config";
+import js from "@eslint/js";
+import tseslint from "typescript-eslint";
+import prettier from "eslint-config-prettier/flat";
+import globals from "globals";
 
-module.exports = defineConfig([
+export default defineConfig([
   globalIgnores(["dist", "public", "node_modules", "src/configpanel"]),
 
   {

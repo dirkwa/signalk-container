@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { isOfflineError } from "../updates/offline";
+import { isOfflineError } from "../updates/offline.js";
 
 function errnoError(code: string): NodeJS.ErrnoException {
   const err = new Error(`mock ${code}`) as NodeJS.ErrnoException;

@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { spawnRuntimeStreaming } from "../runtime";
-import type { ContainerRuntimeInfo } from "../types";
+import { spawnRuntimeStreaming } from "../runtime.js";
+import type { ContainerRuntimeInfo } from "../types.js";
 
 /**
  * spawnRuntimeStreaming is generic — it shells out to whatever
