@@ -1,11 +1,12 @@
 src/
 dist/test/
-# configpanel TSX is bundled by webpack into public/; the tsc emit
-# under dist/configpanel/ is type-check noise — never imported at
-# runtime.  Excluding keeps the npm tarball lean.
+# configpanel TSX is bundled by vite into public/; tsc excludes
+# src/configpanel from emit, but the rule stays as a safety belt
+# in case the exclude is ever removed.
 dist/configpanel/
 .github/
 *.tsbuildinfo
 .DS_Store
 eslint.config.js
 tsconfig.json
+vite.config.ts

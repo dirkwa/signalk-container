@@ -1,1 +1,0 @@
-// Module Federation entry point
