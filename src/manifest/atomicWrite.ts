@@ -49,4 +49,20 @@ export function atomicWriteJson(filePath: string, data: unknown): void {
     }
     throw err;
   }
+  // Fsync the parent directory so the rename's directory-entry update
+  // persists through a crash, not just the file's data blocks. Without
+  // this, POSIX rename atomicity holds across power loss but the new
+  // name may be missing from the directory after recovery. Best-effort
+  // — wrap in try/catch since some sandboxes don't permit fsync on a
+  // directory fd.
+  try {
+    const dirFd = openSync(dirname(filePath), "r");
+    try {
+      fsyncSync(dirFd);
+    } finally {
+      closeSync(dirFd);
+    }
+  } catch {
+    // best-effort
+  }
 }
