@@ -381,6 +381,14 @@ export async function getContainerLogs(
   return [...toLines(result.stdout), ...toLines(result.stderr)];
 }
 
+/**
+ * Bare image id: 64 hex chars, optionally with the `sha256:` prefix
+ * podman/docker print for `Config.Image`. Such ids must never be
+ * qualified with a registry — they're addressable by content, not by
+ * name.
+ */
+const BARE_IMAGE_ID = /^(?:sha256:)?[a-f0-9]{64}$/;
+
 export function qualifyImage(
   image: string,
   runtime: ContainerRuntimeInfo,
@@ -388,6 +396,9 @@ export function qualifyImage(
   // Podman requires fully qualified image names when unqualified-search
   // registries are not configured. Prefix docker.io/ if missing.
   if (runtime.runtime === "podman") {
+    // Bare image ids (e.g. `sha256:abc…` or `abc…`) are content-addressed
+    // and never need a registry prefix; pass through.
+    if (BARE_IMAGE_ID.test(image)) return image;
     // Strip any `@sha256:...` digest before splitting — for an
     // unqualified ref like `alpine@sha256:abc...` the digest's `:`
     // would otherwise make us think the first segment is `host:port`.
@@ -512,7 +523,13 @@ export async function getLiveContainerDigest(
   containerName: string,
   exec: ExecFn = execRuntime,
 ): Promise<string | null> {
-  const imageId = await getImageDigest(runtime, containerName, exec);
+  // The caller passes the unprefixed name from `ensureRunning`; the
+  // running container always carries the `sk-` prefix.
+  const imageId = await getImageDigest(
+    runtime,
+    prefixedName(containerName),
+    exec,
+  );
   if (!imageId) return null;
   const repoDigest = await getRepoDigest(runtime, imageId, exec);
   if (repoDigest) return repoDigest;

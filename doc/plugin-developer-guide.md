@@ -536,7 +536,7 @@ If the recreate path is taken and fails, signalk-container attempts rollback to 
 
 Throws if `name` has no cached `ContainerConfig` — i.e. if the consumer plugin hasn't called `ensureRunning` yet during this Signal K session. That's normally impossible during normal operation since consumer plugins always call `ensureRunning` at startup.
 
-### `manifest.get(pluginId): Promise<ConsumerManifest | null>`
+### `containers.manifest.get(pluginId): Promise<ConsumerManifest | null>`
 
 Returns the persisted manifest for a consumer plugin, or `null` if no manifest exists yet. The manifest records the declared/resolved digests, the resolved-from-tag fallback, the update channel, and a bounded history of digest changes per container. Writes happen only as a side-effect of successful `ensureRunning` calls — this getter is read-only.
 
@@ -545,11 +545,11 @@ const manifest = await containers.manifest.get("signalk-questdb");
 console.log(manifest?.containers["questdb"]?.resolvedDigest);
 ```
 
-### `manifest.list(): Promise<ConsumerManifest[]>`
+### `containers.manifest.list(): Promise<ConsumerManifest[]>`
 
 Returns every persisted manifest. Used by the admin UI to render the per-plugin pinning view.
 
-### `manifest.getContainerHistory(containerName): Promise<HistoryEntry[]>`
+### `containers.manifest.getContainerHistory(containerName): Promise<HistoryEntry[]>`
 
 Returns the bounded history (max 20 entries) of digest changes for a specific container, regardless of which plugin owns it. Useful for forensics on "why does this work on boat A but not boat B" — the history records `from`/`to` digests, ISO timestamps, and the triggering plugin version.
 
@@ -594,15 +594,15 @@ All four fields are optional. The behavior matrix:
 
 `pluginId` is validated at write time: it must be a valid npm package name (`signalk-questdb`), a scoped form (`@signalk/foo`), or — if absent — the synthetic fallback `container:<name>` that signalk-container uses internally.
 
-The manifest itself lives at `${dataDir}/signalk-container-manifests/<encoded-pluginId>.json`. `<encoded-pluginId>` is the pluginId with `/` and `:` percent-encoded so the filename is portable across POSIX and Windows. The JSON content always holds the canonical pluginId. Read it via `manager.manifest.get(pluginId)`; never poke the file directly.
+Manifests are persisted under `${dataDir}/signalk-container-manifests/`. The canonical pluginId always lives inside the JSON. Always read via `containers.manifest.get(pluginId)` rather than touching the files directly.
 
-`updateChannel` is recorded but its consumption by the update-detection service lands in a follow-up release. The accepted shapes today are:
+`updateChannel` is recorded on the manifest and accepts these shapes:
 
 - `"tag:<pattern>"` — semver-aware within a tag pattern, e.g. `"tag:7.x"`.
 - `"tag:latest"` / `"tag:main"` — floating-tag digest-drift detection.
 - `"digest:explicit"` — updates flow only via plugin releases.
 
-If omitted, signalk-container defaults to `"tag:<tag>"` so the channel matches today's behavior.
+If omitted, signalk-container defaults to `"tag:<tag>"`.
 
 ---
 

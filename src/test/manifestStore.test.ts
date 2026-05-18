@@ -259,6 +259,24 @@ describe("ManifestStore", () => {
     assert.deepEqual(await store.list(), []);
   });
 
+  it("sweeps stale .tmp.* files left behind by a prior crash", async () => {
+    const store = new ManifestStore(baseDir, () => {});
+    // First write so the dir exists.
+    await store.recordResolution(commonParams(DIGEST_A));
+    // Drop a stale tmp file as if a prior write was killed.
+    const stale = join(baseDir, "signalk-questdb.json.tmp.123.456.abc");
+    writeFileSync(stale, "{}");
+    // Backdate it past the 1h threshold.
+    const twoHoursAgo = (Date.now() - 2 * 60 * 60 * 1000) / 1000;
+    // node:fs.utimesSync takes seconds.
+    const fs = await import("node:fs");
+    fs.utimesSync(stale, twoHoursAgo, twoHoursAgo);
+    assert.ok(existsSync(stale));
+    // The next write should sweep it away.
+    await store.recordResolution(commonParams(DIGEST_B));
+    assert.ok(!existsSync(stale), "stale tmp file should have been removed");
+  });
+
   it("accepts a scoped npm pluginId (`@scope/name`)", async () => {
     const store = new ManifestStore(baseDir, () => {});
     await store.recordResolution({
@@ -326,6 +344,11 @@ describe("ManifestStore", () => {
         }),
       /Invalid pluginId/,
     );
+  });
+
+  it("get() rejects invalid pluginId (defence in depth)", async () => {
+    const store = new ManifestStore(baseDir, () => {});
+    await assert.rejects(() => store.get("../escape"), /Invalid pluginId/);
   });
 
   it("distinct allowed pluginIds get distinct filenames (no aliasing)", async () => {

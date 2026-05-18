@@ -3,11 +3,15 @@ import {
   fsyncSync,
   mkdirSync,
   openSync,
+  readdirSync,
   renameSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { dirname } from "node:path";
+import { basename, dirname, join } from "node:path";
+
+const STALE_TMP_MS = 60 * 60 * 1000; // 1 hour
 
 /**
  * Write JSON to a file atomically. The file is either the prior valid
@@ -24,7 +28,9 @@ import { dirname } from "node:path";
  * it; the rename atomicity is the real guarantee.
  */
 export function atomicWriteJson(filePath: string, data: unknown): void {
-  mkdirSync(dirname(filePath), { recursive: true });
+  const dir = dirname(filePath);
+  mkdirSync(dir, { recursive: true });
+  sweepStaleTmpFiles(dir, basename(filePath));
   const tmpPath = `${filePath}.tmp.${process.pid}.${Date.now()}.${Math.random()
     .toString(36)
     .slice(2)}`;
@@ -56,7 +62,7 @@ export function atomicWriteJson(filePath: string, data: unknown): void {
   // — wrap in try/catch since some sandboxes don't permit fsync on a
   // directory fd.
   try {
-    const dirFd = openSync(dirname(filePath), "r");
+    const dirFd = openSync(dir, "r");
     try {
       fsyncSync(dirFd);
     } finally {
@@ -64,5 +70,34 @@ export function atomicWriteJson(filePath: string, data: unknown): void {
     }
   } catch {
     // best-effort
+  }
+}
+
+/**
+ * Remove `.tmp.*` files matching `<basename>.tmp.*` that are older
+ * than STALE_TMP_MS. These are left behind when a prior process was
+ * killed between writeFileSync and renameSync; without cleanup they
+ * accumulate in the manifests dir. Best-effort: any I/O error is
+ * silently ignored.
+ */
+function sweepStaleTmpFiles(dir: string, base: string): void {
+  const prefix = `${base}.tmp.`;
+  const threshold = Date.now() - STALE_TMP_MS;
+  let entries: string[];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return;
+  }
+  for (const name of entries) {
+    if (!name.startsWith(prefix)) continue;
+    const full = join(dir, name);
+    try {
+      if (statSync(full).mtimeMs < threshold) {
+        unlinkSync(full);
+      }
+    } catch {
+      // ignore — file may have been removed by a concurrent writer
+    }
   }
 }

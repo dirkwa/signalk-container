@@ -67,6 +67,16 @@ export class ManifestStore {
   ) {}
 
   async get(pluginId: string): Promise<ConsumerManifest | null> {
+    // Defence in depth: reject path-traversal and other invalid ids
+    // at every public entry point, not just `recordResolution`. The
+    // bijective filename encoding makes traversal impossible anyway
+    // (`/` is encoded to `%2F`), but throwing here gives consumers a
+    // clear error instead of silently returning null.
+    if (!PLUGIN_ID_RE.test(pluginId)) {
+      throw new Error(
+        `Invalid pluginId for manifest: ${JSON.stringify(pluginId)} (must be an npm package name, "@scope/name", or "container:<name>")`,
+      );
+    }
     const path = this.pathFor(pluginId);
     if (!existsSync(path)) return null;
     let parsed: unknown;
@@ -94,6 +104,15 @@ export class ManifestStore {
     for (const entry of entries) {
       if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
       const pluginId = decodeFromFilename(entry.name.slice(0, -".json".length));
+      // A hand-edited or stale filename can decode to something
+      // outside the allowlist; skip rather than letting `get()`'s
+      // boundary check throw.
+      if (!PLUGIN_ID_RE.test(pluginId)) {
+        this.debug(
+          `[manifest] skipping ${entry.name}: decoded pluginId ${JSON.stringify(pluginId)} fails validation`,
+        );
+        continue;
+      }
       const m = await this.get(pluginId);
       if (m) out.push(m);
     }
