@@ -1252,8 +1252,16 @@ export function diffContainerConfig(
       requestedExtraHosts.set(hostname, ip);
     }
   }
-  // Docker automatically adds host.containers.internal:host-gateway mapping
-  if (runtime.runtime === "docker") {
+  // This plugin injects host.containers.internal:host-gateway in
+  // buildRunArgs() for Docker so containers can reach the host the
+  // same way Podman does natively. Mirror that here so the live
+  // ExtraHosts (which records the flag) doesn't fire false drift —
+  // but only when the user didn't supply their own override for the
+  // same key.
+  if (
+    runtime.runtime === "docker" &&
+    !requestedExtraHosts.has("host.containers.internal")
+  ) {
     requestedExtraHosts.set("host.containers.internal", "host-gateway");
   }
   let extraHostsDrift = requestedExtraHosts.size !== live.extraHosts.size;
@@ -1311,15 +1319,23 @@ function buildRunArgs(
     }
   }
 
-  // Add extra hosts: user-provided + Docker's automatic host.containers.internal
+  // Add extra hosts: user-provided + (for Docker) the
+  // host.containers.internal:host-gateway mapping Podman provides
+  // natively. Skip the Docker injection if the user already supplied
+  // their own value for the same key to avoid duplicate /etc/hosts
+  // entries and the implicit first-match-wins override.
+  const userHasInternalOverride =
+    !!config.extraHosts &&
+    Object.prototype.hasOwnProperty.call(
+      config.extraHosts,
+      "host.containers.internal",
+    );
   if (config.extraHosts) {
     for (const [hostname, ip] of Object.entries(config.extraHosts)) {
       args.push("--add-host", `${hostname}:${ip}`);
     }
   }
-  // Docker doesn't automatically map host.containers.internal to host-gateway
-  // like Podman does, so add it here for Docker only
-  if (runtime.runtime === "docker") {
+  if (runtime.runtime === "docker" && !userHasInternalOverride) {
     args.push("--add-host", "host.containers.internal:host-gateway");
   }
 
