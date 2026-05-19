@@ -306,4 +306,84 @@ describe("getLiveContainerConfig", () => {
     assert.equal(result.env.get("TZ"), "UTC");
     assert.equal(result.portBindings.size, 2);
   });
+
+  it("parses a JSON array of extraHosts into a Map<hostname, ip>", async () => {
+    const exec = fakeExec({
+      stdout: buildStdout({
+        image: "questdb/questdb:9.0.0",
+        cmd: "null",
+        networkMode: "bridge",
+        binds: "null",
+        env: "null",
+        portBindings: "null",
+        extraHosts:
+          '["host.containers.internal:host-gateway","other.host:192.168.1.50"]',
+      }),
+      exitCode: 0,
+    });
+    const result = await getLiveContainerConfig(dummyRuntime, "x", exec);
+    assert.ok(result);
+    assert.equal(
+      result.extraHosts.get("host.containers.internal"),
+      "host-gateway",
+    );
+    assert.equal(result.extraHosts.get("other.host"), "192.168.1.50");
+    assert.equal(result.extraHosts.size, 2);
+  });
+
+  it("returns an empty extraHosts Map when the section is JSON null", async () => {
+    // Podman/Docker emit `null` (literal) when no --add-host was passed.
+    const exec = fakeExec({
+      stdout: buildStdout({
+        image: "questdb/questdb:9.0.0",
+        cmd: "null",
+        networkMode: "bridge",
+        binds: "null",
+        env: "null",
+        portBindings: "null",
+        extraHosts: "null",
+      }),
+      exitCode: 0,
+    });
+    const result = await getLiveContainerConfig(dummyRuntime, "x", exec);
+    assert.ok(result);
+    assert.equal(result.extraHosts.size, 0);
+  });
+
+  it("returns an empty extraHosts Map and does not throw on malformed JSON", async () => {
+    const exec = fakeExec({
+      stdout: buildStdout({
+        image: "questdb/questdb:9.0.0",
+        cmd: "null",
+        networkMode: "bridge",
+        binds: "null",
+        env: "null",
+        portBindings: "null",
+        extraHosts: "not-json-{",
+      }),
+      exitCode: 0,
+    });
+    const result = await getLiveContainerConfig(dummyRuntime, "x", exec);
+    assert.ok(result);
+    assert.equal(result.extraHosts.size, 0);
+  });
+
+  it("skips extraHosts entries without a colon separator", async () => {
+    const exec = fakeExec({
+      stdout: buildStdout({
+        image: "questdb/questdb:9.0.0",
+        cmd: "null",
+        networkMode: "bridge",
+        binds: "null",
+        env: "null",
+        portBindings: "null",
+        extraHosts: '["bogus","good.host:10.0.0.1"]',
+      }),
+      exitCode: 0,
+    });
+    const result = await getLiveContainerConfig(dummyRuntime, "x", exec);
+    assert.ok(result);
+    assert.equal(result.extraHosts.size, 1);
+    assert.equal(result.extraHosts.get("good.host"), "10.0.0.1");
+  });
 });
