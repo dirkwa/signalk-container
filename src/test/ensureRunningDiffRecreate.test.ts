@@ -493,13 +493,10 @@ describe("ensureRunning — buildRunArgs ownership", () => {
   });
 
   it("does NOT inject any UMASK env var (image controls umask, not us)", async () => {
-    // Empirical testing showed `UMASK=022` was effectively a no-op for
-    // most images: Node.js doesn't read it, neither do typical Linux
-    // binaries (kopia, rclone, etc.). Keeping the injection was
-    // misleading — plugin authors who saw `UMASK=022` in the env list
-    // would believe files would land at 644/755 when in reality the
-    // mode depends on the in-container process's actual umask (often
-    // 0022 by default on Linux, but determined by the image).
+    // The image and its entrypoint own the container process's umask.
+    // Most Linux binaries (Node.js, kopia, rclone, …) don't read the
+    // UMASK env var, so auto-injecting it would advertise a guarantee
+    // signalk-container can't deliver.
     const cap = captureRunArgsOnMissing({
       image: "questdb/questdb",
       tag: "9.0.0",
