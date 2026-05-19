@@ -37,6 +37,21 @@ export interface ContainerRuntimeInfo {
    * before emitting it.
    */
   isRootless?: boolean | null;
+  /**
+   * Effective host user (uid/gid) of the Signal K server process.
+   * Captured once at detection time from `process.getuid()` /
+   * `process.getgid()`.
+   *
+   * Reserved for the upcoming `ownership` config translator: files
+   * created inside a container started with `--user uid:gid` (or
+   * `--userns=keep-id` on rootless Podman) end up owned by this same
+   * identity on the host, so the plugin doesn't need recursive
+   * `chmod` sweeps to make outputs readable by Signal K.
+   *
+   * `null` on platforms where `process.getuid`/`getgid` are undefined
+   * (Windows); callers must not emit `--user` flags in that case.
+   */
+  hostUser?: { uid: number; gid: number } | null;
 }
 
 export type ContainerState = "running" | "stopped" | "missing" | "no-runtime";

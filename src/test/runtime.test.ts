@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { detectRuntime } from "../runtime.js";
+import { detectRuntime, probeHostUser } from "../runtime.js";
 
 describe("detectRuntime", () => {
   it("returns a runtime info object when podman or docker is available", async () => {
@@ -24,6 +24,47 @@ describe("detectRuntime", () => {
     // but the function should not throw
     if (result) {
       assert.equal(result.runtime, "podman");
+    }
+  });
+
+  it("captures hostUser when a runtime is detected on a POSIX platform", async () => {
+    const result = await detectRuntime("auto");
+    if (!result) return;
+    if (typeof process.getuid !== "function") {
+      // Windows: hostUser must be null and `--user` flags must be suppressed
+      // downstream. detectRuntime is the source of that signal.
+      assert.equal(result.hostUser, null);
+      return;
+    }
+    assert.ok(result.hostUser);
+    assert.equal(result.hostUser.uid, process.getuid());
+    assert.equal(result.hostUser.gid, process.getgid!());
+  });
+});
+
+describe("probeHostUser", () => {
+  it("returns uid/gid from process.getuid/getgid on POSIX", () => {
+    if (typeof process.getuid !== "function") {
+      // Skip on Windows — covered by the null-path test below.
+      return;
+    }
+    const result = probeHostUser();
+    assert.ok(result);
+    assert.equal(result.uid, process.getuid());
+    assert.equal(result.gid, process.getgid!());
+  });
+
+  it("returns null when process.getuid is undefined (Windows)", () => {
+    // Simulate Windows by stubbing both getters to undefined.
+    const origGetuid = process.getuid;
+    const origGetgid = process.getgid;
+    try {
+      (process as { getuid?: () => number }).getuid = undefined;
+      (process as { getgid?: () => number }).getgid = undefined;
+      assert.equal(probeHostUser(), null);
+    } finally {
+      process.getuid = origGetuid;
+      process.getgid = origGetgid;
     }
   });
 });
