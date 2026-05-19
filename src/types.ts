@@ -178,6 +178,17 @@ export interface ContainerConfig {
   command?: string[];
   networkMode?: string;
   /**
+   * Extra hosts to add to the container's `/etc/hosts`. Keys are hostnames,
+   * values are IP addresses or special names like `host-gateway`.
+   *
+   * Example:
+   *   `{ "internal-service": "192.168.1.100" }`
+   *
+   * Note: Podman automatically maps `host.containers.internal` to `host-gateway`,
+   * but Docker does not, so this plugin adds that mapping for Docker automatically.
+   */
+  extraHosts?: Record<string, string>;
+  /**
    * Resource limits for the container. The consumer plugin sets a
    * sensible default here; the user can override per-container via
    * signalk-container's plugin config (see `containerOverrides`).

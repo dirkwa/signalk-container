@@ -52,6 +52,7 @@ function buildLiveConfigStdout(parts: {
   binds?: string;
   env?: string;
   portBindings?: string;
+  extraHosts?: string;
 }): string {
   return [
     parts.image,
@@ -60,6 +61,7 @@ function buildLiveConfigStdout(parts: {
     parts.binds ?? "null",
     parts.env ?? "null",
     parts.portBindings ?? "null",
+    parts.extraHosts ?? "null",
   ].join(SEP);
 }
 
@@ -139,6 +141,9 @@ describe("ensureRunning — config drift triggers automatic recreate", () => {
     const matching = buildLiveConfigStdout({
       image: "questdb/questdb:9.0.0",
       env: '["FOO=2"]',
+      // Docker runtime always carries the auto-injected host-gateway entry;
+      // include it in live so diffContainerConfig finds extraHosts symmetric.
+      extraHosts: '["host.containers.internal:host-gateway"]',
     });
     const { exec, calls } = makeRouterExec((args) => {
       const cmd = args[0];
@@ -330,6 +335,9 @@ describe("ensureRunning — stopped-state drift detection", () => {
     const matching = buildLiveConfigStdout({
       image: "questdb/questdb:9.0.0",
       env: '["FOO=2"]', // matches requested
+      // Docker runtime always carries the auto-injected host-gateway entry;
+      // include it in live so diffContainerConfig finds extraHosts symmetric.
+      extraHosts: '["host.containers.internal:host-gateway"]',
     });
     const { exec, calls } = makeRouterExec((args) => {
       const cmd = args[0];

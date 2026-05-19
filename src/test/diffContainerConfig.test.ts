@@ -30,8 +30,9 @@ function liveBase(
     env: new Map(),
     binds: [],
     portBindings: new Map(),
+    extraHosts: new Map(),
     ...overrides,
-  };
+  } as LiveContainerConfig;
 }
 
 function reqBase(overrides: Partial<ContainerConfig> = {}): ContainerConfig {
@@ -44,7 +45,15 @@ function reqBase(overrides: Partial<ContainerConfig> = {}): ContainerConfig {
 
 describe("diffContainerConfig — no drift on identical configs", () => {
   it("returns empty drifted list when image+tag match and everything else is unset", () => {
-    const { drifted } = diffContainerConfig(reqBase(), liveBase(), docker);
+    // Docker runtime auto-injects `host.containers.internal:host-gateway`
+    // into the requested extraHosts set; the live state mirrors that.
+    const { drifted } = diffContainerConfig(
+      reqBase(),
+      liveBase({
+        extraHosts: new Map([["host.containers.internal", "host-gateway"]]),
+      }),
+      docker,
+    );
     assert.deepEqual(drifted, []);
   });
 
@@ -439,6 +448,41 @@ describe("diffContainerConfig — unset detection via prior config", () => {
       // prior omitted
     );
     assert.ok(!drifted.includes("env"));
+  });
+});
+
+describe("diffContainerConfig — extraHosts", () => {
+  it("respects user override of host.containers.internal under docker (no drift)", () => {
+    // User explicitly sets host.containers.internal to a custom IP.
+    // The auto-inject must NOT overwrite it; live state has the same
+    // user-provided mapping, so no drift fires.
+    const { drifted } = diffContainerConfig(
+      reqBase({ extraHosts: { "host.containers.internal": "192.168.1.50" } }),
+      liveBase({
+        extraHosts: new Map([["host.containers.internal", "192.168.1.50"]]),
+      }),
+      docker,
+    );
+    assert.ok(!drifted.includes("extraHosts"));
+  });
+
+  it("flags drift when user override differs from live extraHosts", () => {
+    const { drifted } = diffContainerConfig(
+      reqBase({ extraHosts: { "host.containers.internal": "192.168.1.50" } }),
+      liveBase({
+        extraHosts: new Map([["host.containers.internal", "host-gateway"]]),
+      }),
+      docker,
+    );
+    assert.ok(drifted.includes("extraHosts"));
+  });
+
+  it("no drift on podman when neither side has extraHosts (podman auto-adds, doesn't record)", () => {
+    // Podman auto-adds host.containers.internal natively but doesn't
+    // record it in HostConfig.ExtraHosts. The diff code only injects
+    // the key on docker, so both sides stay empty and no drift fires.
+    const { drifted } = diffContainerConfig(reqBase(), liveBase(), podman);
+    assert.ok(!drifted.includes("extraHosts"));
   });
 });
 

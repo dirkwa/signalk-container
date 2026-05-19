@@ -839,6 +839,7 @@ export interface LiveContainerConfig {
   env: Map<string, string>;
   binds: Array<{ host: string; container: string }>;
   portBindings: Map<string, PortBinding[]>;
+  extraHosts: Map<string, string>;
 }
 
 /**
@@ -871,15 +872,24 @@ export async function getLiveContainerConfig(
     SEP +
     "{{json .Config.Env}}" +
     SEP +
-    "{{json .HostConfig.PortBindings}}";
+    "{{json .HostConfig.PortBindings}}" +
+    SEP +
+    "{{json .HostConfig.ExtraHosts}}";
   const result = await exec(runtime, ["inspect", "--format", fmt, fullName]);
   if (result.exitCode !== 0) return null;
 
   const parts = result.stdout.split(SEP);
-  if (parts.length !== 6) return null;
+  if (parts.length !== 7) return null;
 
-  const [rawImage, rawCmd, rawNetworkMode, rawBinds, rawEnv, rawPortBindings] =
-    parts;
+  const [
+    rawImage,
+    rawCmd,
+    rawNetworkMode,
+    rawBinds,
+    rawEnv,
+    rawPortBindings,
+    rawExtraHosts,
+  ] = parts;
 
   // Split image into image+tag (and optional digest). Config.Image can
   // be `repo:tag`, `repo@sha256:...`, or `repo:tag@sha256:...`.
@@ -964,6 +974,24 @@ export async function getLiveContainerConfig(
 
   const portBindings = parsePortBindingsFromJsonString(rawPortBindings);
 
+  const extraHosts = new Map<string, string>();
+  try {
+    const parsed = JSON.parse(rawExtraHosts);
+    if (Array.isArray(parsed)) {
+      for (const entry of parsed) {
+        if (typeof entry !== "string") continue;
+        // ExtraHosts format: "hostname:ipaddress"
+        const colon = entry.indexOf(":");
+        if (colon < 0) continue;
+        const hostname = entry.slice(0, colon);
+        const ip = entry.slice(colon + 1);
+        extraHosts.set(hostname, ip);
+      }
+    }
+  } catch {
+    // leave empty
+  }
+
   return {
     image,
     tag,
@@ -973,6 +1001,7 @@ export async function getLiveContainerConfig(
     env,
     binds,
     portBindings,
+    extraHosts,
   };
 }
 
@@ -1216,6 +1245,36 @@ export function diffContainerConfig(
   }
   if (portsDrift) drifted.push("ports");
 
+  // ExtraHosts: build canonical Map<hostname, ip> for each side.
+  const requestedExtraHosts = new Map<string, string>();
+  if (requested.extraHosts) {
+    for (const [hostname, ip] of Object.entries(requested.extraHosts)) {
+      requestedExtraHosts.set(hostname, ip);
+    }
+  }
+  // This plugin injects host.containers.internal:host-gateway in
+  // buildRunArgs() for Docker so containers can reach the host the
+  // same way Podman does natively. Mirror that here so the live
+  // ExtraHosts (which records the flag) doesn't fire false drift —
+  // but only when the user didn't supply their own override for the
+  // same key.
+  if (
+    runtime.runtime === "docker" &&
+    !requestedExtraHosts.has("host.containers.internal")
+  ) {
+    requestedExtraHosts.set("host.containers.internal", "host-gateway");
+  }
+  let extraHostsDrift = requestedExtraHosts.size !== live.extraHosts.size;
+  if (!extraHostsDrift) {
+    for (const [hostname, ip] of requestedExtraHosts) {
+      if (live.extraHosts.get(hostname) !== ip) {
+        extraHostsDrift = true;
+        break;
+      }
+    }
+  }
+  if (extraHostsDrift) drifted.push("extraHosts");
+
   return { drifted };
 }
 
@@ -1258,6 +1317,26 @@ function buildRunArgs(
     for (const [key, value] of Object.entries(config.env)) {
       args.push("-e", `${key}=${value}`);
     }
+  }
+
+  // Add extra hosts: user-provided + (for Docker) the
+  // host.containers.internal:host-gateway mapping Podman provides
+  // natively. Skip the Docker injection if the user already supplied
+  // their own value for the same key to avoid duplicate /etc/hosts
+  // entries and the implicit first-match-wins override.
+  const userHasInternalOverride =
+    !!config.extraHosts &&
+    Object.prototype.hasOwnProperty.call(
+      config.extraHosts,
+      "host.containers.internal",
+    );
+  if (config.extraHosts) {
+    for (const [hostname, ip] of Object.entries(config.extraHosts)) {
+      args.push("--add-host", `${hostname}:${ip}`);
+    }
+  }
+  if (runtime.runtime === "docker" && !userHasInternalOverride) {
+    args.push("--add-host", "host.containers.internal:host-gateway");
   }
 
   // Resource limits (--cpus, --memory, --pids-limit, etc.)
