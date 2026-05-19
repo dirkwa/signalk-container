@@ -1354,15 +1354,6 @@ function buildRunArgs(
     }
   }
 
-  // Default UMASK so files/dirs created inside the container have
-  // group/other read permissions (`644` / `755`). Caller's value in
-  // `config.env.UMASK` wins; merge, don't overwrite.
-  const userEnvHasUmask = !!(
-    config.env && Object.prototype.hasOwnProperty.call(config.env, "UMASK")
-  );
-  if (!userEnvHasUmask) {
-    args.push("-e", "UMASK=022");
-  }
   if (config.env) {
     for (const [key, value] of Object.entries(config.env)) {
       args.push("-e", `${key}=${value}`);

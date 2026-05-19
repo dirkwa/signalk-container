@@ -423,7 +423,7 @@ describe("ensureRunning — stopped-state drift detection", () => {
   });
 });
 
-describe("ensureRunning — buildRunArgs ownership + UMASK", () => {
+describe("ensureRunning — buildRunArgs ownership", () => {
   // Capture the run-command args by routing exec at the missing-state path
   // (no inspect-drift logic involved): container is missing, so ensureRunning
   // falls straight through to pull (skipped by image inspect 'ok') + run -d.
@@ -492,22 +492,26 @@ describe("ensureRunning — buildRunArgs ownership + UMASK", () => {
     );
   });
 
-  it("injects -e UMASK=022 by default", async () => {
+  it("does NOT inject any UMASK env var (image controls umask, not us)", async () => {
+    // The image and its entrypoint own the container process's umask.
+    // Most Linux binaries (Node.js, kopia, rclone, …) don't read the
+    // UMASK env var, so auto-injecting it would advertise a guarantee
+    // signalk-container can't deliver.
     const cap = captureRunArgsOnMissing({
       image: "questdb/questdb",
       tag: "9.0.0",
     });
     await cap.run();
     assert.ok(cap.runArgs);
-    const idx = cap.runArgs.indexOf("UMASK=022");
-    assert.ok(idx >= 0, `UMASK=022 missing from: ${cap.runArgs.join(" ")}`);
-    assert.equal(cap.runArgs[idx - 1], "-e");
-    // And only once — must not appear twice.
-    const occurrences = cap.runArgs.filter((a) => a === "UMASK=022").length;
-    assert.equal(occurrences, 1);
+    assert.ok(
+      !cap.runArgs.some((a) => a.startsWith("UMASK=")),
+      `no UMASK env should be auto-injected; got: ${cap.runArgs.join(" ")}`,
+    );
   });
 
-  it("does not overwrite a caller-provided UMASK in config.env", async () => {
+  it("passes caller-provided UMASK in config.env through verbatim", async () => {
+    // Plugin authors can still set UMASK in env if their image's
+    // entrypoint script honors it. We just don't pretend to.
     const cap = captureRunArgsOnMissing({
       image: "questdb/questdb",
       tag: "9.0.0",
@@ -515,9 +519,6 @@ describe("ensureRunning — buildRunArgs ownership + UMASK", () => {
     });
     await cap.run();
     assert.ok(cap.runArgs);
-    // The default UMASK=022 must NOT have been pushed.
-    assert.ok(!cap.runArgs.includes("UMASK=022"));
-    // The caller's value is preserved verbatim.
     assert.ok(cap.runArgs.includes("UMASK=0027"));
   });
 });
