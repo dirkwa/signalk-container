@@ -324,6 +324,8 @@ Volumes accept either a bare host-path string (auto-create — runtime creates t
 
 For opt-in digest pinning, pass `digest` (`sha256:<64-hex>`) on the config and `pluginId` / `pluginVersion` on the options — see [Image Pinning Manifest](#image-pinning-manifest).
 
+`ContainerConfig.user` controls the host-UID mapping for files the container creates on bind mounts — see [Host-UID Ownership](#host-uid-ownership). `ContainerConfig.extraHosts` lets you add hostname → IP entries to `/etc/hosts`; signalk-container automatically maps `host.containers.internal` to `host-gateway` on Docker (Podman has it natively), and a user value passed in `extraHosts` is respected as an override.
+
 ```typescript
 await containers.ensureRunning("my-db", {
   image: "postgres",
@@ -559,6 +561,95 @@ const history = await containers.manifest.getContainerHistory("questdb");
 ```
 
 Returns `[]` if the container has no manifest entry (e.g. it predates the manifest layer or `ensureRunning` has never been called for it in this Signal K session).
+
+### `containers.doctor.imageRunsAsUser(image, user?): Promise<ImageProbeResult>`
+
+Probe whether `image` can run cleanly under the host-UID mapping signalk-container will emit for managed containers — i.e. that `/tmp` is writable for the host caller and the image doesn't depend on a writable `~/.<x>` or a root-only path. Use this _before_ adopting an unfamiliar image, instead of debugging a wedged container after the fact.
+
+The probe starts the image with the same `--user` / `--userns` flags `ensureRunning` would emit for the given `user` value, executes `touch /tmp/x && echo ok`, and reports the result. Never throws — non-zero exit, missing binary, and exec failures all surface as `{ ok: false, error }`.
+
+```typescript
+const probe = await containers.doctor.imageRunsAsUser("myorg/worker:1.2.3");
+if (!probe.ok) {
+  app.setPluginError(`image not UID-compatible: ${probe.error}`);
+  app.debug(probe.output); // combined stdout/stderr from the probe run
+}
+```
+
+Pass `user` to test a specific mapping — e.g. an image whose `USER` directive sets `1001`:
+
+```typescript
+await containers.doctor.imageRunsAsUser("myorg/worker:1.2.3", {
+  inImageUid: 1001,
+  inImageGid: 1001,
+});
+```
+
+Returns `{ ok: true, output: "ok\n" }` on success; `{ ok: false, output, error }` on failure. Available in signalk-container 1.8.0+.
+
+---
+
+## Host-UID Ownership
+
+Managed containers run by default under the **Signal K host user's UID/GID**, so files the container creates on bind-mounted host paths are owned by the same identity that runs Signal K. No recursive `chmod` sweeps, no "root-owned files in `~/.signalk`" surprises.
+
+The translator emits one of three flag forms, depending on the runtime:
+
+| Runtime                      | Flag form                                                   |
+| ---------------------------- | ----------------------------------------------------------- |
+| Rootless Podman              | `--userns=keep-id:uid=<inImageUid>,gid=<inImageGid>`        |
+| Docker (rootless or rootful) | `--user <hostUid>:<hostGid>`                                |
+| Rootful Podman               | `--user <hostUid>:<hostGid>`                                |
+| Windows                      | _(no flag)_ — Docker Desktop handles UID translation itself |
+
+Consumer plugins do not have to call anything special — the default mapping just works for the typical case (image runs as root, container writes files that Signal K then reads).
+
+### When to set `ContainerConfig.user`
+
+Only when the image declares a **non-root `USER`** directive. The `inImageUid` / `inImageGid` defaults are `0` (root); for an image with `USER 1001` you must tell the translator so the keep-id mapping picks the right starting point:
+
+```typescript
+await containers.ensureRunning("my-worker", {
+  image: "ghcr.io/myorg/worker", // image declares USER 1001
+  tag: "1.2.3",
+  user: { inImageUid: 1001, inImageGid: 1001 },
+  // ...
+});
+```
+
+Get this wrong and rootless Podman will translate the in-image UID to the wrong host UID; the container will look fine until it writes a file and you discover the bind-mounted host path is owned by some random subuid.
+
+### Opting out: `user: false`
+
+Pass `false` if the image must run as root (or manages its own user model entirely) and you don't need host-aligned ownership on bind mounts:
+
+```typescript
+await containers.ensureRunning("legacy-worker", {
+  image: "legacy/needs-root",
+  tag: "v1",
+  user: false, // no --user, no --userns
+  // ...
+});
+```
+
+The container then runs with whatever the image's `USER` directive specifies, with no flag emitted by signalk-container.
+
+### Verifying compatibility ahead of time
+
+Before adopting an unfamiliar image, run `containers.doctor.imageRunsAsUser(image, user?)` (see API reference above). It catches the common failure modes (`/tmp` not writable for the host UID, image entrypoint touches `~` and `$HOME` isn't writable for that UID) up-front, instead of leaving you to debug a container stuck in a restart loop with a cryptic error.
+
+### `ContainerJobConfig.user`
+
+`runJob` accepts the same `user` field with identical semantics. Both code paths share the flag translator, so a probe that passes for `ensureRunning` also passes for `runJob`.
+
+### Reading the resolved host identity
+
+`getRuntime()` returns `hostUser: { uid, gid } | null` (null on Windows). Most plugins don't need it — the translator handles the mapping internally — but it's available for diagnostics:
+
+```typescript
+const rt = containers.getRuntime();
+app.debug(`Signal K runs as ${rt?.hostUser?.uid}:${rt?.hostUser?.gid}`);
+```
 
 ---
 
@@ -948,6 +1039,11 @@ interface ContainerConfig {
   tag: string;
   digest?: string; // "sha256:<64-hex>" — pulls `image@digest`
   updateChannel?: string; // "tag:<pattern>" | "tag:latest" | "digest:explicit"
+  extraHosts?: Record<string, string>; // hostname → IP or "host-gateway"
+  // Host-UID mapping. Omit for the default (align with Signal K host user,
+  // assuming the image runs as root). Set { inImageUid, inImageGid } when
+  // the image declares a non-root USER. Set false to opt out entirely.
+  user?: { inImageUid?: number; inImageGid?: number } | false;
   // ...remaining fields (ports, volumes, env, networkMode, command, resources, ...)
 }
 interface ConsumerManifest {
@@ -981,7 +1077,11 @@ interface HistoryEntry {
   triggeredBy?: string;
 }
 interface ContainerManagerApi {
-  getRuntime: () => { runtime: string; version: string } | null;
+  getRuntime: () => {
+    runtime: string;
+    version: string;
+    hostUser?: { uid: number; gid: number } | null; // null on Windows
+  } | null;
   whenReady: () => Promise<void>;
   ensureRunning: (
     name: string,
@@ -1036,6 +1136,12 @@ interface ContainerManagerApi {
     get: (pluginId: string) => Promise<ConsumerManifest | null>;
     list: () => Promise<ConsumerManifest[]>;
     getContainerHistory: (containerName: string) => Promise<HistoryEntry[]>;
+  };
+  doctor: {
+    imageRunsAsUser: (
+      image: string,
+      user?: { inImageUid?: number; inImageGid?: number } | false,
+    ) => Promise<{ ok: boolean; output: string; error?: string }>;
   };
 }
 ```
@@ -1123,6 +1229,8 @@ if (isContainerized()) {
   // - host runtime must be exposed (docker.sock + binary)
   // - spawned containers are siblings, not nested
   // - host.containers.internal points to the actual host
+  //   (signalk-container 1.8.0+ adds this mapping for Docker too;
+  //    Podman has it natively)
   // - shared networks need explicit setup
 }
 ```
