@@ -20,7 +20,10 @@ Instead of each plugin implementing its own container orchestration, they delega
 - **SELinux support** -- `:Z` volume flags for Podman bind mounts on Fedora/RHEL; named volumes are handled correctly (`:Z` is not applied)
 - **Per-volume host-source policy** -- volumes accept `{ source, ifMissing: "skip" | "abort" }` for user-managed (USB drives, NFS) or deployment-required (TLS certs) mounts. Plugins subscribe to `onVolumeIssue` events for `'skipped'`, `'aborted'`, and `'recovered'` actions; signalk-container auto-recreates the container when a previously-missing source reappears. See the [developer guide](doc/plugin-developer-guide.md#optional-and-required-volumes).
 - **Container log streaming** -- click **Logs** on any managed-container card to open a live-streaming popup of the container's stdout+stderr (combined, the same shape `podman logs <name>` produces). Plugin authors can also wire `onContainerLog` in `ensureRunning` options to forward the same stream into their plugin's `app.debug` channel — visible in the Signal K server log when debug is enabled. Multiple subscribers share a single underlying tail process. See the [developer guide](doc/plugin-developer-guide.md#streaming-container-logs-into-your-plugins-debug-channel).
+- **Host-UID ownership alignment** -- managed containers run by default under the Signal K host user's UID/GID (via `--user host:host` on Docker/rootful Podman, `--userns=keep-id` on rootless Podman). Files created on bind mounts are owned by the same identity that runs Signal K, with no `chmod` sweeps. Override per container via `ContainerConfig.user` for images with a non-root `USER` directive, or `user: false` to opt out. See the [developer guide](doc/plugin-developer-guide.md#host-uid-ownership).
+- **Image compliance probes** -- `containers.doctor.imageRunsAsUser(image, user?)` runs the image under the live UID mapping and verifies it can write `/tmp` as the host caller. Surfaces UID-compatibility problems _before_ a container wedges in a restart loop. See the [developer guide](doc/plugin-developer-guide.md#containersdoctorimagerunsasuserimage-user-promiseimageproberesult).
 - **Podman image qualification** -- automatically prefixes `docker.io/` for short image names
+- **Docker `host.containers.internal` parity** -- signalk-container adds the `host-gateway` mapping for Docker automatically (Podman has it natively). User-supplied `extraHosts` overrides are respected.
 - **Cross-plugin API** -- other plugins use `globalThis.__signalk_containerManager`
 
 ## Config Panel
@@ -144,28 +147,30 @@ See [doc/plugin-developer-guide.md](doc/plugin-developer-guide.md) for the full 
 | `resolveSignalkDataMount()`             | Resolve the volume name or host path that backs `app.getDataDirPath()` in the current deployment; returns `null` if the runtime is not yet initialised        |
 | `resolveHostPath(absPath)`              | Translate an arbitrary absolute path into the `{ source, subPath }` pair the runtime needs to mount it; handles bare-metal, bind, and named-volume topologies |
 | `resolveContainerAddress(name, port)`   | Return the `host:port` string to reach `port` on a managed container from the SignalK process; call after `ensureRunning()` with `signalkAccessiblePorts` set |
+| `doctor.imageRunsAsUser(image, user?)`  | Probe whether `image` runs cleanly under the host-UID mapping signalk-container will emit (1.8.0+). Never throws — returns `{ ok, output, error? }`           |
 
 ## REST Endpoints
 
 All mounted at `/plugins/signalk-container/api/`:
 
-| Method | Path                                     | Description                                                                                                                   |
-| ------ | ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| GET    | `/runtime`                               | Detected runtime info                                                                                                         |
-| GET    | `/containers`                            | List managed containers                                                                                                       |
-| GET    | `/containers/:name/state`                | Container state                                                                                                               |
-| POST   | `/containers/:name/start`                | Start a stopped container                                                                                                     |
-| POST   | `/containers/:name/stop`                 | Stop a running container                                                                                                      |
-| POST   | `/containers/:name/remove`               | Stop and remove a container                                                                                                   |
-| GET    | `/containers/:name/logs?tail=N&since=ts` | Last N lines of the container's combined stdout+stderr log (one-shot). `tail` defaults 200, max 10000                         |
-| GET    | `/containers/:name/logs/stream`          | Server-Sent Events stream of live log lines. Closes when the container is removed or the client disconnects                   |
-| POST   | `/prune`                                 | Prune dangling images                                                                                                         |
-| GET    | `/updates`                               | List last update-check results                                                                                                |
-| GET    | `/updates/:pluginId`                     | Last update-check result for one plugin                                                                                       |
-| POST   | `/updates/:pluginId/check`               | Force a fresh update check (HTTP 200 even when offline)                                                                       |
-| GET    | `/containers/:name/resources`            | Effective resource limits + user override                                                                                     |
-| POST   | `/containers/:name/resources`            | Apply new resource limits (live or recreate). Body is a `ContainerResourceLimits` diff against the consumer plugin's default. |
-| DELETE | `/containers/:name/resources`            | Clear any user override and restore the consumer plugin's pristine default limits to the running container.                   |
+| Method | Path                                     | Description                                                                                                                                                                                   |
+| ------ | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/runtime`                               | Detected runtime info                                                                                                                                                                         |
+| GET    | `/containers`                            | List managed containers                                                                                                                                                                       |
+| GET    | `/containers/:name/state`                | Container state                                                                                                                                                                               |
+| POST   | `/containers/:name/start`                | Start a stopped container                                                                                                                                                                     |
+| POST   | `/containers/:name/stop`                 | Stop a running container                                                                                                                                                                      |
+| POST   | `/containers/:name/remove`               | Stop and remove a container                                                                                                                                                                   |
+| GET    | `/containers/:name/logs?tail=N&since=ts` | Last N lines of the container's combined stdout+stderr log (one-shot). `tail` defaults 200, max 10000                                                                                         |
+| GET    | `/containers/:name/logs/stream`          | Server-Sent Events stream of live log lines. Closes when the container is removed or the client disconnects                                                                                   |
+| POST   | `/prune`                                 | Prune dangling images                                                                                                                                                                         |
+| GET    | `/updates`                               | List last update-check results                                                                                                                                                                |
+| GET    | `/updates/:pluginId`                     | Last update-check result for one plugin                                                                                                                                                       |
+| POST   | `/updates/:pluginId/check`               | Force a fresh update check (HTTP 200 even when offline)                                                                                                                                       |
+| GET    | `/containers/:name/resources`            | Effective resource limits + user override                                                                                                                                                     |
+| POST   | `/containers/:name/resources`            | Apply new resource limits (live or recreate). Body is a `ContainerResourceLimits` diff against the consumer plugin's default.                                                                 |
+| DELETE | `/containers/:name/resources`            | Clear any user override and restore the consumer plugin's pristine default limits to the running container.                                                                                   |
+| POST   | `/doctor/image`                          | Probe whether an image runs cleanly under the live host-UID mapping. Body: `{ image, tag?, user? }`. Never 5xx for a failed probe — `{ ok: false, error }` is a successful response (1.8.0+). |
 
 ## Configuration
 
@@ -493,7 +498,9 @@ network namespace. This affects:
   (add it externally or via the same compose file)
 - `host.containers.internal` from spawned containers points to the host
   itself, not the Signal K container — use Signal K's container name
-  for direct communication
+  for direct communication. signalk-container 1.8.0+ adds this hostname
+  to Docker containers automatically (Podman already provides it); set
+  `ContainerConfig.extraHosts` to override it or to add other hostnames.
 
 ### Recommended setup
 

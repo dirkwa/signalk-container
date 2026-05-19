@@ -209,19 +209,17 @@ export interface ContainerConfig {
    * identity on the host — no recursive `chmod` sweeps needed.
    *
    *   - omitted (default): emit a uid mapping that aligns the in-container
-   *     process with the host caller. Under rootless Podman this means
-   *     `--userns=keep-id:uid=<inImageUid>,gid=<inImageGid>`; under Docker
-   *     and rootful Podman it means `--user <hostUid>:<hostGid>`. The
-   *     `inImageUid`/`inImageGid` default to 0 (i.e. the image's root)
+   *     process with the host caller. Rootless Podman uses user-namespace
+   *     remapping; Docker and rootful Podman use direct UID/GID translation.
+   *     The `inImageUid`/`inImageGid` default to 0 (i.e. the image's root)
    *     unless the consumer sets them to match the image's `USER`.
    *   - `{ inImageUid, inImageGid }`: same logic but with explicit
    *     in-image UID/GID. Use this when the image declares a non-root
-   *     `USER` (e.g. `USER 1001`) so the keep-id mapping picks the right
-   *     starting point for translation.
-   *   - `false`: opt out. No `--user` / `--userns` flag emitted. The
-   *     container runs with whatever the image's `USER` directive
-   *     specifies. Use when the image requires root or manages its own
-   *     user model.
+   *     `USER` (e.g. `USER 1001`) so the rootless-Podman remap picks the
+   *     right starting point for translation.
+   *   - `false`: opt out. No uid-mapping flag emitted. The container
+   *     runs with whatever the image's `USER` directive specifies.
+   *     Use when the image requires root or manages its own user model.
    *
    * Mirrors `ContainerJobConfig.user` so the same translator drives both
    * long-running managed containers and one-shot helper jobs.
@@ -344,13 +342,11 @@ export interface ContainerJobConfig {
    * files written into bind-mounted output dirs land owned by the
    * host signalk-server process, not by an unrelated container UID.
    *
-   * The auto path emits the right flag form per runtime:
-   *   - Docker (any flavour) and rootful Podman: `--user <hostUID>:<hostGID>`
-   *   - Rootless Podman:                          `--userns=keep-id:uid=<inImageUID>,gid=<inImageGID>`
-   *
-   * (The two forms achieve the same end via different mechanisms.
-   * `--userns=keep-id` is rootless-Podman-only — it errors out under
-   * rootful — which is why the runtime detection matters.)
+   * The auto path picks the right mechanism per runtime: Docker (any
+   * flavour) and rootful Podman use direct UID/GID translation; rootless
+   * Podman uses user-namespace remapping. The two forms achieve the same
+   * end via different mechanisms, which is why the runtime detection
+   * matters (the rootless-Podman flag errors out under rootful Podman).
    *
    * - Default (`undefined`): auto-align using `process.getuid()` /
    *   `process.getgid()`, assuming the image's USER directive is
@@ -801,9 +797,8 @@ export interface ContainerManagerApi {
 export interface DoctorApi {
   /**
    * Run `image:tag` under the same uid mapping `ensureRunning` would
-   * use (`--user host:host` on Docker / rootful Podman, `--userns=
-   * keep-id` on rootless Podman, none on opt-out) and verify that the
-   * container can `touch /tmp/x` as the host caller.
+   * use for this `user` value and verify that the container can
+   * `touch /tmp/x` as the host caller.
    *
    * Returns `{ ok: true }` when the probe exits 0 and prints `"ok"`.
    * Never throws — failure modes (non-zero exit, exec error, missing
