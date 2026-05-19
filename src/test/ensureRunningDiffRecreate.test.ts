@@ -423,7 +423,7 @@ describe("ensureRunning — stopped-state drift detection", () => {
   });
 });
 
-describe("ensureRunning — buildRunArgs ownership + UMASK", () => {
+describe("ensureRunning — buildRunArgs ownership", () => {
   // Capture the run-command args by routing exec at the missing-state path
   // (no inspect-drift logic involved): container is missing, so ensureRunning
   // falls straight through to pull (skipped by image inspect 'ok') + run -d.
@@ -492,22 +492,29 @@ describe("ensureRunning — buildRunArgs ownership + UMASK", () => {
     );
   });
 
-  it("injects -e UMASK=022 by default", async () => {
+  it("does NOT inject any UMASK env var (image controls umask, not us)", async () => {
+    // Empirical testing showed `UMASK=022` was effectively a no-op for
+    // most images: Node.js doesn't read it, neither do typical Linux
+    // binaries (kopia, rclone, etc.). Keeping the injection was
+    // misleading — plugin authors who saw `UMASK=022` in the env list
+    // would believe files would land at 644/755 when in reality the
+    // mode depends on the in-container process's actual umask (often
+    // 0022 by default on Linux, but determined by the image).
     const cap = captureRunArgsOnMissing({
       image: "questdb/questdb",
       tag: "9.0.0",
     });
     await cap.run();
     assert.ok(cap.runArgs);
-    const idx = cap.runArgs.indexOf("UMASK=022");
-    assert.ok(idx >= 0, `UMASK=022 missing from: ${cap.runArgs.join(" ")}`);
-    assert.equal(cap.runArgs[idx - 1], "-e");
-    // And only once — must not appear twice.
-    const occurrences = cap.runArgs.filter((a) => a === "UMASK=022").length;
-    assert.equal(occurrences, 1);
+    assert.ok(
+      !cap.runArgs.some((a) => a.startsWith("UMASK=")),
+      `no UMASK env should be auto-injected; got: ${cap.runArgs.join(" ")}`,
+    );
   });
 
-  it("does not overwrite a caller-provided UMASK in config.env", async () => {
+  it("passes caller-provided UMASK in config.env through verbatim", async () => {
+    // Plugin authors can still set UMASK in env if their image's
+    // entrypoint script honors it. We just don't pretend to.
     const cap = captureRunArgsOnMissing({
       image: "questdb/questdb",
       tag: "9.0.0",
@@ -515,9 +522,6 @@ describe("ensureRunning — buildRunArgs ownership + UMASK", () => {
     });
     await cap.run();
     assert.ok(cap.runArgs);
-    // The default UMASK=022 must NOT have been pushed.
-    assert.ok(!cap.runArgs.includes("UMASK=022"));
-    // The caller's value is preserved verbatim.
     assert.ok(cap.runArgs.includes("UMASK=0027"));
   });
 });
