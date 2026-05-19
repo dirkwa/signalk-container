@@ -1,9 +1,10 @@
-import { describe, it } from "node:test";
+import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import {
   diffContainerConfig,
   type LiveContainerConfig,
 } from "../containers.js";
+import { _setCurrentHostIdsForTesting } from "../runtime.js";
 import type { ContainerConfig, ContainerRuntimeInfo } from "../types.js";
 
 const podman: ContainerRuntimeInfo = {
@@ -18,6 +19,14 @@ const docker: ContainerRuntimeInfo = {
   isPodmanDockerShim: false,
 };
 
+// Pin the host UID/GID resolver so user-mapping flags are deterministic
+// across CI (often UID 0) and dev machines (often UID 1000).
+// `liveBase().user` is set to the same `1000:1000` string so the
+// existing no-drift tests stay no-drift; tests asserting `user` drift
+// override `user` explicitly.
+before(() => _setCurrentHostIdsForTesting(() => ({ uid: 1000, gid: 1000 })));
+after(() => _setCurrentHostIdsForTesting(null));
+
 function liveBase(
   overrides: Partial<LiveContainerConfig> = {},
 ): LiveContainerConfig {
@@ -31,6 +40,10 @@ function liveBase(
     binds: [],
     portBindings: new Map(),
     extraHosts: new Map(),
+    // Matches the pinned host-id resolver above; userMappingFlags
+    // produces `--user 1000:1000` by default on docker/rootful podman,
+    // so live state mirrors that to keep existing no-drift tests stable.
+    user: "1000:1000",
     ...overrides,
   } as LiveContainerConfig;
 }
@@ -483,6 +496,72 @@ describe("diffContainerConfig — extraHosts", () => {
     // the key on docker, so both sides stay empty and no drift fires.
     const { drifted } = diffContainerConfig(reqBase(), liveBase(), podman);
     assert.ok(!drifted.includes("extraHosts"));
+  });
+});
+
+describe("diffContainerConfig — ownership (user)", () => {
+  // The pinned resolver above maps host UID/GID to 1000:1000.
+
+  it("no drift on docker when live user matches the expected host:host mapping", () => {
+    const { drifted } = diffContainerConfig(
+      reqBase(),
+      liveBase({ user: "1000:1000" }),
+      docker,
+    );
+    assert.ok(!drifted.includes("user"));
+  });
+
+  it("flags drift when live user is empty but the request would emit --user", () => {
+    // Container was created before this version (no --user); next call
+    // would emit `--user 1000:1000`. Recreate so the new ownership
+    // semantics take effect.
+    const { drifted } = diffContainerConfig(
+      reqBase(),
+      liveBase({ user: "" }),
+      docker,
+    );
+    assert.ok(drifted.includes("user"));
+  });
+
+  it("flags drift when explicit ContainerConfig.user changes the UID:GID", () => {
+    // userMappingFlags emits hostUid:hostGid regardless of inImageUid/Gid
+    // for docker/rootful podman, so the resolved Config.User stays 1000:1000.
+    // Drift only fires when the live value diverges from that resolved form.
+    const { drifted } = diffContainerConfig(
+      reqBase({ user: { inImageUid: 0, inImageGid: 0 } }),
+      liveBase({ user: "0:0" }),
+      docker,
+    );
+    assert.ok(drifted.includes("user"));
+  });
+
+  it("no drift when user: false (opt-out) — no expected flag to compare against", () => {
+    // Opt-out means the translator emits nothing. Whatever the image's
+    // USER directive produced is what we expect; no signal here.
+    const { drifted } = diffContainerConfig(
+      reqBase({ user: false }),
+      liveBase({ user: "" }),
+      docker,
+    );
+    assert.ok(!drifted.includes("user"));
+  });
+
+  it("no drift on rootless podman (keep-id doesn't surface in Config.User)", () => {
+    // Rootless podman uses --userns=keep-id, not --user. Config.User
+    // stays empty even though ownership IS aligned. Drift detection
+    // intentionally suppresses the user field in this case.
+    const podmanRootless: ContainerRuntimeInfo = {
+      runtime: "podman",
+      version: "5.4.2",
+      isPodmanDockerShim: false,
+      isRootless: true,
+    };
+    const { drifted } = diffContainerConfig(
+      reqBase(),
+      liveBase({ user: "" }),
+      podmanRootless,
+    );
+    assert.ok(!drifted.includes("user"));
   });
 });
 

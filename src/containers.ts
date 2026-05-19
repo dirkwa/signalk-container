@@ -15,6 +15,7 @@ import {
   execRuntimeLong,
   isContainerized,
   spawnRuntimeStreaming,
+  userMappingFlags,
 } from "./runtime.js";
 import { resourceFlagsForRun } from "./resources.js";
 
@@ -840,6 +841,18 @@ export interface LiveContainerConfig {
   binds: Array<{ host: string; container: string }>;
   portBindings: Map<string, PortBinding[]>;
   extraHosts: Map<string, string>;
+  /**
+   * Effective `--user` spec from `.Config.User`. Empty string when the
+   * container was created without `--user` (image USER, typically root).
+   * Drift detection compares this against the expected mapping derived
+   * from the requested `ContainerConfig.user` and the runtime's host
+   * UID/GID.
+   *
+   * Note: `--userns=keep-id` doesn't surface in `.Config.User`; recreating
+   * on `user` drift handles the practical case (Podman picks up the
+   * keep-id flag on the new run).
+   */
+  user: string;
 }
 
 /**
@@ -874,12 +887,14 @@ export async function getLiveContainerConfig(
     SEP +
     "{{json .HostConfig.PortBindings}}" +
     SEP +
-    "{{json .HostConfig.ExtraHosts}}";
+    "{{json .HostConfig.ExtraHosts}}" +
+    SEP +
+    "{{.Config.User}}";
   const result = await exec(runtime, ["inspect", "--format", fmt, fullName]);
   if (result.exitCode !== 0) return null;
 
   const parts = result.stdout.split(SEP);
-  if (parts.length !== 7) return null;
+  if (parts.length !== 8) return null;
 
   const [
     rawImage,
@@ -889,6 +904,7 @@ export async function getLiveContainerConfig(
     rawEnv,
     rawPortBindings,
     rawExtraHosts,
+    rawUser,
   ] = parts;
 
   // Split image into image+tag (and optional digest). Config.Image can
@@ -992,6 +1008,8 @@ export async function getLiveContainerConfig(
     // leave empty
   }
 
+  const user = (rawUser ?? "").trim();
+
   return {
     image,
     tag,
@@ -1002,6 +1020,7 @@ export async function getLiveContainerConfig(
     binds,
     portBindings,
     extraHosts,
+    user,
   };
 }
 
@@ -1275,6 +1294,22 @@ export function diffContainerConfig(
   }
   if (extraHostsDrift) drifted.push("extraHosts");
 
+  // User/ownership drift. Compute the `--user uid:gid` form the
+  // translator would emit and compare to live `Config.User`. The
+  // `--userns=keep-id` flag (rootless Podman) doesn't surface in
+  // `Config.User`, so we only fire drift when the expected form is
+  // a `--user` flag — that is, opt-out, rootless-Podman, and
+  // unavailable-hostUser all suppress drift on this field by design.
+  const expectedUserFlags = userMappingFlags(runtime, requested.user);
+  const userIdx = expectedUserFlags.indexOf("--user");
+  const expectedUser =
+    userIdx >= 0 && userIdx + 1 < expectedUserFlags.length
+      ? expectedUserFlags[userIdx + 1]
+      : null;
+  if (expectedUser !== null && expectedUser !== live.user) {
+    drifted.push("user");
+  }
+
   return { drifted };
 }
 
@@ -1300,6 +1335,12 @@ function buildRunArgs(
     args.push("--network", config.networkMode);
   }
 
+  // UID/GID alignment so files created inside the container on bind-
+  // mounted host paths land owned by the host caller. Same decision
+  // matrix as `runJob` (see `userMappingFlags`). `config.user === false`
+  // opts out; the in-image UID/GID defaults to 0 when not declared.
+  args.push(...userMappingFlags(runtime, config.user));
+
   if (config.ports) {
     for (const [containerPort, hostBind] of Object.entries(config.ports)) {
       const port = containerPort.replace(/\/tcp$/, "");
@@ -1313,6 +1354,15 @@ function buildRunArgs(
     }
   }
 
+  // Default UMASK so files/dirs created inside the container have
+  // group/other read permissions (`644` / `755`). Caller's value in
+  // `config.env.UMASK` wins; merge, don't overwrite.
+  const userEnvHasUmask = !!(
+    config.env && Object.prototype.hasOwnProperty.call(config.env, "UMASK")
+  );
+  if (!userEnvHasUmask) {
+    args.push("-e", "UMASK=022");
+  }
   if (config.env) {
     for (const [key, value] of Object.entries(config.env)) {
       args.push("-e", `${key}=${value}`);

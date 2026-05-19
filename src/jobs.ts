@@ -6,103 +6,15 @@ import {
   CleanupOrphansResult,
   OrphanJobInfo,
 } from "./types.js";
-import { execRuntime, execRuntimeLong } from "./runtime.js";
+import { execRuntime, execRuntimeLong, userMappingFlags } from "./runtime.js";
 import { volumeArg } from "./containers.js";
 import { resourceFlagsForRun } from "./resources.js";
 
-/**
- * Resolve the host caller's UID/GID at flag-emit time.  Wrapped so
- * unit tests can stub it instead of being at the mercy of whoever
- * runs `npm test` (root in CI vs. 1000 on a dev box).  Windows has
- * no UID concept and `process.getuid` is undefined there — we fall
- * back to `null` and the flag emitter then skips the mapping.
- */
-function defaultCurrentHostIds(): { uid: number; gid: number } | null {
-  const getuid = (process as { getuid?: () => number }).getuid;
-  const getgid = (process as { getgid?: () => number }).getgid;
-  if (typeof getuid !== "function" || typeof getgid !== "function") {
-    return null;
-  }
-  return { uid: getuid(), gid: getgid() };
-}
-
-let currentHostIds: () => { uid: number; gid: number } | null =
-  defaultCurrentHostIds;
-
-/**
- * Test-only override for the host UID/GID resolver.  Stubs let unit
- * tests assert flag emission against deterministic UIDs without
- * needing a particular runtime user.
- */
-export function _setCurrentHostIdsForTesting(
-  fn: (() => { uid: number; gid: number } | null) | null,
-): void {
-  currentHostIds = fn ?? defaultCurrentHostIds;
-}
-
-/**
- * Build the UID-mapping flags `runJob` should pass to the runtime
- * for one container.  Pulled out of the main `runJob` flow so the
- * decision matrix is unit-testable without spinning up a real
- * runtime.
- *
- * The decision matrix:
- *
- *   - `config.user === false` → no flag.  Caller opted out (debugging,
- *     or a job that doesn't write to a host-owned bind mount).
- *   - host UID resolver returns null (Windows) → no flag.  Docker
- *     Desktop / Windows handles UID translation internally.
- *   - rootless Podman → `--userns=keep-id:uid=<inImageUID>,gid=<inImageGID>`.
- *     This rewrites the in-image UID back to the host caller via the
- *     user-namespace mapping; rootful Podman would error on the same
- *     flag.
- *   - everything else (Docker, rootful Podman) →
- *     `--user <hostUID>:<hostGID>`.  Sets the in-container process
- *     UID directly to the host caller's UID.
- *
- * `inImageUID/GID` defaults to 0 when the caller doesn't pass
- * `config.user` — matching the historical behaviour of the helper
- * images shipped before this field existed (osgeo/gdal, the legacy
- * tippecanoe image, …).  Images with a non-root USER directive (the
- * new `charts-toolbox` image's `USER toolbox` at UID 1001) need the
- * caller to declare the right value.
- */
-export function userMappingFlags(
-  runtime: ContainerRuntimeInfo,
-  user: ContainerJobConfig["user"],
-  resolveHost: () => { uid: number; gid: number } | null = currentHostIds,
-): string[] {
-  if (user === false) {
-    return [];
-  }
-  const host = resolveHost();
-  if (host === null) {
-    return [];
-  }
-  const inImageUid = user?.inImageUid ?? 0;
-  const inImageGid = user?.inImageGid ?? 0;
-  // Reject negatives, NaN, and non-integers.  The TS shape says
-  // `number` but JS callers can still pass garbage — emitting
-  // `--userns=keep-id:uid=NaN,gid=-1` would let podman/docker
-  // produce an obscure runtime error far from the call site.
-  // Throw here so the consumer plugin's promise rejects with a
-  // clear message before the container even starts.
-  assertNonNegativeInt("inImageUid", inImageUid);
-  assertNonNegativeInt("inImageGid", inImageGid);
-
-  if (runtime.runtime === "podman" && runtime.isRootless === true) {
-    return ["--userns", `keep-id:uid=${inImageUid},gid=${inImageGid}`];
-  }
-  return ["--user", `${host.uid}:${host.gid}`];
-}
-
-function assertNonNegativeInt(field: string, value: number): void {
-  if (!Number.isInteger(value) || value < 0) {
-    throw new Error(
-      `ContainerJobConfig.user.${field} must be a non-negative integer, got ${String(value)}`,
-    );
-  }
-}
+// `userMappingFlags` and the host-id test setter (`_setCurrentHostIdsForTesting`)
+// live in `runtime.ts` so both `jobs.ts` (one-shot helpers) and
+// `containers.ts` (long-running managed containers via `buildRunArgs`)
+// can share the same decision matrix without an import cycle.
+export { userMappingFlags, _setCurrentHostIdsForTesting } from "./runtime.js";
 
 export async function runJob(
   runtime: ContainerRuntimeInfo,
@@ -206,7 +118,7 @@ export async function runJob(
     // dirs land owned by the host caller, not by an unrelated
     // container UID.  See `userMappingFlags` for the per-runtime
     // flag-form decision matrix.
-    args.push(...userMappingFlags(runtime, config.user, currentHostIds));
+    args.push(...userMappingFlags(runtime, config.user));
 
     args.push(config.image, ...config.command);
 

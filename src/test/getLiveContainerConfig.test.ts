@@ -33,6 +33,7 @@ function buildStdout(parts: {
   env: string;
   portBindings: string;
   extraHosts?: string;
+  user?: string;
 }): string {
   return [
     parts.image,
@@ -42,6 +43,7 @@ function buildStdout(parts: {
     parts.env,
     parts.portBindings,
     parts.extraHosts ?? "null",
+    parts.user ?? "",
   ].join(SEP);
 }
 
@@ -385,5 +387,44 @@ describe("getLiveContainerConfig", () => {
     assert.ok(result);
     assert.equal(result.extraHosts.size, 1);
     assert.equal(result.extraHosts.get("good.host"), "10.0.0.1");
+  });
+
+  it("parses Config.User into the live user field (docker/rootful podman)", async () => {
+    const exec = fakeExec({
+      stdout: buildStdout({
+        image: "questdb/questdb:9.0.0",
+        cmd: "null",
+        networkMode: "bridge",
+        binds: "null",
+        env: "null",
+        portBindings: "null",
+        user: "1000:1000",
+      }),
+      exitCode: 0,
+    });
+    const result = await getLiveContainerConfig(dummyRuntime, "x", exec);
+    assert.ok(result);
+    assert.equal(result.user, "1000:1000");
+  });
+
+  it("returns empty user when the container was created without --user", async () => {
+    // Containers created before the ownership wiring (or with `user:false`)
+    // have an empty Config.User. The diff layer is responsible for
+    // deciding whether that's drift; the parser just reports the raw value.
+    const exec = fakeExec({
+      stdout: buildStdout({
+        image: "questdb/questdb:9.0.0",
+        cmd: "null",
+        networkMode: "bridge",
+        binds: "null",
+        env: "null",
+        portBindings: "null",
+        user: "",
+      }),
+      exitCode: 0,
+    });
+    const result = await getLiveContainerConfig(dummyRuntime, "x", exec);
+    assert.ok(result);
+    assert.equal(result.user, "");
   });
 });
