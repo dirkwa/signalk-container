@@ -104,7 +104,7 @@ export interface ContainerConfig {
    *   - Pull fails as offline (`ENOTFOUND`, `ENETUNREACH`, …): log debug,
    *     skip the check, leave the container running. Boats at sea are the
    *     primary motivation for this default.
-   *   - Pull fails for any other reason: log warning, skip the check.
+   *   - Pull fails for any other reason: log debug, skip the check.
    *     Update probing must never block plugin startup.
    *   - `tag` is `semver` or `unknown`, or `config.digest` is set: no-op.
    *
