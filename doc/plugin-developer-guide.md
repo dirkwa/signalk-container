@@ -593,16 +593,16 @@ Returns `{ ok: true, output: "ok\n" }` on success; `{ ok: false, output, error }
 
 Managed containers run by default under the **Signal K host user's UID/GID**, so files the container creates on bind-mounted host paths are owned by the same identity that runs Signal K. No recursive `chmod` sweeps, no "root-owned files in `~/.signalk`" surprises.
 
-The translator emits one of three flag forms, depending on the runtime:
+How the translator achieves that varies by runtime:
 
-| Runtime                      | Flag form                                                   |
-| ---------------------------- | ----------------------------------------------------------- |
-| Rootless Podman              | `--userns=keep-id:uid=<inImageUid>,gid=<inImageGid>`        |
-| Docker (rootless or rootful) | `--user <hostUid>:<hostGid>`                                |
-| Rootful Podman               | `--user <hostUid>:<hostGid>`                                |
-| Windows                      | _(no flag)_ — Docker Desktop handles UID translation itself |
+| Runtime                      | Mechanism                                                                              |
+| ---------------------------- | -------------------------------------------------------------------------------------- |
+| Rootless Podman              | User-namespace remapping that translates the in-image UID/GID back to the host caller. |
+| Docker (rootless or rootful) | Direct UID/GID translation — the in-container process runs as the host caller's IDs.   |
+| Rootful Podman               | Same direct UID/GID translation as Docker.                                             |
+| Windows                      | No translation — Docker Desktop handles UID/GID mapping internally.                    |
 
-Consumer plugins do not have to call anything special — the default mapping just works for the typical case (image runs as root, container writes files that Signal K then reads).
+Consumer plugins do not have to call anything special — the default mapping just works for the typical case (image runs as root, container writes files that Signal K then reads). The exact CLI flags emitted for each runtime are an implementation detail of `userMappingFlags` in `src/runtime.ts`; consult it (and the matching tests) if you need to see the literal form for a given variant.
 
 ### When to set `ContainerConfig.user`
 
