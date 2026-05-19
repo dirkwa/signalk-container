@@ -322,6 +322,8 @@ Volumes accept either a bare host-path string (auto-create — runtime creates t
 
 `options` also accepts `onContainerLog` to stream the container's stdout/stderr into your plugin's debug channel — see [Streaming container logs](#streaming-container-logs-into-your-plugins-debug-channel).
 
+For opt-in digest pinning, pass `digest` (`sha256:<64-hex>`) on the config and `pluginId` / `pluginVersion` on the options — see [Image Pinning Manifest](#image-pinning-manifest).
+
 ```typescript
 await containers.ensureRunning("my-db", {
   image: "postgres",
@@ -533,6 +535,74 @@ The input `limits` is treated as a diff: fields you don't include are inherited 
 If the recreate path is taken and fails, signalk-container attempts rollback to the previous working config before throwing. If rollback also fails, the plugin enters an error state and the error message names both failures clearly.
 
 Throws if `name` has no cached `ContainerConfig` — i.e. if the consumer plugin hasn't called `ensureRunning` yet during this Signal K session. That's normally impossible during normal operation since consumer plugins always call `ensureRunning` at startup.
+
+### `containers.manifest.get(pluginId): Promise<ConsumerManifest | null>`
+
+Returns the persisted manifest for a consumer plugin, or `null` if no manifest exists yet. The manifest records the declared/resolved digests, the resolved-from-tag fallback, the update channel, and a bounded history of digest changes per container. Writes happen only as a side-effect of successful `ensureRunning` calls — this getter is read-only.
+
+```typescript
+const manifest = await containers.manifest.get("signalk-questdb");
+console.log(manifest?.containers["questdb"]?.resolvedDigest);
+```
+
+### `containers.manifest.list(): Promise<ConsumerManifest[]>`
+
+Returns every persisted manifest. Used by the admin UI to render the per-plugin pinning view.
+
+### `containers.manifest.getContainerHistory(containerName): Promise<HistoryEntry[]>`
+
+Returns the bounded history (max 20 entries) of digest changes for a specific container, regardless of which plugin owns it. Useful for forensics on "why does this work on boat A but not boat B" — the history records `from`/`to` digests, ISO timestamps, and the triggering plugin version.
+
+```typescript
+const history = await containers.manifest.getContainerHistory("questdb");
+// → [{ ts, from, to, reason: "plugin-install" | "plugin-update" | ..., triggeredBy }]
+```
+
+Returns `[]` if the container has no manifest entry (e.g. it predates the manifest layer or `ensureRunning` has never been called for it in this Signal K session).
+
+---
+
+## Image Pinning Manifest
+
+Consumer plugins can opt in to **digest pinning** to declare "this plugin has been tested against this exact image digest." When set, signalk-container pulls `image@digest` instead of `image:tag` and records the resolved manifest digest of the running container in a per-plugin lock-file.
+
+```typescript
+await containers.ensureRunning(
+  "questdb",
+  {
+    image: "questdb/questdb",
+    tag: "9.0.0",
+    digest:
+      "sha256:1a2b3c4d5e6f1a2b3c4d5e6f1a2b3c4d5e6f1a2b3c4d5e6f1a2b3c4d5e6f1a2b",
+    updateChannel: "digest:explicit", // or "tag:7.x", "tag:latest"
+  },
+  {
+    pluginId: "signalk-questdb", // npm package name
+    pluginVersion: "1.0.0", // your plugin's version
+  },
+);
+```
+
+All four fields are optional. The behavior matrix:
+
+| Plugin passes         | Runtime                                                 | Manifest                                                                                |
+| --------------------- | ------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| nothing new           | Pulls `image:tag` as today                              | Recorded under synthetic `container:<name>` id with the live RepoDigest                 |
+| only `digest`         | Pulls `image@digest`                                    | `declaredDigest` set; first call recreates the container because `Config.Image` changes |
+| only `pluginId`       | Pulls `image:tag`                                       | Recorded under the real plugin id                                                       |
+| `digest` + `pluginId` | Pulls `image@digest`, recorded under the real plugin id | Full pinning                                                                            |
+
+`pluginId` is validated at write time: it must be a valid npm package name (`signalk-questdb`), a scoped form (`@signalk/foo`), or — if absent — the synthetic fallback `container:<name>` that signalk-container uses internally.
+
+Manifests are persisted under `${dataDir}/signalk-container-manifests/`. The canonical pluginId always lives inside the JSON. Always read via `containers.manifest.get(pluginId)` rather than touching the files directly.
+
+`updateChannel` is recorded on the manifest and accepts these shapes:
+
+- `"tag:<pattern>"` — semver-aware within a tag pattern, e.g. `"tag:7.x"`.
+- `"tag:latest"` / `"tag:main"` — floating-tag digest-drift detection.
+- `"digest:explicit"` — updates flow only via plugin releases.
+
+If omitted, signalk-container defaults to `"tag:<tag>"`.
 
 ---
 
@@ -870,6 +940,45 @@ interface EnsureRunningOptions {
   onVolumeIssue?: (event: VolumeIssue) => void | Promise<void>;
   onContainerLog?: (line: string) => void | Promise<void>;
   onContainerLogStartTail?: number;
+  pluginId?: string; // npm package name; opt-in for digest pinning
+  pluginVersion?: string;
+}
+interface ContainerConfig {
+  image: string;
+  tag: string;
+  digest?: string; // "sha256:<64-hex>" — pulls `image@digest`
+  updateChannel?: string; // "tag:<pattern>" | "tag:latest" | "digest:explicit"
+  // ...remaining fields (ports, volumes, env, networkMode, command, resources, ...)
+}
+interface ConsumerManifest {
+  schemaVersion: 1;
+  pluginId: string;
+  pluginVersion: string;
+  registeredAt: string;
+  containers: Record<
+    string,
+    {
+      image: string;
+      declaredTag: string;
+      declaredDigest: string | null;
+      resolvedDigest: string;
+      resolvedAt: string;
+      updateChannel: string;
+      history: HistoryEntry[];
+    }
+  >;
+}
+interface HistoryEntry {
+  ts: string;
+  from: string | null;
+  to: string;
+  reason:
+    | "plugin-install"
+    | "plugin-update"
+    | "user-pull"
+    | "auto-update"
+    | "manual-check";
+  triggeredBy?: string;
 }
 interface ContainerManagerApi {
   getRuntime: () => { runtime: string; version: string } | null;
@@ -922,6 +1031,11 @@ interface ContainerManagerApi {
       githubReleases: (repo: string, options?: unknown) => unknown;
       dockerHubTags: (image: string, options?: unknown) => unknown;
     };
+  };
+  manifest: {
+    get: (pluginId: string) => Promise<ConsumerManifest | null>;
+    list: () => Promise<ConsumerManifest[]>;
+    getContainerHistory: (containerName: string) => Promise<HistoryEntry[]>;
   };
 }
 ```

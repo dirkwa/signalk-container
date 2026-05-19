@@ -5,6 +5,7 @@ import type {
   ContainerManagerApi,
   ContainerRuntimeInfo,
   ContainerState,
+  EnsureRunningOptions,
 } from "../types.js";
 
 describe("type contracts", () => {
@@ -70,7 +71,26 @@ describe("type contracts", () => {
       "listContainers",
       "resolveSignalkDataMount",
       "resolveHostPath",
+      "manifest",
     ];
-    assert.equal(methods.length, 12);
+    assert.equal(methods.length, 13);
+  });
+
+  it("ContainerConfig accepts digest and updateChannel", () => {
+    const config: ContainerConfig = {
+      image: "questdb/questdb",
+      tag: "9.0.0",
+      digest: "sha256:" + "a".repeat(64),
+      updateChannel: "digest:explicit",
+    };
+    assert.equal(config.updateChannel, "digest:explicit");
+  });
+
+  it("EnsureRunningOptions accepts pluginId and pluginVersion", () => {
+    const opts: EnsureRunningOptions = {
+      pluginId: "signalk-questdb",
+      pluginVersion: "1.0.0",
+    };
+    assert.equal(opts.pluginId, "signalk-questdb");
   });
 });

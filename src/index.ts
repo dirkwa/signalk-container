@@ -2,6 +2,7 @@ import { IRouter } from "express";
 import path from "node:path";
 import {
   CleanupOrphansResult,
+  ConsumerManifest,
   ContainerConfig,
   ContainerInfo,
   ContainerJobConfig,
@@ -11,8 +12,11 @@ import {
   ContainerRuntimeInfo,
   ContainerState,
   EnsureRunningOptions,
+  HistoryEntry,
+  ManifestApi,
   PluginConfig,
   PruneResult,
+  ResolveResult,
   UpdateResourcesResult,
   VolumeIssue,
 } from "./types.js";
@@ -37,7 +41,9 @@ import {
   getContainerLogs,
   getContainerState,
   getImageDigest,
+  getLiveContainerDigest,
   getLiveResources,
+  getRepoDigest,
   imageExists,
   listContainers,
   findSelfContainerId,
@@ -63,6 +69,8 @@ import { runJob, cleanupOrphanedJobs } from "./jobs.js";
 import { UpdateService } from "./updates/service.js";
 import { FileUpdateCache } from "./updates/cache.js";
 import { registerUpdateRoutes } from "./updates/routes.js";
+import { DIGEST_RE, resolveImage } from "./manifest/resolver.js";
+import { ManifestStore } from "./manifest/store.js";
 
 interface App {
   debug: (...args: unknown[]) => void;
@@ -108,6 +116,7 @@ export default (app: App) => {
   let pruneTimer: NodeJS.Timeout | null = null;
   const healthTimers = new Map<string, NodeJS.Timeout>();
   let updateService: UpdateService | null = null;
+  let manifestStore: ManifestStore | null = null;
 
   // Re-created on every start() so each plugin-lifecycle gets a fresh
   // promise — without this, whenReady() would resolve immediately on
@@ -234,7 +243,7 @@ export default (app: App) => {
     const configPath = app.config?.configPath;
     if (!configPath) {
       throw new Error(
-        "signalkConfigRootMount requires app.config.configPath, which is unavailable",
+        "signalkConfigRootMount requires the Signal K server configPath, which is unavailable",
       );
     }
     const inflight = resolveSignalkDataSource(
@@ -463,6 +472,15 @@ export default (app: App) => {
       options?: EnsureRunningOptions,
     ) {
       if (!runtimeInfo) throw new Error("No container runtime available");
+
+      // Fail fast on a malformed digest before any pull or magic-mount
+      // resolution. resolveImage() validates again, but doing it here
+      // produces a cleaner stack for the consumer plugin.
+      if (config.digest !== undefined && !DIGEST_RE.test(config.digest)) {
+        throw new Error(
+          `Invalid digest for ${config.image}: expected sha256:<64-hex>, got ${config.digest}`,
+        );
+      }
 
       // Resolve signalkDataMount → inject into volumes before anything else.
       // We strip the field from the config so containers.ts / buildRunArgs
@@ -795,6 +813,24 @@ export default (app: App) => {
       // but we store the variable verbatim for clarity.
       lastVolumeIssues.set(name, { skipped, aborted });
 
+      // Resolve the image to a concrete pull spec + digest BEFORE the
+      // inner ensureRunning. The resolver does the pull (if missing)
+      // and computes the resolvedDigest that flows into the manifest
+      // record after success. The inner call's own imageExists check
+      // is cheap and short-circuits the duplicate pull.
+      const resolved = await resolveImage(
+        runtimeInfo,
+        effectiveConfig,
+        {
+          qualifyImage: qualifyImageForRuntime,
+          imageExists,
+          pullImage,
+          getRepoDigest,
+          getImageDigest,
+        },
+        (msg) => app.debug(`resolveImage(${name}): ${msg}`),
+      );
+
       try {
         await ensureRunning(
           runtimeInfo,
@@ -871,6 +907,62 @@ export default (app: App) => {
             }`,
           );
         }
+      }
+
+      // Record what's actually running in the manifest. Read the
+      // live container's digest (via its immutable image-id) rather
+      // than the pre-ensureRunning resolver output: if `ensureRunning`
+      // took the no-drift path while the local `image:tag` was
+      // refreshed out-of-band, the resolver's digest reflects the
+      // local tag state, not the running container. Falling back to
+      // the resolver's digest only happens when the inspect race
+      // means we can't read the live id.
+      //
+      // Fire-and-forget: a failed write is logged but does not fail
+      // the ensureRunning call. recordResolution() decides the
+      // effective reason based on the actual transition
+      // (plugin-install vs plugin-update).
+      if (manifestStore) {
+        let liveResolved: ResolveResult = resolved;
+        try {
+          const liveDigest = await getLiveContainerDigest(runtimeInfo, name);
+          if (liveDigest) {
+            liveResolved = {
+              pullSpec: resolved.pullSpec,
+              resolvedDigest: liveDigest,
+              source: resolved.source,
+            };
+          }
+        } catch (err) {
+          // Manifest recording is best-effort — a transient inspect
+          // failure must not reject the ensureRunning call. Fall back
+          // to the pre-resolve digest.
+          app.error(
+            `ensureRunning(${name}): live digest probe failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+        manifestStore
+          .recordResolution({
+            pluginId: options?.pluginId ?? `container:${name}`,
+            pluginVersion: options?.pluginVersion ?? "unknown",
+            containerName: name,
+            config: {
+              image: effectiveConfig.image,
+              tag: effectiveConfig.tag,
+              digest: effectiveConfig.digest,
+              updateChannel: effectiveConfig.updateChannel,
+            },
+            resolved: liveResolved,
+            // Omit `reason` so the store auto-detects: first record is
+            // `plugin-install`, subsequent digest changes are
+            // `plugin-update`. PR-C admin paths (user-pull, manual-check)
+            // will pass their own reason explicitly.
+          })
+          .catch((err) =>
+            app.error(
+              `ensureRunning(${name}): manifest record failed: ${err instanceof Error ? err.message : err}`,
+            ),
+          );
       }
 
       // Bug D: if ensureRunning was a no-op (container was already
@@ -1354,6 +1446,25 @@ export default (app: App) => {
     get updates() {
       return updateService ?? stubUpdateService;
     },
+
+    // `manifest` is wired up in start() once the data dir is known.
+    // Until then, reads return null/[] via the stub below; the stub
+    // never throws so consumer plugins can query unconditionally.
+    get manifest(): ManifestApi {
+      return manifestStore ?? stubManifest;
+    },
+  };
+
+  const stubManifest: ManifestApi = {
+    async get(): Promise<ConsumerManifest | null> {
+      return null;
+    },
+    async list(): Promise<ConsumerManifest[]> {
+      return [];
+    },
+    async getContainerHistory(): Promise<HistoryEntry[]> {
+      return [];
+    },
   };
 
   /**
@@ -1549,6 +1660,11 @@ export default (app: App) => {
         backgroundChecks: config.backgroundUpdateChecks !== false,
       });
 
+      manifestStore = new ManifestStore(
+        path.join(dataDir, "signalk-container-manifests"),
+        (msg) => app.debug(msg),
+      );
+
       // Expose API on global so other plugins can find it.
       // Each plugin gets a shallow copy of app (_.assign({}, app)),
       // so setting on app doesn't propagate. Global is the shared bus.
@@ -1623,6 +1739,7 @@ export default (app: App) => {
         updateService.stop();
         updateService = null;
       }
+      manifestStore = null;
       lastConfigs.clear();
       lastVolumeIssues.clear();
       // Force-close every broker; SSE clients still attached receive

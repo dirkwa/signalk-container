@@ -1,3 +1,9 @@
+import type {
+  ConsumerManifest,
+  ContainerManifestEntry,
+  HistoryEntry,
+} from "./manifest/schema.js";
+
 export type RuntimeName = "podman" | "docker";
 export type RuntimePreference = "auto" | RuntimeName;
 
@@ -51,6 +57,25 @@ export type ContainerState = "running" | "stopped" | "missing" | "no-runtime";
 export interface ContainerConfig {
   image: string;
   tag: string;
+  /**
+   * Optional manifest digest (`sha256:<64-hex>`). When set,
+   * signalk-container pulls this exact image (`image@digest`) instead
+   * of `image:tag`. The tag is retained for display and as the channel
+   * default. Invalid digests throw synchronously before any runtime
+   * call.
+   */
+  digest?: string;
+  /**
+   * Update-detection channel. Read by the update service to decide
+   * how to reason about "new versions":
+   *   - `"tag:<pattern>"` — semver-aware within a tag pattern, e.g. `"tag:7.x"`
+   *   - `"tag:latest"` / `"tag:main"` — floating-tag digest-drift detection
+   *   - `"digest:explicit"` — never auto-check; updates flow only via plugin releases
+   *
+   * If absent, signalk-container defaults to `"tag:<tag>"` so existing
+   * plugins keep today's behavior verbatim.
+   */
+  updateChannel?: string;
   ports?: Record<string, string>;
   /**
    * Explicit volume mounts. Keys are container paths, values are either:
@@ -509,6 +534,28 @@ export interface EnsureRunningOptions extends HealthCheckOptions {
    * Has no effect when `onContainerLog` is not set.
    */
   onContainerLogStartTail?: number;
+  /**
+   * Owning consumer plugin's `id` from its `package.json`. When set,
+   * the manifest at `${dataDir}/signalk-container-manifests/<pluginId>.json`
+   * records this container against the plugin so the UI and REST API
+   * can surface "which plugin pinned this".
+   *
+   * Must be a valid npm package name (e.g. `signalk-questdb`) or a
+   * scoped form (e.g. `@signalk/foo`). Anything else is rejected at
+   * the manifest-write boundary with a clear error.
+   *
+   * Optional for backward compatibility — when absent, the manifest is
+   * keyed under the synthetic id `container:<name>`, so the
+   * per-container history view continues to work. Strongly recommended
+   * for any plugin adopting digest pinning.
+   */
+  pluginId?: string;
+  /**
+   * Owning consumer plugin's `version` from its `package.json`.
+   * Recorded as `triggeredBy` in the manifest's history entries.
+   * Optional; defaults to `"unknown"` if omitted.
+   */
+  pluginVersion?: string;
 }
 
 export interface ContainerManagerApi {
@@ -674,6 +721,12 @@ export interface ContainerManagerApi {
     networkName: string,
   ): Promise<void>;
   /**
+   * Read-only access to per-plugin image-pinning manifests. Manifest
+   * entries are written automatically on successful `ensureRunning`
+   * calls; consumers query here to surface pinning state or history.
+   */
+  manifest: ManifestApi;
+  /**
    * Centralized container-image update detection. Consumer plugins
    * register their containers and the service handles version checking,
    * scheduling, caching, and offline-tolerance.
@@ -706,3 +759,59 @@ export interface UpdateResourcesResult {
   method: "live" | "recreated";
   warnings?: string[];
 }
+
+/**
+ * Outcome of resolving a `ContainerConfig` to a concrete pull
+ * reference. The wrapper uses `pullSpec` to feed the runtime and
+ * `resolvedDigest` to record into the consumer manifest.
+ */
+export interface ResolveResult {
+  /** Exact reference handed to `pullImage` / `imageExists`. */
+  pullSpec: string;
+  /**
+   * Manifest digest of the image now satisfying the request, in the
+   * form `sha256:<hex>`. For locally-built images that have no
+   * RepoDigests, takes the synthetic form `local:<image-id>`.
+   */
+  resolvedDigest: string;
+  /** Where the digest came from. */
+  source: "declared" | "resolved-from-tag";
+}
+
+/**
+ * Read-only access to per-plugin image-pinning manifests exposed to
+ * consumer plugins via `manager.manifest.*`. Writes happen only as a
+ * side effect of successful `ensureRunning` calls.
+ */
+export interface ManifestApi {
+  /**
+   * Return the manifest for a specific consumer plugin, or `null` if
+   * no manifest exists yet. Read-only — writes happen automatically
+   * after successful `ensureRunning` calls.
+   *
+   * Throws if `pluginId` is not an npm package name, a `@scope/name`
+   * scoped form, or the synthetic `container:<name>` fallback.
+   */
+  get(pluginId: string): Promise<ConsumerManifest | null>;
+  /**
+   * Return every persisted manifest in the data directory. Order is
+   * unspecified.
+   */
+  list(): Promise<ConsumerManifest[]>;
+  /**
+   * Return the bounded history (max 20 entries) of digest changes
+   * for a specific container, regardless of which plugin owns it.
+   *
+   * Throws an "Ambiguous container history" error if more than one
+   * manifest contains an entry for the same `containerName` — the
+   * caller should disambiguate via `manifest.get(pluginId)`.
+   */
+  getContainerHistory(containerName: string): Promise<HistoryEntry[]>;
+}
+
+// Persistent manifest types are defined as TypeBox schemas in
+// src/manifest/schema.ts (single source of truth for the on-disk
+// shape); re-exported here so consumer plugins can import every
+// manifest type from "signalk-container/types". The import lives at
+// the top of the file with the other type imports.
+export type { ConsumerManifest, ContainerManifestEntry, HistoryEntry };

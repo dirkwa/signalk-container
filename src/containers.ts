@@ -381,6 +381,14 @@ export async function getContainerLogs(
   return [...toLines(result.stdout), ...toLines(result.stderr)];
 }
 
+/**
+ * Bare image id: 64 hex chars, optionally with the `sha256:` prefix
+ * podman/docker print for `Config.Image`. Such ids must never be
+ * qualified with a registry — they're addressable by content, not by
+ * name.
+ */
+const BARE_IMAGE_ID = /^(?:sha256:)?[a-f0-9]{64}$/;
+
 export function qualifyImage(
   image: string,
   runtime: ContainerRuntimeInfo,
@@ -388,12 +396,20 @@ export function qualifyImage(
   // Podman requires fully qualified image names when unqualified-search
   // registries are not configured. Prefix docker.io/ if missing.
   if (runtime.runtime === "podman") {
-    const parts = image.split("/");
+    // Bare image ids (e.g. `sha256:abc…` or `abc…`) are content-addressed
+    // and never need a registry prefix; pass through.
+    if (BARE_IMAGE_ID.test(image)) return image;
+    // Strip any `@sha256:...` digest before splitting — for an
+    // unqualified ref like `alpine@sha256:abc...` the digest's `:`
+    // would otherwise make us think the first segment is `host:port`.
+    const refWithoutDigest = image.split("@", 1)[0];
+    const parts = refWithoutDigest.split("/");
     // Treat first component as a registry only if it has a dot, a colon
-    // (port), or is exactly "localhost". Otherwise, prefix docker.io/.
+    // (port) appearing in a multi-segment ref, or is exactly "localhost".
+    // Otherwise, prefix docker.io/.
     const looksLikeRegistry =
       parts[0].includes(".") ||
-      parts[0].includes(":") ||
+      (parts.length > 1 && parts[0].includes(":")) ||
       parts[0] === "localhost";
     if (parts.length <= 2 && !looksLikeRegistry) {
       return `docker.io/${image}`;
@@ -423,10 +439,11 @@ export async function imageExists(
 export async function getImageDigest(
   runtime: ContainerRuntimeInfo,
   imageOrContainer: string,
+  exec: ExecFn = execRuntime,
 ): Promise<string | null> {
   // Try image inspect first; fall back to container inspect for names.
   const qualified = qualifyImage(imageOrContainer, runtime);
-  const imgResult = await execRuntime(runtime, [
+  const imgResult = await exec(runtime, [
     "image",
     "inspect",
     "--format",
@@ -438,7 +455,7 @@ export async function getImageDigest(
   }
 
   // Maybe it's a container name; .Image on a container returns the image ID.
-  const ctrResult = await execRuntime(runtime, [
+  const ctrResult = await exec(runtime, [
     "inspect",
     "--format",
     "{{.Image}}",
@@ -449,6 +466,76 @@ export async function getImageDigest(
   }
 
   return null;
+}
+
+/**
+ * Return the first RepoDigest for an image reference, as
+ * `sha256:<hex>` (without the `image@` prefix). This is the
+ * *manifest* digest — what consumer plugins and CI tools speak —
+ * distinct from the local image ID returned by `getImageDigest`.
+ *
+ * Returns null when the image has no RepoDigests, which happens for:
+ *   - locally-built images never pushed to a registry
+ *   - images side-loaded via `podman load` from a tarball
+ *
+ * The resolver falls back to a `local:<image-id>` synthetic identity
+ * in that case so the manifest entry still round-trips.
+ */
+export async function getRepoDigest(
+  runtime: ContainerRuntimeInfo,
+  image: string,
+  exec: ExecFn = execRuntime,
+): Promise<string | null> {
+  const qualified = qualifyImage(image, runtime);
+  // The {{if .RepoDigests}}{{end}} guard avoids `[<no value>]` output
+  // that some podman versions emit when RepoDigests is empty.
+  const result = await exec(runtime, [
+    "image",
+    "inspect",
+    "--format",
+    "{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}",
+    qualified,
+  ]);
+  if (result.exitCode !== 0) return null;
+  const raw = result.stdout.trim();
+  if (!raw) return null;
+  const at = raw.lastIndexOf("@");
+  if (at < 0) return null;
+  const digest = raw.slice(at + 1);
+  return /^sha256:[a-f0-9]{64}$/.test(digest) ? digest : null;
+}
+
+/**
+ * Return the digest of the image a *running* container is actually
+ * using, in the form `sha256:<hex>` or `local:<image-id>`.
+ *
+ * Distinct from "what `image:tag` resolves to right now": if someone
+ * `podman pull`'d the image after the container started, the local
+ * tag moved but the container is still on the old bits. This walks
+ * from the container's image-id (immutable for its lifetime) to its
+ * RepoDigests.
+ *
+ * Returns null if the container doesn't exist or the runtime can't
+ * read its image-id.
+ */
+export async function getLiveContainerDigest(
+  runtime: ContainerRuntimeInfo,
+  containerName: string,
+  exec: ExecFn = execRuntime,
+): Promise<string | null> {
+  // The caller passes the unprefixed name from `ensureRunning`; the
+  // running container always carries the `sk-` prefix.
+  const imageId = await getImageDigest(
+    runtime,
+    prefixedName(containerName),
+    exec,
+  );
+  if (!imageId) return null;
+  const repoDigest = await getRepoDigest(runtime, imageId, exec);
+  if (repoDigest) return repoDigest;
+  // Locally-built image with no RepoDigests — return the local id
+  // under the same `local:` namespace the resolver uses.
+  return `local:${imageId}`;
 }
 
 export async function pullImage(
@@ -513,7 +600,7 @@ export async function getContainerState(
  * Type alias matching `ExecRuntimeFn` in resources.ts; declared
  * locally so containers.ts doesn't have to depend on resources.ts.
  */
-type ExecFn = (
+export type ExecFn = (
   runtime: ContainerRuntimeInfo,
   args: string[],
 ) => Promise<{ stdout: string; stderr: string; exitCode: number }>;
@@ -740,6 +827,13 @@ export async function getActualPortBindings(
 export interface LiveContainerConfig {
   image: string;
   tag: string;
+  /**
+   * Set when the live `Config.Image` was a digest-pinned reference
+   * (`image@sha256:...`). `tag` then holds whatever the runtime
+   * reports alongside (typically the empty string or `"latest"`); the
+   * authoritative comparison should use `digest`.
+   */
+  digest: string | null;
   command: string[] | null;
   networkMode: string;
   env: Map<string, string>;
@@ -787,19 +881,27 @@ export async function getLiveContainerConfig(
   const [rawImage, rawCmd, rawNetworkMode, rawBinds, rawEnv, rawPortBindings] =
     parts;
 
-  // Split image into image+tag on the LAST colon (registries can carry
-  // ports like `localhost:5000/foo:tag`). If no tag, default to "latest"
-  // — matches what `qualifyImage` would have produced.
+  // Split image into image+tag (and optional digest). Config.Image can
+  // be `repo:tag`, `repo@sha256:...`, or `repo:tag@sha256:...`.
+  // Registries with ports (`localhost:5000/foo:tag`) push the
+  // image-vs-tag colon past the last slash.
   const imageRef = rawImage.trim();
-  const lastColon = imageRef.lastIndexOf(":");
-  const lastSlash = imageRef.lastIndexOf("/");
+  let imageAndTag = imageRef;
+  let digest: string | null = null;
+  const atIdx = imageRef.indexOf("@sha256:");
+  if (atIdx >= 0) {
+    imageAndTag = imageRef.slice(0, atIdx);
+    digest = imageRef.slice(atIdx + 1);
+  }
+  const lastColon = imageAndTag.lastIndexOf(":");
+  const lastSlash = imageAndTag.lastIndexOf("/");
   let image: string;
   let tag: string;
   if (lastColon > lastSlash) {
-    image = imageRef.slice(0, lastColon);
-    tag = imageRef.slice(lastColon + 1);
+    image = imageAndTag.slice(0, lastColon);
+    tag = imageAndTag.slice(lastColon + 1);
   } else {
-    image = imageRef;
+    image = imageAndTag;
     tag = "latest";
   }
 
@@ -862,7 +964,16 @@ export async function getLiveContainerConfig(
 
   const portBindings = parsePortBindingsFromJsonString(rawPortBindings);
 
-  return { image, tag, command, networkMode, env, binds, portBindings };
+  return {
+    image,
+    tag,
+    digest,
+    command,
+    networkMode,
+    env,
+    binds,
+    portBindings,
+  };
 }
 
 /**
@@ -1003,10 +1114,15 @@ export function diffContainerConfig(
   const drifted: string[] = [];
 
   const requestedImageRef = qualifyImage(
-    `${requested.image}:${requested.tag}`,
+    requested.digest
+      ? `${requested.image}@${requested.digest}`
+      : `${requested.image}:${requested.tag}`,
     runtime,
   );
-  const liveImageRef = qualifyImage(`${live.image}:${live.tag}`, runtime);
+  const liveImageRef = qualifyImage(
+    live.digest ? `${live.image}@${live.digest}` : `${live.image}:${live.tag}`,
+    runtime,
+  );
   if (requestedImageRef !== liveImageRef) drifted.push("image+tag");
 
   if (requested.command !== undefined) {
@@ -1109,7 +1225,12 @@ function buildRunArgs(
   runtime: ContainerRuntimeInfo,
 ): string[] {
   const fullName = prefixedName(name);
-  const imageRef = qualifyImage(`${config.image}:${config.tag}`, runtime);
+  const imageRef = qualifyImage(
+    config.digest
+      ? `${config.image}@${config.digest}`
+      : `${config.image}:${config.tag}`,
+    runtime,
+  );
   const args = ["run", "-d", "--name", fullName];
 
   if (config.restart && config.restart !== "no") {
@@ -1174,7 +1295,12 @@ export async function ensureRunning(
 ): Promise<void> {
   const state = await getContainerState(runtime, name, exec);
   const fullName = prefixedName(name);
-  const imageRef = qualifyImage(`${config.image}:${config.tag}`, runtime);
+  const imageRef = qualifyImage(
+    config.digest
+      ? `${config.image}@${config.digest}`
+      : `${config.image}:${config.tag}`,
+    runtime,
+  );
 
   // Drift detection is needed for both "running" and "stopped" — a stopped
   // container with stale env/volumes/ports/command would otherwise be
