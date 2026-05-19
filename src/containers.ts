@@ -18,6 +18,8 @@ import {
   userMappingFlags,
 } from "./runtime.js";
 import { resourceFlagsForRun } from "./resources.js";
+import { classifyTag } from "./updates/tagClassifier.js";
+import { isOfflineError } from "./updates/offline.js";
 
 const CONTAINER_PREFIX = "sk-";
 
@@ -1394,6 +1396,18 @@ function buildRunArgs(
   return args;
 }
 
+/**
+ * Pull function injected into `ensureRunning` for testability. Production
+ * uses the module-level `pullImage` (which shells out via `execRuntimeLong`,
+ * not the injectable `ExecFn`). Tests pass a stub to assert call counts
+ * and simulate offline failures without touching the network.
+ */
+type PullFn = (
+  runtime: ContainerRuntimeInfo,
+  image: string,
+  onProgress?: (msg: string) => void,
+) => Promise<void>;
+
 export async function ensureRunning(
   runtime: ContainerRuntimeInfo,
   name: string,
@@ -1412,6 +1426,7 @@ export async function ensureRunning(
    */
   prior?: ContainerConfig,
   _postRecreate: boolean = false,
+  _pull: PullFn = pullImage,
 ): Promise<void> {
   const state = await getContainerState(runtime, name, exec);
   const fullName = prefixedName(name);
@@ -1450,6 +1465,67 @@ export async function ensureRunning(
       exec,
       prior,
       true,
+      _pull,
+    );
+    return true;
+  };
+
+  // Floating-tag digest drift: pull the tag, compare the registry-fresh
+  // image-id to the running container's image-id, treat a mismatch as drift.
+  // Skipped silently on offline or any pull/inspect error — update probing
+  // must never block startup. `config.digest` set means the caller already
+  // pins to a digest; nothing to probe.
+  const checkAndRecreateOnDigestDrift = async (): Promise<boolean> => {
+    if (!config.autoUpdateOnFloatingTag) return false;
+    if (config.digest) return false;
+    if (classifyTag(config.tag) !== "floating") return false;
+
+    const fullImage = `${config.image}:${config.tag}`;
+    try {
+      await _pull(runtime, qualifyImage(fullImage, runtime), debug);
+    } catch (err) {
+      if (isOfflineError(err)) {
+        debug(
+          `Container ${fullName} floating-tag digest check skipped (offline)`,
+        );
+      } else {
+        debug(
+          `Container ${fullName} floating-tag digest check skipped: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      return false;
+    }
+
+    // Compare image-ids (local content-store hash), not manifest digests.
+    // `getImageDigest` returns the local `.Id` for both an `image:tag` ref
+    // and a container name (via `.Image` on the container) — like-for-like.
+    // Mixing in a `RepoDigest`-based identity here would always show drift
+    // because RepoDigest and image-id are different namespaces. The same
+    // image-id-vs-image-id comparison is what updates/service.ts uses.
+    const remoteId = await getImageDigest(
+      runtime,
+      qualifyImage(fullImage, runtime),
+      exec,
+    );
+    const liveId = await getImageDigest(runtime, prefixedName(name), exec);
+    if (!remoteId || !liveId || remoteId === liveId) {
+      return false;
+    }
+
+    debug(
+      `Container ${fullName} floating-tag digest drift detected (${liveId.slice(0, 19)}… → ${remoteId.slice(0, 19)}…); recreating`,
+    );
+    await removeContainer(runtime, name, exec);
+    await ensureRunning(
+      runtime,
+      name,
+      config,
+      debug,
+      options,
+      exec,
+      prior,
+      true,
+      _pull,
     );
     return true;
   };
@@ -1465,6 +1541,7 @@ export async function ensureRunning(
         return;
       }
       if (await checkAndRecreateOnDrift("already running")) return;
+      if (await checkAndRecreateOnDigestDrift()) return;
       debug(`Container ${fullName} already running`);
       return;
     }
@@ -1483,6 +1560,7 @@ export async function ensureRunning(
         return;
       }
       if (await checkAndRecreateOnDrift("stopped")) return;
+      if (await checkAndRecreateOnDigestDrift()) return;
       debug(`Starting stopped container ${fullName}`);
       const startResult = await exec(runtime, ["start", fullName]);
       if (startResult.exitCode !== 0) {

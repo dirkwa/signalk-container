@@ -91,6 +91,27 @@ export interface ContainerConfig {
    * plugins keep today's behavior verbatim.
    */
   updateChannel?: string;
+  /**
+   * When `true` AND `tag` classifies as floating (`latest`, `main`, `edge`,
+   * `nightly`, etc.), `ensureRunning` pulls the tag on every call and
+   * compares the registry-fresh image-id against the running container's
+   * image-id. A mismatch is treated as drift → remove + recreate. This
+   * matches what `updates/service.ts` does for floating-tag drift detection.
+   *
+   * Off by default — opt in per consumer plugin. The standard `image+tag`
+   * string comparison is unchanged; this is an additional probe.
+   *
+   * Behavior on the unhappy paths:
+   *   - Pull fails as offline (`ENOTFOUND`, `ENETUNREACH`, …): log debug,
+   *     skip the check, leave the container running. Boats at sea are the
+   *     primary motivation for this default.
+   *   - Pull fails for any other reason: log debug, skip the check.
+   *     Update probing must never block plugin startup.
+   *   - `tag` is `semver` or `unknown`, or `config.digest` is set: no-op.
+   *
+   * Reuses `getImageDigest` and the existing `pullImage`; no new primitives.
+   */
+  autoUpdateOnFloatingTag?: boolean;
   ports?: Record<string, string>;
   /**
    * Explicit volume mounts. Keys are container paths, values are either:
