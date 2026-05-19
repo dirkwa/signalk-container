@@ -1683,6 +1683,14 @@ export default (app: App) => {
         app.debug("detecting runtime, preference=%s", preference);
         runtimeInfo = await detectRuntime(preference);
         app.debug("detectRuntime result: %o", runtimeInfo);
+        if (runtimeInfo) {
+          const hostUser = runtimeInfo.hostUser;
+          app.debug(
+            `runtime ready: ${runtimeInfo.runtime} ${runtimeInfo.version}` +
+              `, rootless=${runtimeInfo.isRootless ?? "unknown"}` +
+              `, hostUser=${hostUser ? `${hostUser.uid}:${hostUser.gid}` : "unavailable"}`,
+          );
+        }
 
         if (!runtimeInfo) {
           const msg = containerized

@@ -74,6 +74,7 @@ async function tryRuntime(
   const realRuntime: RuntimeName = isPodmanDockerShim ? "podman" : name;
   const cgroupControllers = await probeCgroupControllers(realRuntime, env);
   const isRootless = await probeRootless(realRuntime, env);
+  const hostUser = probeHostUser();
 
   return {
     runtime: realRuntime,
@@ -81,7 +82,30 @@ async function tryRuntime(
     isPodmanDockerShim,
     cgroupControllers,
     isRootless,
+    hostUser,
   };
+}
+
+/**
+ * Resolve the effective host user (uid/gid) that managed containers
+ * should run as.  Source of truth is the Signal K server's own
+ * process — files created inside a container started with `--user
+ * <uid>:<gid>` (or `--userns=keep-id` on rootless Podman) end up
+ * owned by this same identity on the host, so a chmod sweep is no
+ * longer necessary.
+ *
+ * Returns `null` on platforms where `process.getuid`/`process.getgid`
+ * are undefined (Windows); the upcoming ownership translator must
+ * suppress `--user` flags in that case.
+ */
+export function probeHostUser(): { uid: number; gid: number } | null {
+  if (
+    typeof process.getuid !== "function" ||
+    typeof process.getgid !== "function"
+  ) {
+    return null;
+  }
+  return { uid: process.getuid(), gid: process.getgid() };
 }
 
 /**
