@@ -45,7 +45,15 @@ function reqBase(overrides: Partial<ContainerConfig> = {}): ContainerConfig {
 
 describe("diffContainerConfig — no drift on identical configs", () => {
   it("returns empty drifted list when image+tag match and everything else is unset", () => {
-    const { drifted } = diffContainerConfig(reqBase(), liveBase(), docker);
+    // Docker runtime auto-injects `host.containers.internal:host-gateway`
+    // into the requested extraHosts set; the live state mirrors that.
+    const { drifted } = diffContainerConfig(
+      reqBase(),
+      liveBase({
+        extraHosts: new Map([["host.containers.internal", "host-gateway"]]),
+      }),
+      docker,
+    );
     assert.deepEqual(drifted, []);
   });
 

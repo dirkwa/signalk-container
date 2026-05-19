@@ -32,6 +32,7 @@ function buildStdout(parts: {
   binds: string;
   env: string;
   portBindings: string;
+  extraHosts?: string;
 }): string {
   return [
     parts.image,
@@ -40,6 +41,7 @@ function buildStdout(parts: {
     parts.binds,
     parts.env,
     parts.portBindings,
+    parts.extraHosts ?? "null",
   ].join(SEP);
 }
 

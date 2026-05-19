@@ -881,8 +881,15 @@ export async function getLiveContainerConfig(
   const parts = result.stdout.split(SEP);
   if (parts.length !== 7) return null;
 
-  const [rawImage, rawCmd, rawNetworkMode, rawBinds, rawEnv, rawPortBindings, rawExtraHosts] =
-    parts;
+  const [
+    rawImage,
+    rawCmd,
+    rawNetworkMode,
+    rawBinds,
+    rawEnv,
+    rawPortBindings,
+    rawExtraHosts,
+  ] = parts;
 
   // Split image into image+tag (and optional digest). Config.Image can
   // be `repo:tag`, `repo@sha256:...`, or `repo:tag@sha256:...`.
