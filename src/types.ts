@@ -783,6 +783,40 @@ export interface ContainerManagerApi {
    * See doc/plugin-developer-guide.md "Update detection" for usage.
    */
   updates: import("./updates/types.js").UpdateServiceApi;
+  /**
+   * Image-compliance probes. Use before adopting an image to confirm
+   * it runs cleanly under the host UID mapping signalk-container will
+   * emit for managed containers — i.e. that `/tmp` is writable for the
+   * host caller and the image doesn't depend on a writable `~/.<x>` or
+   * a root-only path.
+   */
+  doctor: DoctorApi;
+}
+
+/**
+ * Image-compliance probes exposed to consumer plugins via
+ * `manager.doctor.*`. Each method runs a short-lived helper container
+ * and reports back without touching the plugin's managed state.
+ */
+export interface DoctorApi {
+  /**
+   * Run `image:tag` under the same uid mapping `ensureRunning` would
+   * use (`--user host:host` on Docker / rootful Podman, `--userns=
+   * keep-id` on rootless Podman, none on opt-out) and verify that the
+   * container can `touch /tmp/x` as the host caller.
+   *
+   * Returns `{ ok: true }` when the probe exits 0 and prints `"ok"`.
+   * Never throws — failure modes (non-zero exit, exec error, missing
+   * binary) all return `{ ok: false, error }`.
+   *
+   * Use this before adopting an unfamiliar image to surface UID-
+   * compatibility problems early, instead of debugging them after
+   * the container is wedged in a restart loop.
+   */
+  imageRunsAsUser(
+    image: string,
+    user?: ContainerConfig["user"],
+  ): Promise<{ ok: boolean; output: string; error?: string }>;
 }
 
 export interface PluginConfig {

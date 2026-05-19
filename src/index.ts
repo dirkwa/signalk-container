@@ -11,6 +11,7 @@ import {
   ContainerResourceLimits,
   ContainerRuntimeInfo,
   ContainerState,
+  DoctorApi,
   EnsureRunningOptions,
   HistoryEntry,
   ManifestApi,
@@ -71,6 +72,7 @@ import { FileUpdateCache } from "./updates/cache.js";
 import { registerUpdateRoutes } from "./updates/routes.js";
 import { DIGEST_RE, resolveImage } from "./manifest/resolver.js";
 import { ManifestStore } from "./manifest/store.js";
+import { imageRunsAsUser } from "./doctor.js";
 
 interface App {
   debug: (...args: unknown[]) => void;
@@ -1453,6 +1455,46 @@ export default (app: App) => {
     get manifest(): ManifestApi {
       return manifestStore ?? stubManifest;
     },
+    // `doctor` probes need `runtimeInfo` (resolved during start()).
+    // Until then, every call returns `{ ok: false, error: "Container
+    // manager not yet started" }` so consumer plugins can call
+    // unconditionally without crashing the boot path.
+    get doctor(): DoctorApi {
+      return runtimeInfo ? liveDoctor : stubDoctor;
+    },
+  };
+
+  const liveDoctor: DoctorApi = {
+    async imageRunsAsUser(
+      image: string,
+      user?: ContainerConfig["user"],
+    ): Promise<{ ok: boolean; output: string; error?: string }> {
+      // runtimeInfo is captured at call time, not at module load, so
+      // this always reflects the current detection state — useful if
+      // future plumbing supports runtime swap.
+      if (!runtimeInfo) {
+        return {
+          ok: false,
+          output: "",
+          error: "Container manager not yet started",
+        };
+      }
+      return imageRunsAsUser(runtimeInfo, image, user);
+    },
+  };
+
+  const stubDoctor: DoctorApi = {
+    async imageRunsAsUser(): Promise<{
+      ok: boolean;
+      output: string;
+      error?: string;
+    }> {
+      return {
+        ok: false,
+        output: "",
+        error: "Container manager not yet started",
+      };
+    },
   };
 
   const stubManifest: ManifestApi = {
@@ -2143,6 +2185,35 @@ export default (app: App) => {
       router.post("/api/prune", async (_req, res) => {
         try {
           const result = await api.prune();
+          res.json(result);
+        } catch (err) {
+          res.status(500).json({
+            error: err instanceof Error ? err.message : "Unknown error",
+          });
+        }
+      });
+
+      // Doctor probes. POST so callers send a JSON body with the image
+      // ref and optional user spec; GET would clutter the path with
+      // query-encoded values that can't carry a structured `user`.
+      router.post("/api/doctor/image", async (req, res) => {
+        const body = (req.body ?? {}) as {
+          image?: unknown;
+          tag?: unknown;
+          user?: ContainerConfig["user"];
+        };
+        if (typeof body.image !== "string" || body.image.length === 0) {
+          res
+            .status(400)
+            .json({ error: "Request body must include a non-empty `image`." });
+          return;
+        }
+        const ref =
+          typeof body.tag === "string" && body.tag.length > 0
+            ? `${body.image}:${body.tag}`
+            : body.image;
+        try {
+          const result = await api.doctor.imageRunsAsUser(ref, body.user);
           res.json(result);
         } catch (err) {
           res.status(500).json({
