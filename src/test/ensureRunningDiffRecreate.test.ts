@@ -1,6 +1,7 @@
-import { describe, it } from "node:test";
+import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { ensureRunning } from "../containers.js";
+import { _setCurrentHostIdsForTesting } from "../runtime.js";
 import type { ContainerConfig, ContainerRuntimeInfo } from "../types.js";
 
 const docker: ContainerRuntimeInfo = {
@@ -8,6 +9,12 @@ const docker: ContainerRuntimeInfo = {
   version: "27.0.0",
   isPodmanDockerShim: false,
 };
+
+// Pin the host UID/GID resolver so user-mapping flags are deterministic
+// regardless of who runs `npm test`. `buildLiveConfigStdout` defaults to
+// `user: "1000:1000"` to match.
+before(() => _setCurrentHostIdsForTesting(() => ({ uid: 1000, gid: 1000 })));
+after(() => _setCurrentHostIdsForTesting(null));
 
 const SEP = "\x1f";
 
@@ -53,6 +60,7 @@ function buildLiveConfigStdout(parts: {
   env?: string;
   portBindings?: string;
   extraHosts?: string;
+  user?: string;
 }): string {
   return [
     parts.image,
@@ -62,6 +70,10 @@ function buildLiveConfigStdout(parts: {
     parts.env ?? "null",
     parts.portBindings ?? "null",
     parts.extraHosts ?? "null",
+    // Matches the pinned host-id resolver above (1000:1000), so the
+    // existing "no drift" fixtures stay no-drift without each call
+    // having to set user explicitly.
+    parts.user ?? "1000:1000",
   ].join(SEP);
 }
 
@@ -408,5 +420,104 @@ describe("ensureRunning — stopped-state drift detection", () => {
     assert.ok(
       debugLines.some((l) => l.includes("could not inspect for drift")),
     );
+  });
+});
+
+describe("ensureRunning — buildRunArgs ownership + UMASK", () => {
+  // Capture the run-command args by routing exec at the missing-state path
+  // (no inspect-drift logic involved): container is missing, so ensureRunning
+  // falls straight through to pull (skipped by image inspect 'ok') + run -d.
+  function captureRunArgsOnMissing(config: ContainerConfig): {
+    runArgs: string[] | null;
+    run: () => Promise<void>;
+  } {
+    let runArgs: string[] | null = null;
+    const exec = async (
+      _runtime: ContainerRuntimeInfo,
+      args: string[],
+    ): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
+      const cmd = args[0];
+      // Missing container path: probe says "no such object", image
+      // inspect says present, then `run -d`.
+      if (
+        cmd === "inspect" &&
+        args.includes("{{.State.Status}}|{{.State.Running}}|{{.State.Pid}}")
+      ) {
+        return { stdout: "", stderr: "no such object", exitCode: 1 };
+      }
+      if (cmd === "image" && args[1] === "inspect") {
+        return { stdout: "ok", stderr: "", exitCode: 0 };
+      }
+      if (cmd === "run") {
+        runArgs = args;
+        return { stdout: "id", stderr: "", exitCode: 0 };
+      }
+      throw new Error(`unexpected exec: ${args.join(" ")}`);
+    };
+    return {
+      get runArgs() {
+        return runArgs;
+      },
+      run: () =>
+        ensureRunning(docker, "demo", config, () => {}, undefined, exec),
+    };
+  }
+
+  it("emits --user host:host by default (in-image uid 0 maps to host 1000:1000)", async () => {
+    const cap = captureRunArgsOnMissing({
+      image: "questdb/questdb",
+      tag: "9.0.0",
+    });
+    await cap.run();
+    assert.ok(cap.runArgs, "run command should have been issued");
+    const userIdx = cap.runArgs.indexOf("--user");
+    assert.ok(
+      userIdx >= 0,
+      `--user flag missing from: ${cap.runArgs.join(" ")}`,
+    );
+    assert.equal(cap.runArgs[userIdx + 1], "1000:1000");
+  });
+
+  it("omits --user when ContainerConfig.user is false (opt-out)", async () => {
+    const cap = captureRunArgsOnMissing({
+      image: "questdb/questdb",
+      tag: "9.0.0",
+      user: false,
+    });
+    await cap.run();
+    assert.ok(cap.runArgs);
+    assert.ok(
+      !cap.runArgs.includes("--user"),
+      `--user should not appear: ${cap.runArgs.join(" ")}`,
+    );
+  });
+
+  it("injects -e UMASK=022 by default", async () => {
+    const cap = captureRunArgsOnMissing({
+      image: "questdb/questdb",
+      tag: "9.0.0",
+    });
+    await cap.run();
+    assert.ok(cap.runArgs);
+    const idx = cap.runArgs.indexOf("UMASK=022");
+    assert.ok(idx >= 0, `UMASK=022 missing from: ${cap.runArgs.join(" ")}`);
+    assert.equal(cap.runArgs[idx - 1], "-e");
+    // And only once — must not appear twice.
+    const occurrences = cap.runArgs.filter((a) => a === "UMASK=022").length;
+    assert.equal(occurrences, 1);
+  });
+
+  it("does not overwrite a caller-provided UMASK in config.env", async () => {
+    const cap = captureRunArgsOnMissing({
+      image: "questdb/questdb",
+      tag: "9.0.0",
+      env: { UMASK: "0027" },
+    });
+    await cap.run();
+    assert.ok(cap.runArgs);
+    // The default UMASK=022 must NOT have been pushed.
+    assert.ok(!cap.runArgs.includes("UMASK=022"));
+    // The caller's value is preserved verbatim.
+    assert.ok(cap.runArgs.includes("UMASK=0027"));
   });
 });

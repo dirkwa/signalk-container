@@ -204,6 +204,30 @@ export interface ContainerConfig {
    */
   extraHosts?: Record<string, string>;
   /**
+   * Run the container under the Signal K server's host uid/gid so files
+   * created inside (on bind-mounted host paths) are owned by the same
+   * identity on the host — no recursive `chmod` sweeps needed.
+   *
+   *   - omitted (default): emit a uid mapping that aligns the in-container
+   *     process with the host caller. Under rootless Podman this means
+   *     `--userns=keep-id:uid=<inImageUid>,gid=<inImageGid>`; under Docker
+   *     and rootful Podman it means `--user <hostUid>:<hostGid>`. The
+   *     `inImageUid`/`inImageGid` default to 0 (i.e. the image's root)
+   *     unless the consumer sets them to match the image's `USER`.
+   *   - `{ inImageUid, inImageGid }`: same logic but with explicit
+   *     in-image UID/GID. Use this when the image declares a non-root
+   *     `USER` (e.g. `USER 1001`) so the keep-id mapping picks the right
+   *     starting point for translation.
+   *   - `false`: opt out. No `--user` / `--userns` flag emitted. The
+   *     container runs with whatever the image's `USER` directive
+   *     specifies. Use when the image requires root or manages its own
+   *     user model.
+   *
+   * Mirrors `ContainerJobConfig.user` so the same translator drives both
+   * long-running managed containers and one-shot helper jobs.
+   */
+  user?: { inImageUid?: number; inImageGid?: number } | false;
+  /**
    * Resource limits for the container. The consumer plugin sets a
    * sensible default here; the user can override per-container via
    * signalk-container's plugin config (see `containerOverrides`).

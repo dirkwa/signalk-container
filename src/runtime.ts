@@ -109,6 +109,99 @@ export function probeHostUser(): { uid: number; gid: number } | null {
 }
 
 /**
+ * Host UID/GID resolver indirection so unit tests can stub it instead
+ * of being at the mercy of whoever runs `npm test` (root in CI vs.
+ * 1000 on a dev box). Windows has no UID concept and
+ * `process.getuid` is undefined there — falls back to `null` and the
+ * flag emitter then skips the mapping.
+ */
+let currentHostIds: () => { uid: number; gid: number } | null = probeHostUser;
+
+/**
+ * Test-only override for the host UID/GID resolver. Stubs let unit
+ * tests assert flag emission against deterministic UIDs without
+ * needing a particular runtime user.
+ */
+export function _setCurrentHostIdsForTesting(
+  fn: (() => { uid: number; gid: number } | null) | null,
+): void {
+  currentHostIds = fn ?? probeHostUser;
+}
+
+/**
+ * Shape shared by `ContainerJobConfig.user` and `ContainerConfig.user`.
+ * Inline-typed rather than imported to keep `runtime.ts` free of
+ * `types.ts` imports (it's the lowest layer).
+ */
+type UserMappingIntent =
+  | { inImageUid?: number; inImageGid?: number }
+  | false
+  | undefined;
+
+/**
+ * Build the UID-mapping flags to pass to the runtime for one
+ * container. Used by both `runJob` (one-shot helpers) and
+ * `buildRunArgs` (long-running managed containers) so the decision
+ * matrix is identical across both code paths.
+ *
+ * The decision matrix:
+ *
+ *   - `user === false` → no flag. Caller opted out (debugging, or the
+ *     container doesn't write to a host-owned bind mount).
+ *   - host UID resolver returns null (Windows) → no flag. Docker
+ *     Desktop / Windows handles UID translation internally.
+ *   - rootless Podman → `--userns=keep-id:uid=<inImageUID>,gid=<inImageGID>`.
+ *     Rewrites the in-image UID back to the host caller via the user-
+ *     namespace mapping; rootful Podman would error on the same flag.
+ *   - everything else (Docker, rootful Podman) →
+ *     `--user <hostUID>:<hostGID>`. Sets the in-container process UID
+ *     directly to the host caller's UID.
+ *
+ * `inImageUID/GID` defaults to 0 when the caller doesn't pass them —
+ * matching the historical behaviour of helper images shipped before
+ * this field existed (osgeo/gdal, the legacy tippecanoe image, …).
+ * Images with a non-root `USER` directive (e.g. `charts-toolbox`'s
+ * `USER toolbox` at UID 1001) need the caller to declare the right
+ * value.
+ */
+export function userMappingFlags(
+  runtime: ContainerRuntimeInfo,
+  user: UserMappingIntent,
+  resolveHost: () => { uid: number; gid: number } | null = currentHostIds,
+): string[] {
+  if (user === false) {
+    return [];
+  }
+  const host = resolveHost();
+  if (host === null) {
+    return [];
+  }
+  const inImageUid = user?.inImageUid ?? 0;
+  const inImageGid = user?.inImageGid ?? 0;
+  // Reject negatives, NaN, and non-integers. The TS shape says
+  // `number` but JS callers can still pass garbage — emitting
+  // `--userns=keep-id:uid=NaN,gid=-1` would let podman/docker produce
+  // an obscure runtime error far from the call site. Throw here so
+  // the consumer plugin's promise rejects with a clear message before
+  // the container even starts.
+  assertNonNegativeInt("inImageUid", inImageUid);
+  assertNonNegativeInt("inImageGid", inImageGid);
+
+  if (runtime.runtime === "podman" && runtime.isRootless === true) {
+    return ["--userns", `keep-id:uid=${inImageUid},gid=${inImageGid}`];
+  }
+  return ["--user", `${host.uid}:${host.gid}`];
+}
+
+function assertNonNegativeInt(field: string, value: number): void {
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error(
+      `user.${field} must be a non-negative integer, got ${String(value)}`,
+    );
+  }
+}
+
+/**
  * Detect rootless mode.  Matters for Podman because `--userns=keep-id`
  * (used by `jobs.ts` to align bind-mount file ownership) is rootless-
  * only — emitting it under rootful Podman errors out at container
