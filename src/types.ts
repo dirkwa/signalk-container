@@ -1,3 +1,9 @@
+import type {
+  ConsumerManifest,
+  ContainerManifestEntry,
+  HistoryEntry,
+} from "./manifest/schema.js";
+
 export type RuntimeName = "podman" | "docker";
 export type RuntimePreference = "auto" | RuntimeName;
 
@@ -778,20 +784,34 @@ export interface ResolveResult {
  * side effect of successful `ensureRunning` calls.
  */
 export interface ManifestApi {
+  /**
+   * Return the manifest for a specific consumer plugin, or `null` if
+   * no manifest exists yet. Read-only — writes happen automatically
+   * after successful `ensureRunning` calls.
+   *
+   * Throws if `pluginId` is not an npm package name, a `@scope/name`
+   * scoped form, or the synthetic `container:<name>` fallback.
+   */
   get(pluginId: string): Promise<ConsumerManifest | null>;
+  /**
+   * Return every persisted manifest in the data directory. Order is
+   * unspecified.
+   */
   list(): Promise<ConsumerManifest[]>;
+  /**
+   * Return the bounded history (max 20 entries) of digest changes
+   * for a specific container, regardless of which plugin owns it.
+   *
+   * Throws an "Ambiguous container history" error if more than one
+   * manifest contains an entry for the same `containerName` — the
+   * caller should disambiguate via `manifest.get(pluginId)`.
+   */
   getContainerHistory(containerName: string): Promise<HistoryEntry[]>;
 }
 
 // Persistent manifest types are defined as TypeBox schemas in
 // src/manifest/schema.ts (single source of truth for the on-disk
-// shape); re-exported here so consumer plugins can import everything
-// from "signalk-container/types".
-// Imported for local use in `ManifestApi` above; re-exported so
-// consumer plugins can pull every manifest type from "signalk-container".
-import type {
-  ConsumerManifest,
-  ContainerManifestEntry,
-  HistoryEntry,
-} from "./manifest/schema.js";
+// shape); re-exported here so consumer plugins can import every
+// manifest type from "signalk-container/types". The import lives at
+// the top of the file with the other type imports.
 export type { ConsumerManifest, ContainerManifestEntry, HistoryEntry };

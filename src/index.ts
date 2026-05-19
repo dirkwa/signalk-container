@@ -953,7 +953,10 @@ export default (app: App) => {
               updateChannel: effectiveConfig.updateChannel,
             },
             resolved: liveResolved,
-            reason: "plugin-install",
+            // Omit `reason` so the store auto-detects: first record is
+            // `plugin-install`, subsequent digest changes are
+            // `plugin-update`. PR-C admin paths (user-pull, manual-check)
+            // will pass their own reason explicitly.
           })
           .catch((err) =>
             app.error(

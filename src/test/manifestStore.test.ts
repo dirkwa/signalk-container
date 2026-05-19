@@ -93,10 +93,15 @@ describe("ManifestStore", () => {
     );
   });
 
-  it("digest change records a plugin-update history entry", async () => {
+  it("digest change auto-detects plugin-update when caller omits reason", async () => {
     const store = new ManifestStore(baseDir, () => {});
-    await store.recordResolution(commonParams(DIGEST_A));
-    await store.recordResolution(commonParams(DIGEST_B));
+    // Strip `reason` so the store auto-detects from the transition.
+    const { reason: _u1, ...a } = commonParams(DIGEST_A);
+    const { reason: _u2, ...b } = commonParams(DIGEST_B);
+    void _u1;
+    void _u2;
+    await store.recordResolution(a);
+    await store.recordResolution(b);
     const m = await store.get("signalk-questdb");
     assert.ok(m);
     const history = m.containers["questdb"].history;
@@ -188,6 +193,23 @@ describe("ManifestStore", () => {
   it("getContainerHistory returns [] for an unknown container", async () => {
     const store = new ManifestStore(baseDir, () => {});
     assert.deepEqual(await store.getContainerHistory("nobody"), []);
+  });
+
+  it("getContainerHistory throws when multiple manifests own the same container", async () => {
+    const store = new ManifestStore(baseDir, () => {});
+    // Two plugins both record an entry for the same containerName.
+    await store.recordResolution({
+      ...commonParams(DIGEST_A),
+      pluginId: "container:questdb",
+    });
+    await store.recordResolution({
+      ...commonParams(DIGEST_B),
+      pluginId: "signalk-questdb",
+    });
+    await assert.rejects(
+      () => store.getContainerHistory("questdb"),
+      /Ambiguous container history/,
+    );
   });
 
   it("synthetic pluginId fallback (container:<name>) works as a key", async () => {
@@ -344,6 +366,44 @@ describe("ManifestStore", () => {
         }),
       /Invalid pluginId/,
     );
+  });
+
+  it("recordResolution without `reason` auto-detects plugin-install then plugin-update", async () => {
+    const store = new ManifestStore(baseDir, () => {});
+    // Drop reason entirely — store should auto-detect.
+    const { reason: _unused, ...base } = commonParams(DIGEST_A);
+    void _unused;
+    await store.recordResolution(base);
+    await store.recordResolution({
+      ...base,
+      resolved: { ...base.resolved, resolvedDigest: DIGEST_B },
+    });
+    const m = await store.get("signalk-questdb");
+    assert.ok(m);
+    const history = m.containers["questdb"].history;
+    assert.equal(history.length, 2);
+    assert.equal(history[0].reason, "plugin-install");
+    assert.equal(history[1].reason, "plugin-update");
+  });
+
+  it("recordResolution honors explicit `reason` on a digest transition", async () => {
+    const store = new ManifestStore(baseDir, () => {});
+    // First record establishes the prior; reason on the first is always plugin-install.
+    await store.recordResolution({
+      ...commonParams(DIGEST_A),
+      reason: "user-pull", // ignored on first record per design
+    });
+    // Second record changes the digest; caller's user-pull reason wins.
+    await store.recordResolution({
+      ...commonParams(DIGEST_B),
+      reason: "user-pull",
+    });
+    const m = await store.get("signalk-questdb");
+    assert.ok(m);
+    const history = m.containers["questdb"].history;
+    assert.equal(history.length, 2);
+    assert.equal(history[0].reason, "plugin-install");
+    assert.equal(history[1].reason, "user-pull");
   });
 
   it("get() rejects invalid pluginId (defence in depth)", async () => {

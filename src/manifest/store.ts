@@ -120,11 +120,26 @@ export class ManifestStore {
   }
 
   async getContainerHistory(containerName: string): Promise<HistoryEntry[]> {
+    // Collect every manifest that owns an entry for this containerName.
+    // Multiple manifests *can* coexist (e.g. a synthetic
+    // `container:<name>` entry from a prior session plus a real
+    // `signalk-foo` entry from a later session), and silently
+    // returning one would hide the conflict.
+    const matches: Array<{ pluginId: string; history: HistoryEntry[] }> = [];
     for (const manifest of await this.list()) {
       const entry = manifest.containers[containerName];
-      if (entry) return entry.history;
+      if (entry) {
+        matches.push({ pluginId: manifest.pluginId, history: entry.history });
+      }
     }
-    return [];
+    if (matches.length === 0) return [];
+    if (matches.length === 1) return matches[0].history;
+    const owners = matches.map((m) => JSON.stringify(m.pluginId)).join(", ");
+    throw new Error(
+      `Ambiguous container history for ${JSON.stringify(containerName)}: ` +
+        `found in ${matches.length} manifests (${owners}). ` +
+        `Call \`manifest.get(pluginId)\` directly to disambiguate.`,
+    );
   }
 
   async recordResolution(params: {
@@ -133,7 +148,17 @@ export class ManifestStore {
     containerName: string;
     config: Pick<ContainerConfig, "image" | "tag" | "digest" | "updateChannel">;
     resolved: ResolveResult;
-    reason: HistoryEntry["reason"];
+    /**
+     * Caller's intent for this record. Optional — when omitted the store
+     * auto-detects from the digest transition:
+     *   - first ever record for this container → `plugin-install`
+     *   - digest changed → `plugin-update`
+     *   - digest unchanged → no history entry (idempotent)
+     * When provided, an explicit reason is preserved for transitions
+     * (`from !== to`); the auto-detected `plugin-install` still wins for
+     * the very first record so the history's origin is always honest.
+     */
+    reason?: HistoryEntry["reason"];
   }): Promise<void> {
     // Validate at the system boundary. Allowed shapes (see PLUGIN_ID_RE):
     // npm package name, scoped npm package, or `container:<name>`.
@@ -169,7 +194,7 @@ export class ManifestStore {
     containerName: string;
     config: Pick<ContainerConfig, "image" | "tag" | "digest" | "updateChannel">;
     resolved: ResolveResult;
-    reason: HistoryEntry["reason"];
+    reason?: HistoryEntry["reason"];
   }): Promise<void> {
     const path = this.pathFor(params.pluginId);
     const existingFileExists = existsSync(path);
@@ -186,10 +211,18 @@ export class ManifestStore {
     const ts = this.now();
     const channel = params.config.updateChannel ?? `tag:${params.config.tag}`;
 
+    // Reason precedence:
+    //   - First-ever record: always `plugin-install` (fact, not intent —
+    //     it's the origin of the history regardless of what the caller
+    //     was doing).
+    //   - Digest changed: caller's `reason` if provided (e.g. `user-pull`
+    //     from an admin click); otherwise auto-detected `plugin-update`.
+    //   - Digest unchanged: idempotent, no history entry. Caller's
+    //     `reason` is ignored.
     let reason: HistoryEntry["reason"];
     if (from === null) reason = "plugin-install";
-    else if (from !== to) reason = "plugin-update";
-    else reason = params.reason;
+    else if (from !== to) reason = params.reason ?? "plugin-update";
+    else reason = params.reason ?? "plugin-install"; // unused — no append below
 
     const history = [...(priorEntry?.history ?? [])];
     if (from === null || from !== to) {

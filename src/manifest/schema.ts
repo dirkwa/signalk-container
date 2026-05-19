@@ -7,8 +7,10 @@ import type { Static } from "typebox";
 //     that have no RepoDigests. Used as `resolvedDigest` only;
 //     `declaredDigest` is always a `sha256:` digest (or null), since
 //     a plugin can only declare what a registry produced.
-const SHA256_DIGEST_PATTERN = "^sha256:[a-f0-9]{64}$";
-const RESOLVED_DIGEST_PATTERN = "^(sha256:[a-f0-9]{64}|local:.+)$";
+/** Matches a canonical registry digest: `sha256:<64-hex>`. */
+export const SHA256_DIGEST_PATTERN = "^sha256:[a-f0-9]{64}$";
+/** Matches a resolved digest: `sha256:<hex>` or the `local:<image-id>` fallback. */
+export const RESOLVED_DIGEST_PATTERN = "^(sha256:[a-f0-9]{64}|local:.+)$";
 
 export const HistoryEntrySchema = Type.Object({
   ts: Type.String({ format: "date-time" }),

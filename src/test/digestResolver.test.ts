@@ -36,8 +36,11 @@ function makeDeps(opts: {
   };
   const deps: ResolveDeps = {
     qualifyImage(image) {
-      // Mirror what qualifyImage does for podman with bare repo names.
-      if (image.includes("/") || image.startsWith("localhost"))
+      // Test stub: prefix two-segment refs like `repo/name[:tag]` with
+      // `docker.io/`. Real `qualifyImage` is richer; the tests only
+      // exercise the namespaced case. `localhost/foo` is left alone
+      // because podman doesn't prefix host-local refs.
+      if (image.includes("/") && !image.startsWith("localhost"))
         return `docker.io/${image}`;
       return image;
     },
