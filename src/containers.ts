@@ -1470,11 +1470,11 @@ export async function ensureRunning(
     return true;
   };
 
-  // When the consumer opts in and the tag is floating, pull the manifest and
-  // compare digests; treat a mismatch as drift. Skipped silently on offline
-  // or any pull/inspect error — update probing must never block startup.
-  // `config.digest` set means the caller already pins to a digest; nothing
-  // to probe.
+  // Floating-tag digest drift: pull the tag, compare the registry-fresh
+  // image-id to the running container's image-id, treat a mismatch as drift.
+  // Skipped silently on offline or any pull/inspect error — update probing
+  // must never block startup. `config.digest` set means the caller already
+  // pins to a digest; nothing to probe.
   const checkAndRecreateOnDigestDrift = async (): Promise<boolean> => {
     if (!config.autoUpdateOnFloatingTag) return false;
     if (config.digest) return false;
@@ -1496,18 +1496,24 @@ export async function ensureRunning(
       return false;
     }
 
-    const remoteDigest = await getImageDigest(
+    // Compare image-ids (local content-store hash), not manifest digests.
+    // `getImageDigest` returns the local `.Id` for both an `image:tag` ref
+    // and a container name (via `.Image` on the container) — like-for-like.
+    // Mixing in a `RepoDigest`-based identity here would always show drift
+    // because RepoDigest and image-id are different namespaces. The same
+    // image-id-vs-image-id comparison is what updates/service.ts uses.
+    const remoteId = await getImageDigest(
       runtime,
       qualifyImage(fullImage, runtime),
       exec,
     );
-    const liveDigest = await getLiveContainerDigest(runtime, name, exec);
-    if (!remoteDigest || !liveDigest || remoteDigest === liveDigest) {
+    const liveId = await getImageDigest(runtime, prefixedName(name), exec);
+    if (!remoteId || !liveId || remoteId === liveId) {
       return false;
     }
 
     debug(
-      `Container ${fullName} floating-tag digest drift detected (${liveDigest.slice(0, 19)}… → ${remoteDigest.slice(0, 19)}…); recreating`,
+      `Container ${fullName} floating-tag digest drift detected (${liveId.slice(0, 19)}… → ${remoteId.slice(0, 19)}…); recreating`,
     );
     await removeContainer(runtime, name, exec);
     await ensureRunning(

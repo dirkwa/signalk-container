@@ -236,6 +236,32 @@ Named volumes (sources without a leading `/`) always pass through regardless of 
 
 `onVolumeIssue` accepts either a synchronous handler or an `async` one. signalk-container fires the call but does not await it; both synchronous throws and rejected promises are caught and logged at error level so handler bugs cannot break container lifecycle. Keep handlers fast and side-effect-only (set plugin status, log).
 
+### Auto-update on floating tags
+
+By default, the `image+tag` string is compared as-is. A consumer that pins `tag: "latest"` (or `main`, `edge`, `nightly`, …) keeps running the digest it pulled on first install, even after the registry tag moves to a new image — `"latest"` matches itself, no drift, no pull.
+
+Opt in to digest-drift detection by setting `autoUpdateOnFloatingTag: true` on the config. On every `ensureRunning` call where the tag classifies as floating, signalk-container pulls the tag and compares the registry-fresh image-id against the running container's image-id. A mismatch is treated as drift → remove + recreate.
+
+```typescript
+await containers.ensureRunning("my-service", {
+  image: "ghcr.io/me/my-service",
+  tag: "latest",
+  autoUpdateOnFloatingTag: true,
+  restart: "unless-stopped",
+});
+```
+
+Semantics:
+
+- The flag is **off** for every existing consumer plugin. Behavior is unchanged unless you opt in.
+- The probe only fires on a floating tag (`classifyTag` classifies the tag as `"floating"`). Semver tags (`"9.0.0"`, `"v1.2.3"`) and unknown tags are not probed — the existing config-string drift check already catches a semver bump.
+- If `digest` is set, the probe is skipped — the caller already pins to a digest and the config-string check covers it.
+- Offline pulls are silently skipped (`ENOTFOUND`, `ENETUNREACH`, `ETIMEDOUT`, etc.). Boats at sea must never have their containers killed by a missing internet connection.
+- Non-offline pull failures (auth, parse, permissions) are also skipped with a debug log — update probing never blocks plugin startup.
+- Config-drift check runs first, then digest-drift. If config changed (env, volumes, ports), that recreate fires before any digest comparison. The two never both trigger.
+
+Notification-only flow (without auto-recreate) is available separately via [`containers.updates.register({...})`](#update-detection) — that fires a `notifications.plugins.<id>.updateAvailable` Signal K notification but does not pull or recreate. Use the updates service when you want the user to confirm the upgrade; use `autoUpdateOnFloatingTag` when "follow the floating tag" is the intended behavior.
+
 ### Streaming container logs into your plugin's debug channel
 
 When the user enables debug for your plugin (the toggle on the plugin configuration page), Signal K's `app.debug` lines appear in the server log. Without help, those lines show only what your plugin code logs — never the container's own stdout/stderr. Pass `onContainerLog` to fold the container's output into the same stream:
@@ -322,7 +348,7 @@ Volumes accept either a bare host-path string (auto-create — runtime creates t
 
 `options` also accepts `onContainerLog` to stream the container's stdout/stderr into your plugin's debug channel — see [Streaming container logs](#streaming-container-logs-into-your-plugins-debug-channel).
 
-For opt-in digest pinning, pass `digest` (`sha256:<64-hex>`) on the config and `pluginId` / `pluginVersion` on the options — see [Image Pinning Manifest](#image-pinning-manifest).
+For opt-in digest pinning, pass `digest` (`sha256:<64-hex>`) on the config and `pluginId` / `pluginVersion` on the options — see [Image Pinning Manifest](#image-pinning-manifest). To follow a floating tag (`latest`, `edge`, …) and auto-recreate when the registry moves, set `autoUpdateOnFloatingTag: true` — see [Auto-update on floating tags](#auto-update-on-floating-tags).
 
 `ContainerConfig.user` controls the host-UID mapping for files the container creates on bind mounts — see [Host-UID Ownership](#host-uid-ownership). `ContainerConfig.extraHosts` lets you add hostname → IP entries to `/etc/hosts`; signalk-container automatically maps `host.containers.internal` to `host-gateway` on Docker (Podman has it natively), and a user value passed in `extraHosts` is respected as an override.
 

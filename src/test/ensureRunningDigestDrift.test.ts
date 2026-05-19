@@ -65,10 +65,6 @@ const isLiveConfigInspect = (args: string[]) =>
   args[0] === "inspect" && args.some((a) => a.includes("{{.Config.Image}}"));
 const isImageIdInspect = (args: string[]) =>
   args[0] === "image" && args[1] === "inspect" && args.includes("{{.Id}}");
-const isRepoDigestInspect = (args: string[]) =>
-  args[0] === "image" &&
-  args[1] === "inspect" &&
-  args.some((a) => a.includes("RepoDigests"));
 const isContainerImageInspect = (args: string[]) =>
   args[0] === "inspect" && args.includes("{{.Image}}");
 
@@ -190,24 +186,25 @@ describe("ensureRunning — autoUpdateOnFloatingTag", () => {
     );
   });
 
-  it("pulls but does NOT recreate when digests match", async () => {
-    const sameDigest = "sha256:" + "a".repeat(64);
+  it("pulls but does NOT recreate when image-ids match", async () => {
+    const sameId = "sha256:" + "a".repeat(64);
     const { exec, calls } = makeRouterExec((args) => {
       if (isStateInspect(args))
         return { stdout: "running|true|12345", exitCode: 0 };
       if (isLiveConfigInspect(args))
         return { stdout: liveConfig("questdb/questdb:latest"), exitCode: 0 };
-      // getImageDigest on image:tag (registry side)
-      if (isImageIdInspect(args)) return { stdout: sameDigest, exitCode: 0 };
-      // getLiveContainerDigest: container .Image (returns the same image-id)
-      if (isContainerImageInspect(args))
-        return { stdout: sameDigest, exitCode: 0 };
-      // getLiveContainerDigest: getRepoDigest on the image-id
-      if (isRepoDigestInspect(args))
-        return {
-          stdout: `docker.io/questdb/questdb@${sameDigest}`,
-          exitCode: 0,
-        };
+      // getImageDigest on image:tag (registry side after pull) — image-inspect
+      // succeeds because the image is now in the local store.
+      if (isImageIdInspect(args)) {
+        const last = args[args.length - 1];
+        if (last && last.includes("questdb")) {
+          return { stdout: sameId, exitCode: 0 };
+        }
+        // image-inspect on the container name fails (no image with that name).
+        return { stdout: "", exitCode: 1 };
+      }
+      // getImageDigest fallback: container's .Image returns the image-id.
+      if (isContainerImageInspect(args)) return { stdout: sameId, exitCode: 0 };
       throw new Error(`unexpected exec: ${args.join(" ")}`);
     });
     let pulled = 0;
@@ -227,17 +224,16 @@ describe("ensureRunning — autoUpdateOnFloatingTag", () => {
     assert.equal(pulled, 1, "pull should happen once");
     assert.ok(
       !calls.some((c) => c.args[0] === "rm"),
-      "no rm should fire when digests match",
+      "no rm should fire when image-ids match",
     );
   });
 
-  it("recreates when registry digest differs from running container digest", async () => {
-    const remoteDigest = "sha256:" + "b".repeat(64);
-    const liveDigest = "sha256:" + "c".repeat(64);
+  it("recreates when registry image-id differs from running container image-id", async () => {
+    const remoteId = "sha256:" + "b".repeat(64);
+    const liveId = "sha256:" + "c".repeat(64);
     let recreated = false;
     const { exec, calls } = makeRouterExec((args) => {
       if (isStateInspect(args)) {
-        // After remove, container is gone — getContainerState returns "missing"
         if (recreated) {
           return { stdout: "", stderr: "no such object", exitCode: 1 };
         }
@@ -245,27 +241,24 @@ describe("ensureRunning — autoUpdateOnFloatingTag", () => {
       }
       if (isLiveConfigInspect(args))
         return { stdout: liveConfig("questdb/questdb:latest"), exitCode: 0 };
-      // Registry-side digest probe (image:tag) — order matters: first
-      // image-inspect after liveConfig matches the image:tag, second is the
-      // container's image-id, third is the RepoDigests on that image-id.
+      // image-inspect on image:tag (registry-fresh after pull) vs on
+      // container name (which fails — no image by that name).
       if (isImageIdInspect(args)) {
-        // Look at the last arg to decide which probe this is.
         const last = args[args.length - 1];
         if (last && last.includes("questdb:latest")) {
-          return { stdout: remoteDigest, exitCode: 0 };
+          return { stdout: remoteId, exitCode: 0 };
         }
-        // Otherwise it's the secondary getImageDigest call from within
-        // getLiveContainerDigest (which is actually `inspect --format
-        // {{.Image}}` — see isContainerImageInspect below). We fall through.
-        return { stdout: "", exitCode: 1 };
+        // image-inspect on the container name → not an image → exit 1
+        // so getImageDigest falls back to container .Image.
+        if (last === "sk-questdb") {
+          return { stdout: "", exitCode: 1 };
+        }
+        // Post-recreate: imageExists probe in the missing branch.
+        return { stdout: "ok", exitCode: 0 };
       }
-      if (isContainerImageInspect(args))
-        return { stdout: liveDigest, exitCode: 0 };
-      if (isRepoDigestInspect(args))
-        return {
-          stdout: `docker.io/questdb/questdb@${liveDigest}`,
-          exitCode: 0,
-        };
+      if (isContainerImageInspect(args)) {
+        return { stdout: liveId, exitCode: 0 };
+      }
       // Post-recreate path: inspect for binds during fixVolumePermissions
       if (args[0] === "inspect") return { stdout: "", exitCode: 0 };
       if (args[0] === "stop") return { stdout: "", exitCode: 0 };

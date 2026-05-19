@@ -94,8 +94,9 @@ export interface ContainerConfig {
   /**
    * When `true` AND `tag` classifies as floating (`latest`, `main`, `edge`,
    * `nightly`, etc.), `ensureRunning` pulls the tag on every call and
-   * compares the registry's manifest digest against the running container's
-   * image digest. A mismatch is treated as drift → remove + recreate.
+   * compares the registry-fresh image-id against the running container's
+   * image-id. A mismatch is treated as drift → remove + recreate. This
+   * matches what `updates/service.ts` does for floating-tag drift detection.
    *
    * Off by default — opt in per consumer plugin. The standard `image+tag`
    * string comparison is unchanged; this is an additional probe.
