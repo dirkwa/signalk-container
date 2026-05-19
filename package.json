@@ -1,6 +1,6 @@
 {
   "name": "signalk-container",
-  "version": "1.7.0",
+  "version": "1.8.0-beta.1",
   "description": "Shared container runtime management (Podman/Docker) for Signal K plugins",
   "keywords": [
     "signalk-node-server-plugin",
