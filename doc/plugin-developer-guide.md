@@ -634,6 +634,32 @@ await containers.ensureRunning("legacy-worker", {
 
 The container then runs with whatever the image's `USER` directive specifies, with no flag emitted by signalk-container.
 
+### Image requirements for UID-aligned containers
+
+An image that signalk-container starts under the default ownership mapping must:
+
+- **Run cleanly as a non-root UID** passed via the runtime's user/userns mechanism. The image cannot assume root privileges for setup; anything that needs root must happen at build time.
+- **Have a writable `HOME` for the runtime UID.** Image entrypoints that touch `~/.config` or any dotfile in `$HOME` fail otherwise. The right pattern is a dedicated non-root user with its own home directory created at build time (see the Dockerfile example below). When you can't change the user — e.g. an upstream image that hardcodes `HOME=/root` — set `ENV HOME=/tmp` (or another per-UID-writable path) in a thin wrapper image instead. Do not work around this by making `/root` world-writable; that erases the security boundary the dedicated user provides.
+- **Have a writable `/tmp` for the runtime UID.** Default `1777` is fine; the doctor probe checks exactly this.
+- **Not depend on root-only paths at runtime.** `/root`, ownership of `/var/run`, `chown` on bind-mounted host paths in the entrypoint — all break under the mapping.
+- **Not call `chmod` or `chown` against host-mounted paths in its entrypoint.** The whole point of the UID alignment is that files are already correctly owned at creation; an entrypoint that re-asserts ownership is fighting the model and will silently no-op on FAT/exFAT/NTFS bind sources anyway.
+
+If you control the image's Dockerfile, the cleanest pattern is a dedicated non-root user with a real home directory:
+
+```dockerfile
+RUN useradd -m -u 1001 -s /bin/sh worker
+USER worker
+```
+
+Then declare `user: { inImageUid: 1001, inImageGid: 1001 }` on the `ContainerConfig` so the rootless-Podman remap picks the right starting point.
+
+If you're adopting a third-party image and it doesn't meet these criteria, options in rough order of preference:
+
+1. Run the doctor probe (next subsection) to confirm the breakage and the failure mode.
+2. File an upstream fix if the image is maintained — most popular images are happy to accept a non-root patch.
+3. Use `user: false` to opt out of the mapping (the image runs as root, files on bind mounts are owned by root on the host — back to the pre-1.8.0 behavior).
+4. Build a thin wrapper image that fixes the ownership requirements at build time.
+
 ### Verifying compatibility ahead of time
 
 Before adopting an unfamiliar image, run `containers.doctor.imageRunsAsUser(image, user?)` (see API reference above). It catches the common failure modes (`/tmp` not writable for the host UID, image entrypoint touches `~` and `$HOME` isn't writable for that UID) up-front, instead of leaving you to debug a container stuck in a restart loop with a cryptic error.
