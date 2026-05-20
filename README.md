@@ -448,45 +448,92 @@ this plugin needs access to the host's container runtime to manage other
 containers. The plugin auto-detects this scenario via `/.dockerenv` or
 `/run/.containerenv` and prefixes the status with `(in-container)`.
 
-For the plugin to work, you must expose the host's container runtime to
-the Signal K container:
+For the plugin to work, two things must be true inside the Signal K
+container:
 
-### Docker (with security caveats)
+1. **The runtime CLI is installed.** Bake `podman` (or `podman-remote`)
+   into your Signal K image — this is the recommended path. As a quick
+   alternative you can bind-mount the host binary read-only, but that
+   couples the container to the host's exact runtime version.
+2. **The runtime socket is bind-mounted** from the host (rootless or
+   rootful, podman or docker — see examples below).
+
+### Quick check: `/api/doctor/deployment`
+
+The plugin ships a self-diagnostic. After starting, hit:
+
+```bash
+curl http://<signalk-host>:3000/plugins/signalk-container/api/doctor/deployment
+```
+
+The response includes a `status` field (`ok` / `no-runtime` /
+`socket-unreachable` / `permission-denied` / `self-id-unresolved`) and a
+`remediation` array of copy-pasteable lines for whichever failure mode
+applies. When startup detection fails, the same remediation is also
+logged to the Signal K server log.
+
+### Rootless Podman (recommended)
+
+The cleanest setup. Runs as your user, not root, so the security
+exposure is limited to your user account rather than the entire host —
+and matches signalk-container's default behaviour.
+
+On the host, ensure the user-scoped podman socket is enabled:
+
+```bash
+systemctl --user enable --now podman.socket
+```
+
+Then in your compose / `podman run`:
 
 ```yaml
 services:
   signalk:
-    image: signalk/signalk-server
+    image: your-signalk-image-with-podman-remote
+    user: "${UID}:${GID}" # match the uid that owns the host's podman socket
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - /usr/bin/docker:/usr/bin/docker:ro
+      - /run/user/${UID}/podman/podman.sock:/run/user/${UID}/podman/podman.sock
+    environment:
+      - CONTAINER_HOST=unix:///run/user/${UID}/podman/podman.sock
 ```
 
-The Signal K image must include the `docker` CLI binary, OR you mount
-it from the host as shown above. Containers managed by the plugin
-become **siblings** of the Signal K container, not nested.
+Your image's Dockerfile should include `podman` or `podman-remote`:
+
+```dockerfile
+RUN apt-get update && apt-get install -y podman    # Debian/Ubuntu
+# or:
+RUN dnf install -y podman-remote                    # Fedora/RHEL
+```
+
+### Rootful Podman
+
+```yaml
+services:
+  signalk:
+    image: your-signalk-image-with-podman
+    volumes:
+      - /run/podman/podman.sock:/run/podman/podman.sock
+    environment:
+      - CONTAINER_HOST=unix:///run/podman/podman.sock
+```
+
+### Docker
+
+```yaml
+services:
+  signalk:
+    image: your-signalk-image-with-docker-cli
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    group_add:
+      - "<docker-gid-from-host>" # `getent group docker | cut -d: -f3`
+```
 
 > [!warning]
 > Mounting `/var/run/docker.sock` gives the container **root-equivalent
 > access to the host**. Anyone who compromises Signal K (including via
-> a malicious plugin) can take over the entire host. Only use this if
-> you understand and accept the security implications.
-
-### Podman (rootless, safer)
-
-```yaml
-services:
-  signalk:
-    image: signalk/signalk-server
-    volumes:
-      - $XDG_RUNTIME_DIR/podman/podman.sock:/var/run/podman.sock
-      - /usr/bin/podman:/usr/bin/podman:ro
-    environment:
-      - DOCKER_HOST=unix:///var/run/podman.sock
-```
-
-Rootless Podman runs as your user, not root, so the security exposure
-is limited to your user account rather than the entire host.
+> a malicious plugin) can take over the entire host. Prefer rootless
+> Podman for production.
 
 ### Networking caveats
 
@@ -501,12 +548,6 @@ network namespace. This affects:
   for direct communication. signalk-container 1.8.0+ adds this hostname
   to Docker containers automatically (Podman already provides it); set
   `ContainerConfig.extraHosts` to override it or to add other hostnames.
-
-### Recommended setup
-
-For the simplest experience with managed containers, run **Signal K
-natively on the host** rather than in a container. The plugin and its
-ecosystem (signalk-questdb, signalk-grafana) are designed for this case.
 
 ## License
 

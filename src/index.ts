@@ -18,6 +18,8 @@ import {
   PluginConfig,
   PruneResult,
   ResolveResult,
+  RuntimePreference,
+  SelfDeploymentResult,
   UpdateResourcesResult,
   VolumeIssue,
 } from "./types.js";
@@ -72,7 +74,7 @@ import { FileUpdateCache } from "./updates/cache.js";
 import { registerUpdateRoutes } from "./updates/routes.js";
 import { DIGEST_RE, resolveImage } from "./manifest/resolver.js";
 import { ManifestStore } from "./manifest/store.js";
-import { imageRunsAsUser } from "./doctor.js";
+import { imageRunsAsUser, selfDeployment } from "./doctor.js";
 
 interface App {
   debug: (...args: unknown[]) => void;
@@ -115,6 +117,7 @@ const SSE_HEARTBEAT_MS = 30_000;
 
 export default (app: App) => {
   let runtimeInfo: ContainerRuntimeInfo | null = null;
+  let runtimePreference: RuntimePreference = "auto";
   let pruneTimer: NodeJS.Timeout | null = null;
   const healthTimers = new Map<string, NodeJS.Timeout>();
   let updateService: UpdateService | null = null;
@@ -1481,6 +1484,9 @@ export default (app: App) => {
       }
       return imageRunsAsUser(runtimeInfo, image, user);
     },
+    async selfDeployment(): Promise<SelfDeploymentResult> {
+      return selfDeployment(runtimePreference);
+    },
   };
 
   const stubDoctor: DoctorApi = {
@@ -1494,6 +1500,14 @@ export default (app: App) => {
         output: "",
         error: "Container manager not yet started",
       };
+    },
+    // selfDeployment is the diagnostic for "why isn't the runtime up?",
+    // so it must work BEFORE start() settles — otherwise operators have
+    // no way to find out from the API what went wrong. Calls through to
+    // the real probe using whatever preference has been captured so far
+    // (defaults to "auto" at module init).
+    async selfDeployment(): Promise<SelfDeploymentResult> {
+      return selfDeployment(runtimePreference);
     },
   };
 
@@ -1715,34 +1729,44 @@ export default (app: App) => {
       // Async init — server does not await start()
       (async () => {
         const preference = config.runtime ?? "auto";
+        runtimePreference = preference;
         const containerized = isContainerized();
         if (containerized) {
           app.debug(
             "Signal K is running inside a container. Container runtime " +
-              "must be exposed (docker.sock + binary) for this plugin to work.",
+              "must be exposed (podman/docker socket + binary) for this plugin to work.",
           );
         }
         app.debug("detecting runtime, preference=%s", preference);
         runtimeInfo = await detectRuntime(preference);
         app.debug("detectRuntime result: %o", runtimeInfo);
-        if (runtimeInfo) {
-          const hostUser = runtimeInfo.hostUser;
-          app.debug(
-            `runtime ready: ${runtimeInfo.runtime} ${runtimeInfo.version}` +
-              `, rootless=${runtimeInfo.isRootless ?? "unknown"}` +
-              `, hostUser=${hostUser ? `${hostUser.uid}:${hostUser.gid}` : "unavailable"}`,
-          );
-        }
 
         if (!runtimeInfo) {
-          const msg = containerized
-            ? "No container runtime found. Signal K appears to run inside a container — " +
-              "you must mount the host's docker socket and binary. See README."
-            : "No container runtime found. Install Podman: sudo apt install podman";
-          app.setPluginError(msg);
+          // Detection failed — run the deployment doctor to extract a
+          // copy-pasteable remediation. Goes to app.error so the lines
+          // land in the Signal K server log; setPluginError stays
+          // short because it shows inline in the admin UI.
+          const doctor = await selfDeployment(preference);
+          const headline = headlineForDoctorStatus(doctor.status);
+          app.setPluginError(
+            `${headline}. See GET /plugins/signalk-container/api/doctor/deployment for details.`,
+          );
+          if (doctor.remediation.length > 0) {
+            app.error(
+              `signalk-container deployment doctor — ${headline}:\n${doctor.remediation.join("\n")}`,
+            );
+          }
           localResolveReady();
           return;
         }
+
+        const hostUser = runtimeInfo.hostUser;
+        app.debug(
+          `runtime ready: ${runtimeInfo.runtime} ${runtimeInfo.version}` +
+            `, rootless=${runtimeInfo.isRootless ?? "unknown"}` +
+            `, hostUser=${hostUser ? `${hostUser.uid}:${hostUser.gid}` : "unavailable"}` +
+            `, containerized=${containerized}`,
+        );
 
         const statusPrefix = containerized ? "(in-container) " : "";
         app.setPluginStatus(
@@ -2222,6 +2246,21 @@ export default (app: App) => {
         }
       });
 
+      // Deployment doctor. Unlike the image probe this is a GET — no
+      // body, idempotent, and the response is the operator-facing
+      // diagnosis of "why isn't the runtime up?". Re-runs the probe on
+      // each call; the cost is at most three execFile invocations.
+      router.get("/api/doctor/deployment", async (_req, res) => {
+        try {
+          const result = await api.doctor.selfDeployment();
+          res.json(result);
+        } catch (err) {
+          res.status(500).json({
+            error: err instanceof Error ? err.message : "Unknown error",
+          });
+        }
+      });
+
       // Update detection routes (registered if and only if the
       // service was instantiated in start()).
       if (updateService) {
@@ -2232,6 +2271,23 @@ export default (app: App) => {
 
   return plugin;
 };
+
+function headlineForDoctorStatus(
+  status: SelfDeploymentResult["status"],
+): string {
+  switch (status) {
+    case "no-runtime":
+      return "No container runtime found";
+    case "socket-unreachable":
+      return "Runtime socket unreachable";
+    case "permission-denied":
+      return "Runtime socket: permission denied";
+    case "self-id-unresolved":
+      return "Signal K container ID unresolved";
+    case "ok":
+      return "Runtime ready";
+  }
+}
 
 function parseDurationOrDefault(
   input: string | undefined,
