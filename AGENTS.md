@@ -10,7 +10,7 @@ Key components:
 - **`src/resources.ts`** — cgroup-limit flag emission + live-update path via `podman/docker update`. The "Bug D" precedent for diff-on-already-running lives here.
 - **`src/runtime.ts`** — Runtime detection (`podman` vs `docker`), version probing, `execRuntime`/`execRuntimeLong` dispatch, `isContainerized()` self-detection.
 - **`src/updates/`** — Centralized image-update detection (digest drift for floating tags, version comparison for semver). Used by all consumer plugins via `containers.updates.register(...)`.
-- **`public/`** — React config panel served via Module Federation into the Signal K Admin UI.
+- **`src/configpanel/`** — React config panel source. Built with Vite + `@module-federation/vite` (`vite.config.ts`); output lands in `public/remoteEntry.js` + `public/configpanel-entry.js`, served via Module Federation into the Signal K Admin UI.
 
 ## Code Quality Principles
 
@@ -39,7 +39,7 @@ Do not add error handling, fallbacks, or validation for scenarios that cannot ha
 - All new code requires tests. Test behavior at the function boundary, not internal control flow.
 - Inject `exec: ExecFn = execRuntime` rather than calling the runtime directly. Tests stub via `fakeExec`. See `src/test/getLiveResources.test.ts` for the canonical pattern: synthetic `{stdout, stderr, exitCode}`, no real podman invocations.
 - Container-integration tests (those that actually pull `alpine:3.19`) gate on `hasContainerRuntime()` which returns `null` on Windows. Do not add new tests that pull real Linux images without the same guard.
-- 333 tests today across 59 suites; expect them all green on every commit.
+- All tests must pass on every commit. Run `npm test` after `npm run build` (or `npm run build:all` to do both); `node --test` runs the compiled `dist/test/**/*.test.js` glob, so a fresh build is required before testing.
 
 ## Runtime Invariants
 
@@ -137,10 +137,12 @@ This repo is maintained by Dirk Wahrheit. Workflow is deliberate; AI tools shoul
 
 Before pushing or opening a PR:
 
-1. `npm run format` — prettier write + eslint --fix
-2. `npm run build:all` — `clean && tsc && webpack && test`. All 333 tests must pass.
-3. `npm run ci-lint` — `eslint && prettier --check` (the strict-no-write variant CI runs)
+1. `npm run format` — `prettier --write .` + `eslint --fix` (writes back fixes)
+2. `npm run build:all` — `build && test`, where `build` = `clean && build:server (tsc) && build:configpanel (vite build)`. All tests must pass.
+3. `npm run ci-lint` — `eslint && prettier --check .` — read-only verification of step 1's output; this is what CI runs and what catches uncommitted format/lint drift.
 4. `cr review --plain | tee /tmp/cr-review-<branch>.txt` — local CodeRabbit pass. `cr` only sees committed changes, so commit first, then review. The CLI is rate-limited (~50min cooldown); pipe to a file so reruns aren't needed.
+
+For iterative server-side work, `npm run watch` runs `tsc --watch`. It does **not** rebuild the configpanel and does **not** clean stale `dist/test/` — run a full `npm run build` before invoking `npm test`.
 
 Only push after all four pass. **Never push without explicit approval.** `git push` always needs its own permission — commit/test/format/cr approval does not cover push.
 
