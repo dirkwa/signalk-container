@@ -10,7 +10,7 @@ Key components:
 - **`src/resources.ts`** — cgroup-limit flag emission + live-update path via `podman/docker update`. The "Bug D" precedent for diff-on-already-running lives here.
 - **`src/runtime.ts`** — Runtime detection (`podman` vs `docker`), version probing, `execRuntime`/`execRuntimeLong` dispatch, `isContainerized()` self-detection.
 - **`src/updates/`** — Centralized image-update detection (digest drift for floating tags, version comparison for semver). Used by all consumer plugins via `containers.updates.register(...)`.
-- **`src/configpanel/`** — React config panel source. Built with Vite + `@module-federation/vite` (`vite.config.ts`); output lands in `public/remoteEntry.js` + `public/configpanel-entry.js`, served via Module Federation into the Signal K Admin UI.
+- **`src/configpanel/`** — React config panel source. Built with Vite + `@module-federation/vite` (see `vite.config.ts`); build artifacts land in `public/`, served via Module Federation into the Signal K Admin UI.
 
 ## Code Quality Principles
 
