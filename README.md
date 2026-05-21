@@ -581,13 +581,15 @@ If you run Signal K via a podman Quadlet (`*.container` in
 `podman stop`. This races with manually-started replacement containers
 on the same port.
 
-For test/diagnostic swaps:
+For test/diagnostic swaps, temporarily disable the unit's
+restart/recovery policy before stopping the container and re-enable it
+afterward. With a `--user` Quadlet (substitute your actual unit name):
 
 ```bash
-systemctl --user mask  signalk-master.service   # suppress auto-restart
+systemctl --user mask  <your-signalk-unit>.service   # suppress auto-restart
 # … run your test container on port 3000 …
-systemctl --user unmask signalk-master.service  # re-enable
-systemctl --user start  signalk-master.service
+systemctl --user unmask <your-signalk-unit>.service  # re-enable
+systemctl --user start  <your-signalk-unit>.service
 ```
 
 This is purely an operator-side consideration; signalk-container has no
