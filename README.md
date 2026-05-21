@@ -572,6 +572,50 @@ network namespace. This affects:
   to Docker containers automatically (Podman already provides it); set
   `ContainerConfig.extraHosts` to override it or to add other hostnames.
 
+### Set `SIGNALK_CONTAINER_ID` under host networking
+
+When Signal K runs with `--network host`, the `HOSTNAME` env var inside
+the container equals the host machine's name (e.g. `pi5`), not a
+container ID. signalk-container's self-detection cascade is:
+
+1. `$SIGNALK_CONTAINER_ID` (operator override)
+2. `$HOSTNAME` — validated via `<runtime> inspect`
+3. `/proc/self/cgroup` — also validated via `inspect`
+
+Under `--network host`, step 2 falls through (inspecting `pi5` fails),
+and step 3 falls through if cgroup paths don't carry a container ID.
+The doctor catches this as `status: self-id-unresolved`. The fix:
+
+```yaml
+environment:
+  - SIGNALK_CONTAINER_ID=signalk # match your container_name / --name
+```
+
+Without it, data-dir path translation and the sibling-bridge networking
+fallback both break — sibling containers fail to start with
+`statfs ... no such file or directory`.
+
+### Watch out for systemd auto-restart (Quadlet / `Restart=always`)
+
+If you run Signal K via a podman Quadlet (`*.container` in
+`~/.config/containers/systemd/`) or a systemd unit with
+`Restart=always`, the unit silently restarts the SK container within
+`RestartSec` seconds of any stop — including operator-initiated
+`podman stop`. This races with manually-started replacement containers
+on the same port.
+
+For test/diagnostic swaps:
+
+```bash
+systemctl --user mask  signalk-master.service   # suppress auto-restart
+# … run your test container on port 3000 …
+systemctl --user unmask signalk-master.service  # re-enable
+systemctl --user start  signalk-master.service
+```
+
+This is purely an operator-side consideration; signalk-container has no
+visibility into systemd-managed lifecycles.
+
 ## License
 
 MIT

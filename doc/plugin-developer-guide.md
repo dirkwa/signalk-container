@@ -1346,6 +1346,62 @@ For consumer plugins (like signalk-questdb): if you rely on `host.containers.int
 
 See the README's "Running Signal K in a Container" section for full details on socket mounting, security caveats, and networking.
 
+### Which API for what
+
+A consumer plugin that mounts a host path into a managed container has four reasonable patterns, depending on whether SK is bare-metal or itself containerized. Pick by use case:
+
+| Use case                                                                                                                 | API                                    | Why                                                                                                                                                                                                                                |
+| ------------------------------------------------------------------------------------------------------------------------ | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Mount **the whole SK data directory** at a chosen container path. signalk-container picks the host source automatically. | `ContainerConfig.signalkDataMount`     | Declarative — set the container path on the config object, signalk-container resolves the host side. Plugin sees the same string regardless of deployment.                                                                         |
+| Just need to **know the host source** behind `app.getDataDirPath()` (e.g. for a non-`volumes` config field).             | `containers.resolveSignalkDataMount()` | Imperative companion to `signalkDataMount`. Returns the host path or volume name. `null` if the runtime hasn't been detected yet.                                                                                                  |
+| Mount a **specific path inside or outside** the data dir (a chart directory, an existing host download cache, etc.).     | `containers.resolveHostPath(absPath)`  | General-purpose. Returns `{ source, subPath }` — the bind-mount source the runtime needs, plus the offset inside if the covering SK mount is a parent directory. `null` when SK is in a container and no SK mount covers the path. |
+| Hardcoded **host path** that already exists on the host filesystem (a fixed `/etc/...`, a USB drive at `/media/...`).    | Raw `volumes` entry                    | The path is already host-side; no translation needed. Use the per-volume `ifMissing` policy if it may be absent.                                                                                                                   |
+
+What you must **not** do: `volumes: { "/in-container/path": app.getDataDirPath() }`. That works on bare-metal but breaks when SK runs in a container — `app.getDataDirPath()` is the SK-container-internal view, and the host's runtime daemon cannot resolve it. The result is `Error: statfs <path>: no such file or directory`.
+
+### Worked example: signalk-questdb
+
+The [signalk-questdb 1.0.0 → 1.0.1 fix](https://github.com/dirkwa/signalk-questdb/pull/21) is the canonical illustration. Before:
+
+```typescript
+const containerConfig = {
+  // …
+  volumes: {
+    "/var/lib/questdb": app.getDataDirPath(), // ← breaks in-container
+  },
+};
+```
+
+After:
+
+```typescript
+async function resolveQuestdbVolumeSource(
+  containers: ContainerManagerApi,
+): Promise<string> {
+  const dataPath = app.getDataDirPath();
+  if (typeof containers.resolveHostPath !== "function") return dataPath;
+  try {
+    const resolved = await containers.resolveHostPath(dataPath);
+    return resolved?.source ?? dataPath;
+  } catch {
+    return dataPath;
+  }
+}
+
+// …
+const volumeSource = await resolveQuestdbVolumeSource(containers);
+const containerConfig = {
+  // …
+  volumes: { "/var/lib/questdb": volumeSource },
+};
+```
+
+Three things this idiom does:
+
+1. **Falls back to the original path** when `resolveHostPath` isn't available — keeps the plugin working against signalk-container `< 1.7.0`.
+2. **Falls back on a thrown error** — `resolveHostPath` is documented as non-throwing in current signalk-container, but cross-plugin APIs are consumed through `(globalThis as any).__signalk_containerManager` (no type-level guarantee), so wrapping is the safer pattern.
+3. **Preserves per-plugin scoping** — only the plugin's own subdirectory is mounted into the managed container, not the entire SK data dir.
+
 ---
 
 ## Common Mistakes Summary
