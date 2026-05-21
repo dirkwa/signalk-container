@@ -269,7 +269,7 @@ The deployment-mode resolution is identical to `signalkDataMount`: bare-metal re
 2. **`HOSTNAME`** — the default in container deployments where the runtime sets `HOSTNAME=<container-id>`
 3. **`/proc/self/cgroup`** — extracts the container ID from the cgroup path (works for cgroup v1/v2, Docker, Podman rootless and rootful, and Kubernetes)
 
-The cascade is robust against the **`network_mode: host`** case where `HOSTNAME` is the host machine name (e.g. `halos`) rather than the container ID — the cgroup-based step picks up the real ID and `docker inspect` succeeds.
+The cascade is **mostly** robust against the **`network_mode: host`** case where `HOSTNAME` is the host machine name (e.g. `halos`) rather than the container ID — the cgroup-based step usually picks up the real ID. On some hosts, however, `/proc/self/cgroup` under host networking reads just `0::/` (no container path), and the cascade falls through entirely. When the doctor reports `status: self-id-unresolved` and consumer plugins fail to create sibling containers with `Error: statfs <path>: no such file or directory`, set the override explicitly:
 
 **When automatic detection fails** (custom deployment, unusual cgroup layout, or a future runtime we don't recognise), set `SIGNALK_CONTAINER_ID` to the container's name or ID in your compose file:
 
@@ -571,6 +571,29 @@ network namespace. This affects:
   for direct communication. signalk-container 1.8.0+ adds this hostname
   to Docker containers automatically (Podman already provides it); set
   `ContainerConfig.extraHosts` to override it or to add other hostnames.
+
+### Watch out for systemd auto-restart (Quadlet / `Restart=always`)
+
+If you run Signal K via a podman Quadlet (`*.container` in
+`~/.config/containers/systemd/`) or a systemd unit with
+`Restart=always`, the unit silently restarts the SK container within
+`RestartSec` seconds of any stop — including operator-initiated
+`podman stop`. This races with manually-started replacement containers
+on the same port.
+
+For test/diagnostic swaps, temporarily disable the unit's
+restart/recovery policy before stopping the container and re-enable it
+afterward. With a `--user` Quadlet (substitute your actual unit name):
+
+```bash
+systemctl --user mask  <your-signalk-unit>.service   # suppress auto-restart
+# … run your test container on port 3000 …
+systemctl --user unmask <your-signalk-unit>.service  # re-enable
+systemctl --user start  <your-signalk-unit>.service
+```
+
+This is purely an operator-side consideration; signalk-container has no
+visibility into systemd-managed lifecycles.
 
 ## License
 
