@@ -443,6 +443,10 @@ Note that `override` contains only the fields that differ from the consumer plug
 
 The plugin developer guide has a detailed walk-through in [doc/plugin-developer-guide.md#resource-limits](doc/plugin-developer-guide.md#resource-limits).
 
+> If you're running Signal K inside a container and a memory limit
+> appears to be ignored, the host's cgroup controller delegation is
+> almost certainly the cause — see [Cgroup controller delegation](#cgroup-controller-delegation) below.
+
 ## Requirements
 
 - Node.js >= 22
@@ -571,6 +575,57 @@ network namespace. This affects:
   for direct communication. signalk-container 1.8.0+ adds this hostname
   to Docker containers automatically (Podman already provides it); set
   `ContainerConfig.extraHosts` to override it or to add other hostnames.
+
+### Cgroup controller delegation
+
+When Signal K runs inside a rootless container, the kernel only enforces
+those resource limits whose **cgroup controller has been delegated** down
+to the SK container's cgroup. Anything else passed to `podman run` is
+silently ignored — your `--memory 1g` request reaches the runtime, but
+the cgroup never gets a memory cap and the container can grow without
+bound.
+
+The most common culprit is `memory`: many distros delegate `cpu`,
+`cpuset`, `io`, and `pids` to user sessions by default, but `memory`
+must be explicitly added.
+
+signalk-container 1.9.0+ probes the available controllers via
+`/sys/fs/cgroup/cgroup.controllers` and **silently drops** unsupported
+limit fields before invoking podman — better than crashing the
+container, but the user-visible effect is "I set memory to 1 GB and
+nothing happened." The drop is logged at `debug` level with the reason
+(`cgroup controller 'memory' not delegated to podman (available: cpuset,
+cpu, io, pids)`); the live `effective` resource response also reflects
+only what's actually in place.
+
+**Check whether `memory` is delegated to your SK container:**
+
+```bash
+podman exec <sk-container> cat /sys/fs/cgroup/cgroup.controllers
+# cpuset cpu io memory pids       ← memory delegated, all limits work
+# cpuset cpu io pids               ← memory missing, --memory is dropped
+```
+
+**Enable memory delegation on the host** (one-time, requires sudo):
+
+```bash
+sudo mkdir -p /etc/systemd/system/user@.service.d
+sudo tee /etc/systemd/system/user@.service.d/delegate.conf <<'EOF'
+[Service]
+Delegate=cpu cpuset io memory pids
+EOF
+sudo systemctl daemon-reload
+# Log the SK-owning user out and back in (or reboot) so a fresh user@.service starts.
+```
+
+After re-login, re-running the consumer plugin's `ensureRunning` (or
+just restarting Signal K) recreates the managed container with the
+memory cap actually applied. Verify with `podman inspect sk-<name>
+--format '{{.HostConfig.Memory}}'` — a non-zero value confirms the cap
+is in cgroup state, not just on the command line.
+
+This is purely a host-side prerequisite; signalk-container cannot
+override the kernel's controller delegation.
 
 ### Watch out for systemd auto-restart (Quadlet / `Restart=always`)
 
