@@ -269,7 +269,7 @@ The deployment-mode resolution is identical to `signalkDataMount`: bare-metal re
 2. **`HOSTNAME`** — the default in container deployments where the runtime sets `HOSTNAME=<container-id>`
 3. **`/proc/self/cgroup`** — extracts the container ID from the cgroup path (works for cgroup v1/v2, Docker, Podman rootless and rootful, and Kubernetes)
 
-The cascade is robust against the **`network_mode: host`** case where `HOSTNAME` is the host machine name (e.g. `halos`) rather than the container ID — the cgroup-based step picks up the real ID and `docker inspect` succeeds.
+The cascade is **mostly** robust against the **`network_mode: host`** case where `HOSTNAME` is the host machine name (e.g. `halos`) rather than the container ID — the cgroup-based step usually picks up the real ID. On some hosts, however, `/proc/self/cgroup` under host networking reads just `0::/` (no container path), and the cascade falls through entirely. When the doctor reports `status: self-id-unresolved` and consumer plugins fail to create sibling containers with `Error: statfs <path>: no such file or directory`, set the override explicitly:
 
 **When automatic detection fails** (custom deployment, unusual cgroup layout, or a future runtime we don't recognise), set `SIGNALK_CONTAINER_ID` to the container's name or ID in your compose file:
 
@@ -571,29 +571,6 @@ network namespace. This affects:
   for direct communication. signalk-container 1.8.0+ adds this hostname
   to Docker containers automatically (Podman already provides it); set
   `ContainerConfig.extraHosts` to override it or to add other hostnames.
-
-### Set `SIGNALK_CONTAINER_ID` under host networking
-
-When Signal K runs with `--network host`, the `HOSTNAME` env var inside
-the container equals the host machine's name (e.g. `pi5`), not a
-container ID. signalk-container's self-detection cascade is:
-
-1. `$SIGNALK_CONTAINER_ID` (operator override)
-2. `$HOSTNAME` — validated via `<runtime> inspect`
-3. `/proc/self/cgroup` — also validated via `inspect`
-
-Under `--network host`, step 2 falls through (inspecting `pi5` fails),
-and step 3 falls through if cgroup paths don't carry a container ID.
-The doctor catches this as `status: self-id-unresolved`. The fix:
-
-```yaml
-environment:
-  - SIGNALK_CONTAINER_ID=signalk # match your container_name / --name
-```
-
-Without it, data-dir path translation and the sibling-bridge networking
-fallback both break — sibling containers fail to start with
-`statfs ... no such file or directory`.
 
 ### Watch out for systemd auto-restart (Quadlet / `Restart=always`)
 
