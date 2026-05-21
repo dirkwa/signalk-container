@@ -847,6 +847,26 @@ export interface DoctorApi {
    * Surfaced over REST at `GET /plugins/signalk-container/api/doctor/deployment`.
    */
   selfDeployment(): Promise<SelfDeploymentResult>;
+
+  /**
+   * Generate a ready-to-paste compose fragment or `podman/docker run`
+   * command tailored to the detected (or supplied) deployment shape.
+   *
+   * Pure templating over `SelfDeploymentResult`; runs no probes itself.
+   * When `result` is omitted, the latest `selfDeployment()` snapshot is
+   * used. Bundles a minimal Dockerfile sidecar showing the image-side
+   * prereqs (`RUN apt-get install -y podman` etc) and a `notes` array
+   * with operator-facing caveats (SELinux, Windows uid-mapping, etc).
+   *
+   * Surfaced over REST at
+   * `GET /plugins/signalk-container/api/doctor/snippet?format=compose|run`.
+   * That endpoint returns `text/plain` by default; `Accept: application/json`
+   * yields the full `SetupSnippetResult` structure.
+   */
+  generateSetupSnippet(
+    format?: SetupSnippetFormat,
+    result?: SelfDeploymentResult,
+  ): Promise<SetupSnippetResult>;
 }
 
 /**
@@ -901,6 +921,36 @@ export interface SelfDeploymentResult {
   status: SelfDeploymentStatus;
   /** Empty when `status === "ok"`. */
   remediation: string[];
+}
+
+/**
+ * Which form the setup snippet should take. `compose` produces a YAML
+ * fragment intended to be pasted into a `docker-compose.yml` `services:`
+ * block. `run` produces a single (multi-line, backslash-continued)
+ * shell command using `podman run` or `docker run`.
+ */
+export type SetupSnippetFormat = "compose" | "run";
+
+export interface SetupSnippetResult {
+  format: SetupSnippetFormat;
+  /** The runtime the snippet targets. Derived from `result.binary.name`
+   *  when available, falling back to the recommended default (podman). */
+  runtime: RuntimeName;
+  /** Whether the snippet uses the rootless invocation shape. */
+  rootless: boolean;
+  /**
+   * The snippet text itself. Compose YAML or full shell command,
+   * depending on `format`. No trailing newline.
+   */
+  snippet: string;
+  /**
+   * Minimal Dockerfile sidecar showing image-side prereqs (install
+   * `podman` / `docker-cli` etc). Empty when not applicable (e.g.
+   * Windows where image-baking isn't typically the user's path).
+   */
+  dockerfile: string;
+  /** Operator-facing notes — SELinux, Windows, defensive env vars, etc. */
+  notes: string[];
 }
 
 export interface PluginConfig {

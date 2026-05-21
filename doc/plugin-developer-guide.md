@@ -640,6 +640,23 @@ if (dx.status !== "ok") {
 
 Also surfaced over REST at `GET /plugins/signalk-container/api/doctor/deployment`. Available in signalk-container 1.9.0+.
 
+### `containers.doctor.generateSetupSnippet(format?, result?): Promise<SetupSnippetResult>`
+
+Pure-templating companion to `selfDeployment()`: produces a ready-to-paste `docker-compose.yml` fragment (`format: "compose"`, the default) or a `podman run` / `docker run` shell command (`format: "run"`) tailored to the detected runtime. Bundles a minimal Dockerfile sidecar showing image-side prereqs and an `notes` array with operator-facing caveats.
+
+Useful when a consumer plugin wants to surface "you need to deploy Signal K with these settings" guidance in its own onboarding UI rather than redirecting the user to signalk-container's admin panel.
+
+```typescript
+const r = await containers.doctor.generateSetupSnippet("compose");
+console.log(r.snippet); // YAML fragment
+console.log(r.dockerfile); // image prereqs
+r.notes.forEach((note) => console.log("note:", note));
+```
+
+By default the snippet uses the host UID/GID detected at runtime detection time; pass an explicit `result` to template against a hypothetical deployment shape (e.g. for tests or for rendering a "what if" walkthrough).
+
+Also surfaced over REST at `GET /plugins/signalk-container/api/doctor/snippet?format=compose|run` — plain text by default, JSON via `Accept: application/json`. Available in signalk-container 1.10.0+.
+
 ---
 
 ## Host-UID Ownership
@@ -1222,6 +1239,10 @@ interface ContainerManagerApi {
       user?: { inImageUid?: number; inImageGid?: number } | false,
     ) => Promise<{ ok: boolean; output: string; error?: string }>;
     selfDeployment: () => Promise<SelfDeploymentResult>;
+    generateSetupSnippet: (
+      format?: "compose" | "run",
+      result?: SelfDeploymentResult,
+    ) => Promise<SetupSnippetResult>;
   };
 }
 ```
