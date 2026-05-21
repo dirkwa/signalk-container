@@ -2350,6 +2350,8 @@ function headlineForDoctorStatus(
       return "Runtime socket: permission denied";
     case "self-id-unresolved":
       return "Signal K container ID unresolved";
+    case "cgroup-controllers-incomplete":
+      return "Host cgroup controllers not fully delegated";
     case "ok":
       return "Runtime ready";
   }

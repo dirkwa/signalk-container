@@ -879,7 +879,8 @@ export type SelfDeploymentStatus =
   | "no-runtime"
   | "socket-unreachable"
   | "permission-denied"
-  | "self-id-unresolved";
+  | "self-id-unresolved"
+  | "cgroup-controllers-incomplete";
 
 export interface SelfDeploymentResult {
   /** True when /.dockerenv, /run/.containerenv, or `$container` is set. */
@@ -917,6 +918,25 @@ export interface SelfDeploymentResult {
   selfId: {
     value: string | null;
     source: "env" | "hostname" | "cgroup" | null;
+  };
+  /**
+   * cgroup v2 controller delegation state for the user/cgroup the SK
+   * process runs in. Probed by reading `/sys/fs/cgroup/cgroup.controllers`.
+   *
+   * `available` is null when the file couldn't be read (cgroup v1 host,
+   * non-Linux, or unusual mount layout) — in that case `missing` is `[]`
+   * and the cgroup component of `status` is left unchanged.
+   *
+   * `missing` lists the controllers the consumer plugin layer needs but
+   * the host hasn't delegated; today that's `["memory", "cpu", "cpuset",
+   * "pids"]` minus whatever's in `available`. When `isContainerized` is
+   * true AND `missing` is non-empty, `status` escalates to
+   * `cgroup-controllers-incomplete` (lower priority than runtime/socket/
+   * self-id failures — those block more functionality).
+   */
+  cgroupControllers: {
+    available: string[] | null;
+    missing: string[];
   };
   status: SelfDeploymentStatus;
   /** Empty when `status === "ok"`. */

@@ -37,6 +37,13 @@ function probesWith(overrides: SelfDeploymentProbes): SelfDeploymentProbes {
     // self-id source-attribution layers. Override per-test when you
     // want to assert that injected readEnv drives a specific path.
     readEnv: overrides.readEnv ?? ((k: string) => process.env[k]),
+    // Default to "all expected controllers delegated" so the cgroup
+    // status escalation never fires for tests that don't opt in.
+    // Override per-test to drive cgroup-controllers-incomplete /
+    // unprobeable paths.
+    readCgroupControllers:
+      overrides.readCgroupControllers ??
+      (async () => ["cpu", "cpuset", "io", "memory", "pids"]),
   };
 }
 
@@ -414,6 +421,160 @@ describe("selfDeployment — selfId resolution", () => {
         assert.equal(result.selfId.source, null);
         const joined = result.remediation.join("\n");
         assert.match(joined, /SIGNALK_CONTAINER_ID/);
+      },
+    );
+  });
+});
+
+/**
+ * Branching exec that drives every selfDeployment probe to the
+ * happy-path response: `info` reports rootless, self-id `inspect`
+ * resolves the synthetic container ID.
+ */
+function happyExec(selfId: string) {
+  return async (
+    _runtime: ContainerRuntimeInfo,
+    args: string[],
+  ): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
+    if (args[0] === "info") {
+      return { stdout: "true", stderr: "", exitCode: 0 };
+    }
+    if (args[0] === "inspect" && args.includes(selfId)) {
+      return { stdout: "running", stderr: "", exitCode: 0 };
+    }
+    return { stdout: "", stderr: "no such object", exitCode: 1 };
+  };
+}
+
+describe("selfDeployment — cgroup controllers", () => {
+  it("containerized + memory not delegated → cgroup-controllers-incomplete", async () => {
+    await withEnv(
+      { SIGNALK_CONTAINER_ID: "sk-test-host", HOSTNAME: "sk-test-host" },
+      async () => {
+        const result = await selfDeployment(
+          "auto",
+          happyExec("sk-test-host"),
+          probesWith({
+            isContainerized: () => true,
+            findBinary: async (n) =>
+              n === "podman" ? "/usr/bin/podman" : null,
+            // Missing "memory" — matches the real Pi5 deployment we hit.
+            readCgroupControllers: async () => ["cpu", "cpuset", "io", "pids"],
+          }),
+        );
+        assert.equal(result.status, "cgroup-controllers-incomplete");
+        assert.deepEqual(result.cgroupControllers.available, [
+          "cpu",
+          "cpuset",
+          "io",
+          "pids",
+        ]);
+        assert.deepEqual(result.cgroupControllers.missing, ["memory"]);
+        const joined = result.remediation.join("\n");
+        assert.match(joined, /memory/);
+        assert.match(joined, /Delegate=cpu cpuset io memory pids/);
+      },
+    );
+  });
+
+  it("containerized + all expected delegated → ok (no escalation)", async () => {
+    await withEnv(
+      { SIGNALK_CONTAINER_ID: "sk-test-host", HOSTNAME: "sk-test-host" },
+      async () => {
+        const result = await selfDeployment(
+          "auto",
+          happyExec("sk-test-host"),
+          probesWith({
+            isContainerized: () => true,
+            findBinary: async (n) =>
+              n === "podman" ? "/usr/bin/podman" : null,
+            readCgroupControllers: async () => [
+              "cpu",
+              "cpuset",
+              "io",
+              "memory",
+              "pids",
+            ],
+          }),
+        );
+        assert.equal(result.status, "ok");
+        assert.deepEqual(result.cgroupControllers.missing, []);
+      },
+    );
+  });
+
+  it("containerized + cgroup v1 host (probe returns null) → ok, missing=[]", async () => {
+    // We can't know whether memory is delegated on cgroup v1 systems —
+    // each controller is a separate subdir, not a single file. Skip the
+    // escalation rather than firing false positives.
+    await withEnv(
+      { SIGNALK_CONTAINER_ID: "sk-test-host", HOSTNAME: "sk-test-host" },
+      async () => {
+        const result = await selfDeployment(
+          "auto",
+          happyExec("sk-test-host"),
+          probesWith({
+            isContainerized: () => true,
+            findBinary: async (n) =>
+              n === "podman" ? "/usr/bin/podman" : null,
+            readCgroupControllers: async () => null,
+          }),
+        );
+        assert.equal(result.status, "ok");
+        assert.equal(result.cgroupControllers.available, null);
+        assert.deepEqual(result.cgroupControllers.missing, []);
+      },
+    );
+  });
+
+  it("bare-metal + memory missing → ok (cgroup status is in-container only)", async () => {
+    // Bare-metal hosts virtually always have full delegation; even if
+    // they don't, signalk-container can't act on it (rootless SK on the
+    // bare-metal user is the controlled case the user can adjust
+    // themselves). Don't escalate.
+    const result = await selfDeployment(
+      "auto",
+      happyExec("never-matched"),
+      probesWith({
+        isContainerized: () => false,
+        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+        readCgroupControllers: async () => ["cpu", "cpuset", "io", "pids"],
+      }),
+    );
+    assert.equal(result.status, "ok");
+    assert.deepEqual(result.cgroupControllers.missing, ["memory"]);
+  });
+
+  it("self-id-unresolved trumps cgroup-controllers-incomplete in status", async () => {
+    // Both problems can be true simultaneously; self-id-unresolved is
+    // louder (blocks sibling-container creation entirely) so the
+    // operator should see that first. The cgroup data is still
+    // populated in the result body for diagnostic purposes.
+    const inspectAlwaysFails = async (
+      _runtime: ContainerRuntimeInfo,
+      args: string[],
+    ): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
+      if (args[0] === "info") {
+        return { stdout: "true", stderr: "", exitCode: 0 };
+      }
+      return { stdout: "", stderr: "no such object", exitCode: 1 };
+    };
+    await withEnv(
+      { SIGNALK_CONTAINER_ID: undefined, HOSTNAME: "not-a-container-id" },
+      async () => {
+        const result = await selfDeployment(
+          "auto",
+          inspectAlwaysFails,
+          probesWith({
+            isContainerized: () => true,
+            findBinary: async (n) =>
+              n === "podman" ? "/usr/bin/podman" : null,
+            readCgroupControllers: async () => ["cpu", "cpuset", "io", "pids"],
+          }),
+        );
+        assert.equal(result.status, "self-id-unresolved");
+        // Cgroup data still surfaced in the body.
+        assert.deepEqual(result.cgroupControllers.missing, ["memory"]);
       },
     );
   });
