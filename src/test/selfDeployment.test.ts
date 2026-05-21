@@ -311,6 +311,20 @@ describe("selfDeployment — env echo + socket inference", () => {
     assert.equal(result.daemon.socketPath, env.CONTAINER_HOST);
   });
 
+  it("podman socketPath falls back to DOCKER_HOST when CONTAINER_HOST is unset", async () => {
+    const result = await selfDeployment(
+      "auto",
+      fakeExec({ stdout: "true", exitCode: 0 }),
+      probesWith({
+        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+        readEnv: (k) =>
+          k === "DOCKER_HOST" ? "unix:///var/run/docker.sock" : undefined,
+      }),
+    );
+    // Podman honors DOCKER_HOST in docker-API compat mode.
+    assert.equal(result.daemon.socketPath, "unix:///var/run/docker.sock");
+  });
+
   it("docker socketPath comes from DOCKER_HOST", async () => {
     const result = await selfDeployment(
       "auto",

@@ -379,9 +379,11 @@ function inferSocketPath(
   binary: RuntimeName,
   env: SelfDeploymentResult["env"],
 ): string | null {
-  if (binary === "docker" && env.DOCKER_HOST) return env.DOCKER_HOST;
-  if (binary === "podman" && env.CONTAINER_HOST) return env.CONTAINER_HOST;
-  return null;
+  if (binary === "docker") return env.DOCKER_HOST ?? null;
+  // Podman prefers CONTAINER_HOST but also honors DOCKER_HOST when in
+  // docker-API compat mode, so fall through to it when CONTAINER_HOST
+  // is unset.
+  return env.CONTAINER_HOST ?? env.DOCKER_HOST ?? null;
 }
 
 /**
