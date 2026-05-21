@@ -681,9 +681,25 @@ export default (app: App) => {
           app.debug(
             `signalkAccessiblePorts(${name}): only default bridge found, falling back to container:${selfId}`,
           );
+          // WHY probe-then-skip-for-own-container: findAvailablePort treats
+          // every held port as a collision, including the one held by an
+          // already-running instance of THIS container. After a restart-of-SK
+          // the managed container is still up on its declared port, which
+          // would otherwise throw "port already in use" against ourselves and
+          // refuse to start. If sk-<name> already exists in the runtime,
+          // accept the port as ours — the downstream ensureRunning will
+          // either no-op (no drift) or recreate it, both of which preserve
+          // the port mapping.
+          const ownState = await getContainerState(runtimeInfo, name);
+          const ownContainerExists =
+            ownState === "running" || ownState === "stopped";
           for (const containerPort of signalkAccessiblePorts) {
             const cacheKey = `${name}:${containerPort}`;
             if (!portAddressMap.has(cacheKey)) {
+              if (ownContainerExists) {
+                pendingPortMap.set(cacheKey, `127.0.0.1:${containerPort}`);
+                continue;
+              }
               const probed = await findAvailablePort(containerPort);
               if (probed !== containerPort) {
                 // Release the unintended reservation before throwing.
