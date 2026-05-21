@@ -26,6 +26,11 @@ function probesWith(overrides: SelfDeploymentProbes): SelfDeploymentProbes {
   return {
     isContainerized: overrides.isContainerized ?? (() => false),
     findBinary: overrides.findBinary ?? (async () => null as string | null),
+    // Default to a fixed synthetic version so tests don't spawn the
+    // real podman/docker binary. Override when the test asserts on a
+    // specific version string.
+    readBinaryVersion:
+      overrides.readBinaryVersion ?? (async () => "test-1.0.0"),
     // Default to the production behaviour (read real process.env) so
     // tests that mutate process.env via withEnv() see consistent
     // results across the binary-discovery, socket-inference, AND

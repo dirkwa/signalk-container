@@ -1221,6 +1221,7 @@ interface ContainerManagerApi {
       image: string,
       user?: { inImageUid?: number; inImageGid?: number } | false,
     ) => Promise<{ ok: boolean; output: string; error?: string }>;
+    selfDeployment: () => Promise<SelfDeploymentResult>;
   };
 }
 ```

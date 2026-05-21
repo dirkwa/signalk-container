@@ -105,6 +105,16 @@ export interface SelfDeploymentProbes {
   isContainerized?: () => boolean;
   /** Resolve a binary in `$PATH` to its absolute path, or null. */
   findBinary?: (name: RuntimeName) => Promise<string | null>;
+  /**
+   * Extract a version string from a binary (without going through the
+   * runtime-info exec wrapper, which doesn't yet have a populated info
+   * struct at this stage). Receives the absolute path returned by
+   * `findBinary` plus the binary's logical name.
+   */
+  readBinaryVersion?: (
+    name: RuntimeName,
+    path: string,
+  ) => Promise<string | null>;
   /** Read an env var, returning undefined when unset. */
   readEnv?: (key: string) => string | undefined;
 }
@@ -132,6 +142,8 @@ export async function selfDeployment(
 ): Promise<SelfDeploymentResult> {
   const probeIsContainerized = probes.isContainerized ?? isContainerized;
   const probeFindBinary = probes.findBinary ?? defaultFindBinary;
+  const probeReadBinaryVersion =
+    probes.readBinaryVersion ?? defaultReadBinaryVersion;
   const probeReadEnv = probes.readEnv ?? ((k) => process.env[k]);
 
   const containerized = probeIsContainerized();
@@ -152,7 +164,7 @@ export async function selfDeployment(
   for (const name of candidates) {
     const path = await probeFindBinary(name);
     if (!path) continue;
-    const version = await readBinaryVersion(name);
+    const version = await probeReadBinaryVersion(name, path);
     binaryName = name;
     binaryPath = path;
     binaryVersion = version;
@@ -266,15 +278,29 @@ function defaultFindBinary(name: RuntimeName): Promise<string | null> {
 /**
  * Read `<name> --version` directly (separate from the daemon probe so
  * a binary-present-but-daemon-broken state still reports a version).
+ * Default implementation; tests inject a synchronous fake via
+ * `SelfDeploymentProbes.readBinaryVersion` to avoid spawning the real
+ * binary.
  */
-function readBinaryVersion(name: RuntimeName): Promise<string | null> {
+function defaultReadBinaryVersion(
+  name: RuntimeName,
+  path: string,
+): Promise<string | null> {
   return new Promise((resolve) => {
-    execFile(name, ["--version"], { timeout: 5000 }, (error, stdout) => {
-      if (error) return resolve(null);
-      const text = stdout.toString().trim();
-      const version = text.replace(/^.*version\s*/i, "").split(/[\s,]/)[0];
-      resolve(version || null);
-    });
+    // `path` is the absolute location returned by `findBinary`. When
+    // it's empty for any reason fall back to the bare name so $PATH
+    // resolution still has a chance.
+    execFile(
+      path || name,
+      ["--version"],
+      { timeout: 5000 },
+      (error, stdout) => {
+        if (error) return resolve(null);
+        const text = stdout.toString().trim();
+        const version = text.replace(/^.*version\s*/i, "").split(/[\s,]/)[0];
+        resolve(version || null);
+      },
+    );
   });
 }
 
