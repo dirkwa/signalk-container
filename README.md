@@ -117,60 +117,62 @@ See [doc/plugin-developer-guide.md](doc/plugin-developer-guide.md) for the full 
 
 ## API
 
-| Method                                  | Description                                                                                                                                                   |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `getRuntime()`                          | Returns `{ runtime, version, isPodmanDockerShim }` or `null`                                                                                                  |
-| `whenReady()`                           | Resolves once runtime detection settles (success OR failure). Replaces the polling-loop pattern; check `getRuntime()` after the await                         |
-| `pullImage(image, onProgress?)`         | Pull a container image (auto-qualifies for Podman)                                                                                                            |
-| `imageExists(image)`                    | Check if image exists locally                                                                                                                                 |
-| `getImageDigest(imageOrContainer)`      | Local image ID (sha256) for an image:tag or container                                                                                                         |
-| `ensureRunning(name, config, options?)` | Create and start container if not running; auto-recreates on config drift across `image`, `tag`, `command`, `networkMode`, `env`, `volumes`, `ports`          |
-| `start(name)`                           | Start a stopped container                                                                                                                                     |
-| `stop(name)`                            | Stop a running container                                                                                                                                      |
-| `remove(name)`                          | Stop and remove a container                                                                                                                                   |
-| `getState(name)`                        | Returns `running`, `stopped`, `missing`, or `no-runtime`                                                                                                      |
-| `runJob(config)`                        | Execute a one-shot container job                                                                                                                              |
-| `getLogs(name, options?)`               | One-shot fetch of the last N lines of a container's combined stdout+stderr log. `tail` defaults to 200, max 10000; `since` is unix-epoch seconds              |
-| `prune()`                               | Remove dangling images                                                                                                                                        |
-| `listContainers()`                      | List all `sk-` prefixed containers                                                                                                                            |
-| `execInContainer(name, command)`        | Run a command inside a running container                                                                                                                      |
-| `ensureNetwork(name)`                   | Create a Podman/Docker network if it doesn't exist                                                                                                            |
-| `removeNetwork(name)`                   | Remove a network                                                                                                                                              |
-| `connectToNetwork(container, network)`  | Add a container to a network (bridge mode only)                                                                                                               |
-| `disconnectFromNetwork(container, net)` | Remove a container from a network                                                                                                                             |
-| `updates.register(reg)`                 | Register a container for update detection                                                                                                                     |
-| `updates.unregister(pluginId)`          | Stop tracking updates for a plugin                                                                                                                            |
-| `updates.checkOne(pluginId)`            | Force a fresh update check (or coalesce with in-flight)                                                                                                       |
-| `updates.getLastResult(pluginId)`       | Cached last result, no network                                                                                                                                |
-| `updateResources(name, limits)`         | Apply new resource limits live, fall back to recreate                                                                                                         |
-| `getResources(name)`                    | Currently effective limits (plugin defaults ⊕ user override)                                                                                                  |
-| `resolveSignalkDataMount()`             | Resolve the volume name or host path that backs `app.getDataDirPath()` in the current deployment; returns `null` if the runtime is not yet initialised        |
-| `resolveHostPath(absPath)`              | Translate an arbitrary absolute path into the `{ source, subPath }` pair the runtime needs to mount it; handles bare-metal, bind, and named-volume topologies |
-| `resolveContainerAddress(name, port)`   | Return the `host:port` string to reach `port` on a managed container from the SignalK process; call after `ensureRunning()` with `signalkAccessiblePorts` set |
-| `doctor.imageRunsAsUser(image, user?)`  | Probe whether `image` runs cleanly under the host-UID mapping signalk-container will emit (1.8.0+). Never throws — returns `{ ok, output, error? }`           |
+| Method                                  | Description                                                                                                                                                                                                                                   |
+| --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `getRuntime()`                          | Returns `{ runtime, version, isPodmanDockerShim }` or `null`                                                                                                                                                                                  |
+| `whenReady()`                           | Resolves once runtime detection settles (success OR failure). Replaces the polling-loop pattern; check `getRuntime()` after the await                                                                                                         |
+| `pullImage(image, onProgress?)`         | Pull a container image (auto-qualifies for Podman)                                                                                                                                                                                            |
+| `imageExists(image)`                    | Check if image exists locally                                                                                                                                                                                                                 |
+| `getImageDigest(imageOrContainer)`      | Local image ID (sha256) for an image:tag or container                                                                                                                                                                                         |
+| `ensureRunning(name, config, options?)` | Create and start container if not running; auto-recreates on config drift across `image`, `tag`, `command`, `networkMode`, `env`, `volumes`, `ports`                                                                                          |
+| `start(name)`                           | Start a stopped container                                                                                                                                                                                                                     |
+| `stop(name)`                            | Stop a running container                                                                                                                                                                                                                      |
+| `remove(name)`                          | Stop and remove a container                                                                                                                                                                                                                   |
+| `getState(name)`                        | Returns `running`, `stopped`, `missing`, or `no-runtime`                                                                                                                                                                                      |
+| `runJob(config)`                        | Execute a one-shot container job                                                                                                                                                                                                              |
+| `getLogs(name, options?)`               | One-shot fetch of the last N lines of a container's combined stdout+stderr log. `tail` defaults to 200, max 10000; `since` is unix-epoch seconds                                                                                              |
+| `prune()`                               | Remove dangling images                                                                                                                                                                                                                        |
+| `listContainers()`                      | List all `sk-` prefixed containers                                                                                                                                                                                                            |
+| `execInContainer(name, command)`        | Run a command inside a running container                                                                                                                                                                                                      |
+| `ensureNetwork(name)`                   | Create a Podman/Docker network if it doesn't exist                                                                                                                                                                                            |
+| `removeNetwork(name)`                   | Remove a network                                                                                                                                                                                                                              |
+| `connectToNetwork(container, network)`  | Add a container to a network (bridge mode only)                                                                                                                                                                                               |
+| `disconnectFromNetwork(container, net)` | Remove a container from a network                                                                                                                                                                                                             |
+| `updates.register(reg)`                 | Register a container for update detection                                                                                                                                                                                                     |
+| `updates.unregister(pluginId)`          | Stop tracking updates for a plugin                                                                                                                                                                                                            |
+| `updates.checkOne(pluginId)`            | Force a fresh update check (or coalesce with in-flight)                                                                                                                                                                                       |
+| `updates.getLastResult(pluginId)`       | Cached last result, no network                                                                                                                                                                                                                |
+| `updateResources(name, limits)`         | Apply new resource limits live, fall back to recreate                                                                                                                                                                                         |
+| `getResources(name)`                    | Currently effective limits (plugin defaults ⊕ user override)                                                                                                                                                                                  |
+| `resolveSignalkDataMount()`             | Resolve the volume name or host path that backs `app.getDataDirPath()` in the current deployment; returns `null` if the runtime is not yet initialised                                                                                        |
+| `resolveHostPath(absPath)`              | Translate an arbitrary absolute path into the `{ source, subPath }` pair the runtime needs to mount it; handles bare-metal, bind, and named-volume topologies                                                                                 |
+| `resolveContainerAddress(name, port)`   | Return the `host:port` string to reach `port` on a managed container from the SignalK process; call after `ensureRunning()` with `signalkAccessiblePorts` set                                                                                 |
+| `doctor.imageRunsAsUser(image, user?)`  | Probe whether `image` runs cleanly under the host-UID mapping signalk-container will emit (1.8.0+). Never throws — returns `{ ok, output, error? }`                                                                                           |
+| `doctor.selfDeployment()`               | Diagnose the Signal K deployment itself: binary discovery, daemon reachability, rootless/rootful detection, and (when containerized) self-container ID. Returns `{ status, remediation, ... }` — see `SelfDeploymentResult` in `src/types.ts` |
 
 ## REST Endpoints
 
 All mounted at `/plugins/signalk-container/api/`:
 
-| Method | Path                                     | Description                                                                                                                                                                                   |
-| ------ | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| GET    | `/runtime`                               | Detected runtime info                                                                                                                                                                         |
-| GET    | `/containers`                            | List managed containers                                                                                                                                                                       |
-| GET    | `/containers/:name/state`                | Container state                                                                                                                                                                               |
-| POST   | `/containers/:name/start`                | Start a stopped container                                                                                                                                                                     |
-| POST   | `/containers/:name/stop`                 | Stop a running container                                                                                                                                                                      |
-| POST   | `/containers/:name/remove`               | Stop and remove a container                                                                                                                                                                   |
-| GET    | `/containers/:name/logs?tail=N&since=ts` | Last N lines of the container's combined stdout+stderr log (one-shot). `tail` defaults 200, max 10000                                                                                         |
-| GET    | `/containers/:name/logs/stream`          | Server-Sent Events stream of live log lines. Closes when the container is removed or the client disconnects                                                                                   |
-| POST   | `/prune`                                 | Prune dangling images                                                                                                                                                                         |
-| GET    | `/updates`                               | List last update-check results                                                                                                                                                                |
-| GET    | `/updates/:pluginId`                     | Last update-check result for one plugin                                                                                                                                                       |
-| POST   | `/updates/:pluginId/check`               | Force a fresh update check (HTTP 200 even when offline)                                                                                                                                       |
-| GET    | `/containers/:name/resources`            | Effective resource limits + user override                                                                                                                                                     |
-| POST   | `/containers/:name/resources`            | Apply new resource limits (live or recreate). Body is a `ContainerResourceLimits` diff against the consumer plugin's default.                                                                 |
-| DELETE | `/containers/:name/resources`            | Clear any user override and restore the consumer plugin's pristine default limits to the running container.                                                                                   |
-| POST   | `/doctor/image`                          | Probe whether an image runs cleanly under the live host-UID mapping. Body: `{ image, tag?, user? }`. Never 5xx for a failed probe — `{ ok: false, error }` is a successful response (1.8.0+). |
+| Method | Path                                     | Description                                                                                                                                                                                                             |
+| ------ | ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/runtime`                               | Detected runtime info                                                                                                                                                                                                   |
+| GET    | `/containers`                            | List managed containers                                                                                                                                                                                                 |
+| GET    | `/containers/:name/state`                | Container state                                                                                                                                                                                                         |
+| POST   | `/containers/:name/start`                | Start a stopped container                                                                                                                                                                                               |
+| POST   | `/containers/:name/stop`                 | Stop a running container                                                                                                                                                                                                |
+| POST   | `/containers/:name/remove`               | Stop and remove a container                                                                                                                                                                                             |
+| GET    | `/containers/:name/logs?tail=N&since=ts` | Last N lines of the container's combined stdout+stderr log (one-shot). `tail` defaults 200, max 10000                                                                                                                   |
+| GET    | `/containers/:name/logs/stream`          | Server-Sent Events stream of live log lines. Closes when the container is removed or the client disconnects                                                                                                             |
+| POST   | `/prune`                                 | Prune dangling images                                                                                                                                                                                                   |
+| GET    | `/updates`                               | List last update-check results                                                                                                                                                                                          |
+| GET    | `/updates/:pluginId`                     | Last update-check result for one plugin                                                                                                                                                                                 |
+| POST   | `/updates/:pluginId/check`               | Force a fresh update check (HTTP 200 even when offline)                                                                                                                                                                 |
+| GET    | `/containers/:name/resources`            | Effective resource limits + user override                                                                                                                                                                               |
+| POST   | `/containers/:name/resources`            | Apply new resource limits (live or recreate). Body is a `ContainerResourceLimits` diff against the consumer plugin's default.                                                                                           |
+| DELETE | `/containers/:name/resources`            | Clear any user override and restore the consumer plugin's pristine default limits to the running container.                                                                                                             |
+| POST   | `/doctor/image`                          | Probe whether an image runs cleanly under the live host-UID mapping. Body: `{ image, tag?, user? }`. Never 5xx for a failed probe — `{ ok: false, error }` is a successful response (1.8.0+).                           |
+| GET    | `/doctor/deployment`                     | Diagnose this Signal K deployment: binary discovery, daemon reachability, rootless/rootful detection, self-container ID cascade. Returns a `SelfDeploymentResult` with `status` and copy-pasteable `remediation` lines. |
 
 ## Configuration
 
@@ -448,45 +450,92 @@ this plugin needs access to the host's container runtime to manage other
 containers. The plugin auto-detects this scenario via `/.dockerenv` or
 `/run/.containerenv` and prefixes the status with `(in-container)`.
 
-For the plugin to work, you must expose the host's container runtime to
-the Signal K container:
+For the plugin to work, two things must be true inside the Signal K
+container:
 
-### Docker (with security caveats)
+1. **The runtime CLI is installed.** Bake `podman` (or `podman-remote`)
+   into your Signal K image — this is the recommended path. As a quick
+   alternative you can bind-mount the host binary read-only, but that
+   couples the container to the host's exact runtime version.
+2. **The runtime socket is bind-mounted** from the host (rootless or
+   rootful, podman or docker — see examples below).
+
+### Quick check: `/api/doctor/deployment`
+
+The plugin ships a self-diagnostic. After starting, hit:
+
+```bash
+curl http://<signalk-host>:3000/plugins/signalk-container/api/doctor/deployment
+```
+
+The response includes a `status` field (`ok` / `no-runtime` /
+`socket-unreachable` / `permission-denied` / `self-id-unresolved`) and a
+`remediation` array of copy-pasteable lines for whichever failure mode
+applies. When startup detection fails, the same remediation is also
+logged to the Signal K server log.
+
+### Rootless Podman (recommended)
+
+The cleanest setup. Runs as your user, not root, so the security
+exposure is limited to your user account rather than the entire host —
+and matches signalk-container's default behaviour.
+
+On the host, ensure the user-scoped podman socket is enabled:
+
+```bash
+systemctl --user enable --now podman.socket
+```
+
+Then in your compose / `podman run`:
 
 ```yaml
 services:
   signalk:
-    image: signalk/signalk-server
+    image: your-signalk-image-with-podman-remote
+    user: "${UID}:${GID}" # match the uid that owns the host's podman socket
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - /usr/bin/docker:/usr/bin/docker:ro
+      - /run/user/${UID}/podman/podman.sock:/run/user/${UID}/podman/podman.sock
+    environment:
+      - CONTAINER_HOST=unix:///run/user/${UID}/podman/podman.sock
 ```
 
-The Signal K image must include the `docker` CLI binary, OR you mount
-it from the host as shown above. Containers managed by the plugin
-become **siblings** of the Signal K container, not nested.
+Your image's Dockerfile should include `podman` or `podman-remote`:
+
+```dockerfile
+RUN apt-get update && apt-get install -y podman    # Debian/Ubuntu
+# or:
+RUN dnf install -y podman-remote                    # Fedora/RHEL
+```
+
+### Rootful Podman
+
+```yaml
+services:
+  signalk:
+    image: your-signalk-image-with-podman
+    volumes:
+      - /run/podman/podman.sock:/run/podman/podman.sock
+    environment:
+      - CONTAINER_HOST=unix:///run/podman/podman.sock
+```
+
+### Docker
+
+```yaml
+services:
+  signalk:
+    image: your-signalk-image-with-docker-cli
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    group_add:
+      - "<docker-gid-from-host>" # `getent group docker | cut -d: -f3`
+```
 
 > [!warning]
 > Mounting `/var/run/docker.sock` gives the container **root-equivalent
 > access to the host**. Anyone who compromises Signal K (including via
-> a malicious plugin) can take over the entire host. Only use this if
-> you understand and accept the security implications.
-
-### Podman (rootless, safer)
-
-```yaml
-services:
-  signalk:
-    image: signalk/signalk-server
-    volumes:
-      - $XDG_RUNTIME_DIR/podman/podman.sock:/var/run/podman.sock
-      - /usr/bin/podman:/usr/bin/podman:ro
-    environment:
-      - DOCKER_HOST=unix:///var/run/podman.sock
-```
-
-Rootless Podman runs as your user, not root, so the security exposure
-is limited to your user account rather than the entire host.
+> a malicious plugin) can take over the entire host. Prefer rootless
+> Podman for production.
 
 ### Networking caveats
 
@@ -501,12 +550,6 @@ network namespace. This affects:
   for direct communication. signalk-container 1.8.0+ adds this hostname
   to Docker containers automatically (Podman already provides it); set
   `ContainerConfig.extraHosts` to override it or to add other hostnames.
-
-### Recommended setup
-
-For the simplest experience with managed containers, run **Signal K
-natively on the host** rather than in a container. The plugin and its
-ecosystem (signalk-questdb, signalk-grafana) are designed for this case.
 
 ## License
 

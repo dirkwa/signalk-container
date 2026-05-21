@@ -613,6 +613,33 @@ await containers.doctor.imageRunsAsUser("myorg/worker:1.2.3", {
 
 Returns `{ ok: true, output: "ok\n" }` on success; `{ ok: false, output, error }` on failure. Available in signalk-container 1.8.0+.
 
+### `containers.doctor.selfDeployment(): Promise<SelfDeploymentResult>`
+
+Diagnose the Signal K deployment itself — distinct from the per-image probe above. Answers "is my host actually set up to drive `podman`/`docker` at all, and (when SK is containerized) are the in-container prerequisites met?" Used by signalk-container at startup to turn vague "no runtime found" errors into actionable remediation, and exposed to consumer plugins for the same purpose if they want to surface it in their own diagnostics.
+
+Returns a `SelfDeploymentResult` (see `src/types.ts`) whose `status` is one of:
+
+| Status               | Meaning                                                                                                                                            |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ok`                 | Binary discovered, daemon reachable; when containerized, self-id also resolved.                                                                    |
+| `no-runtime`         | No `podman` or `docker` binary in `$PATH`.                                                                                                         |
+| `socket-unreachable` | Binary present, but `<binary> info` could not contact a daemon (no socket mounted, daemon not running, etc.).                                      |
+| `permission-denied`  | Binary + socket present, but the daemon rejected the caller (UID/group mismatch).                                                                  |
+| `self-id-unresolved` | SK is containerized, daemon is reachable, but `SIGNALK_CONTAINER_ID` / `HOSTNAME` / `/proc/self/cgroup` all failed to identify SK's own container. |
+
+Each failure status carries a `remediation: string[]` of copy-pasteable lines tailored to the failure mode. Never throws.
+
+```typescript
+const dx = await containers.doctor.selfDeployment();
+if (dx.status !== "ok") {
+  app.setPluginError(
+    `signalk-container cannot run: ${dx.status}\n` + dx.remediation.join("\n"),
+  );
+}
+```
+
+Also surfaced over REST at `GET /plugins/signalk-container/api/doctor/deployment`. Available in signalk-container 1.9.0+.
+
 ---
 
 ## Host-UID Ownership
@@ -1194,6 +1221,7 @@ interface ContainerManagerApi {
       image: string,
       user?: { inImageUid?: number; inImageGid?: number } | false,
     ) => Promise<{ ok: boolean; output: string; error?: string }>;
+    selfDeployment: () => Promise<SelfDeploymentResult>;
   };
 }
 ```

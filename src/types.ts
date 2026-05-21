@@ -833,6 +833,74 @@ export interface DoctorApi {
     image: string,
     user?: ContainerConfig["user"],
   ): Promise<{ ok: boolean; output: string; error?: string }>;
+
+  /**
+   * Diagnose the Signal K deployment itself: whether SK is
+   * containerized, whether a container runtime CLI is reachable, and
+   * whether the daemon answers (rootless or rootful, podman or docker).
+   *
+   * Intended as the single "what is wrong with my setup?" entry point
+   * for operators running Signal K in a container. Returns the resolved
+   * deployment shape plus a copy-pasteable `remediation` list when
+   * something is wrong. Never throws.
+   *
+   * Surfaced over REST at `GET /plugins/signalk-container/api/doctor/deployment`.
+   */
+  selfDeployment(): Promise<SelfDeploymentResult>;
+}
+
+/**
+ * Verdict from `DoctorApi.selfDeployment()`. Each variant of `status`
+ * corresponds to one block of `remediation` lines the operator can
+ * paste into their compose / `podman run` invocation.
+ */
+export type SelfDeploymentStatus =
+  | "ok"
+  | "no-runtime"
+  | "socket-unreachable"
+  | "permission-denied"
+  | "self-id-unresolved";
+
+export interface SelfDeploymentResult {
+  /** True when /.dockerenv, /run/.containerenv, or `$container` is set. */
+  isContainerized: boolean;
+  /** Which runtime binary was discovered, if any. */
+  binary: {
+    name: RuntimeName | null;
+    /** Resolved `$PATH` location (output of `command -v <name>`); null if not found. */
+    path: string | null;
+    /** First whitespace-separated token after "version" in `<name> --version`. */
+    version: string | null;
+  };
+  /** Whether the binary can talk to a daemon. */
+  daemon: {
+    reachable: boolean;
+    /** Extracted from `podman info` / `docker info`; null if not determinable. */
+    rootless: boolean | null;
+    /** Socket path the binary used, if observable from env vars. */
+    socketPath: string | null;
+    /** Trimmed stderr or exec error message; null on success. */
+    error: string | null;
+  };
+  /** Env vars consulted for socket discovery. Echoed verbatim. */
+  env: {
+    DOCKER_HOST: string | null;
+    CONTAINER_HOST: string | null;
+    XDG_RUNTIME_DIR: string | null;
+  };
+  /**
+   * Result of the `findSelfContainerId` cascade. Only attempted when
+   * `isContainerized` is true AND `daemon.reachable` is true (the
+   * cascade's HOSTNAME and cgroup branches `inspect`-validate, which
+   * needs a working daemon).
+   */
+  selfId: {
+    value: string | null;
+    source: "env" | "hostname" | "cgroup" | null;
+  };
+  status: SelfDeploymentStatus;
+  /** Empty when `status === "ok"`. */
+  remediation: string[];
 }
 
 export interface PluginConfig {
