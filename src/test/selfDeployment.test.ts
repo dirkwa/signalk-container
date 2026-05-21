@@ -26,7 +26,12 @@ function probesWith(overrides: SelfDeploymentProbes): SelfDeploymentProbes {
   return {
     isContainerized: overrides.isContainerized ?? (() => false),
     findBinary: overrides.findBinary ?? (async () => null as string | null),
-    readEnv: overrides.readEnv ?? (() => undefined),
+    // Default to the production behaviour (read real process.env) so
+    // tests that mutate process.env via withEnv() see consistent
+    // results across the binary-discovery, socket-inference, AND
+    // self-id source-attribution layers. Override per-test when you
+    // want to assert that injected readEnv drives a specific path.
+    readEnv: overrides.readEnv ?? ((k: string) => process.env[k]),
   };
 }
 
@@ -329,6 +334,31 @@ describe("selfDeployment — selfId resolution", () => {
       assert.equal(result.status, "ok");
       assert.equal(result.selfId.value, "sk-test-001");
       assert.equal(result.selfId.source, "env");
+    });
+  });
+
+  it("source attribution honours injected readEnv, not process.env", async () => {
+    // findSelfContainerId still reads process.env directly (it has no
+    // injection seam), so we keep process.env set so it returns a
+    // value. But our source-attribution layer must use the injected
+    // readEnv — proving the consistency fix lands:
+    // process.env says SIGNALK_CONTAINER_ID="real-id" → value resolves.
+    // injected readEnv says SIGNALK_CONTAINER_ID="something-else" →
+    // attribution must NOT report source="env" (because the injected
+    // probe disagrees with the value).
+    await withEnv({ SIGNALK_CONTAINER_ID: "real-id" }, async () => {
+      const result = await selfDeployment(
+        "auto",
+        fakeExec({ stdout: "true", exitCode: 0 }),
+        probesWith({
+          isContainerized: () => true,
+          findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+          readEnv: (k) =>
+            k === "SIGNALK_CONTAINER_ID" ? "something-else" : undefined,
+        }),
+      );
+      assert.equal(result.selfId.value, "real-id");
+      assert.notEqual(result.selfId.source, "env");
     });
   });
 

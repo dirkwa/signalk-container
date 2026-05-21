@@ -212,7 +212,7 @@ export async function selfDeployment(
       isPodmanDockerShim: false,
       isRootless: info.rootless,
     };
-    selfId = await resolveSelfIdWithSource(runtimeInfo);
+    selfId = await resolveSelfIdWithSource(runtimeInfo, probeReadEnv);
     if (!selfId.value) {
       return {
         ...baseResult,
@@ -366,14 +366,15 @@ function inferSocketPath(
  */
 async function resolveSelfIdWithSource(
   runtimeInfo: ContainerRuntimeInfo,
+  readEnv: (key: string) => string | undefined,
 ): Promise<SelfDeploymentResult["selfId"]> {
   const value = await findSelfContainerId(runtimeInfo);
   if (!value) return { value: null, source: null };
-  const envOverride = process.env.SIGNALK_CONTAINER_ID?.trim();
+  const envOverride = readEnv("SIGNALK_CONTAINER_ID")?.trim();
   if (envOverride && envOverride === value) {
     return { value, source: "env" };
   }
-  const hostname = process.env.HOSTNAME?.trim();
+  const hostname = readEnv("HOSTNAME")?.trim();
   if (hostname && value.startsWith(hostname)) {
     return { value, source: "hostname" };
   }
