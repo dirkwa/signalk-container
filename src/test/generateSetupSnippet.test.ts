@@ -197,7 +197,7 @@ describe("generateSetupSnippet — fallback when no binary detected", () => {
 });
 
 describe("generateSetupSnippet — selfId handling", () => {
-  it("isContainerized + selfId via env → snippet preserves SIGNALK_CONTAINER_ID line", async () => {
+  it("isContainerized + selfId via env → snippet omits SIGNALK_CONTAINER_ID line (operator already set it)", async () => {
     const r = generateSetupSnippet(
       fakeResult({
         isContainerized: true,

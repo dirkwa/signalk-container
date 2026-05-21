@@ -526,6 +526,13 @@ const REMEDIATION_SELF_ID_UNRESOLVED: string[] = [
 ];
 
 /**
+ * Default Signal K HTTP port published by the generated snippets. Kept
+ * as a single named constant so the compose and `run` render paths can
+ * never diverge.
+ */
+const DEFAULT_SIGNALK_PORT = 3000;
+
+/**
  * Produce a ready-to-paste compose fragment or `podman/docker run`
  * command line tailored to the detected deployment shape, plus a
  * minimal Dockerfile sidecar showing image-side prereqs.
@@ -629,7 +636,10 @@ function renderCompose(ctx: SnippetContext): string {
     ...socketLines.envYaml,
   ];
   if (selfIdLine) lines.push(selfIdLine);
-  lines.push("    ports:", '      - "3000:3000"');
+  lines.push(
+    "    ports:",
+    `      - "${DEFAULT_SIGNALK_PORT}:${DEFAULT_SIGNALK_PORT}"`,
+  );
   lines.push(...groupAddBlock);
   return lines.join("\n");
 }
@@ -662,7 +672,7 @@ function renderRunCommand(ctx: SnippetContext): string {
     "-v ~/.signalk:/home/node/.signalk",
     ...selfIdEnv,
     ...groupAdd,
-    "-p 3000:3000",
+    `-p ${DEFAULT_SIGNALK_PORT}:${DEFAULT_SIGNALK_PORT}`,
     "signalk/signalk-server",
   ];
   return parts.join(" \\\n  ");
