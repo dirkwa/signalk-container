@@ -479,10 +479,16 @@ curl http://<signalk-host>:3000/plugins/signalk-container/api/doctor/deployment
 ```
 
 The response includes a `status` field (`ok` / `no-runtime` /
-`socket-unreachable` / `permission-denied` / `self-id-unresolved`) and a
-`remediation` array of copy-pasteable lines for whichever failure mode
-applies. When startup detection fails, the same remediation is also
-logged to the Signal K server log.
+`socket-unreachable` / `permission-denied` / `self-id-unresolved` /
+`cgroup-controllers-incomplete`) and a `remediation` array of
+copy-pasteable lines for whichever failure mode applies. When startup
+detection fails, the same remediation is also logged to the Signal K
+server log.
+
+A separate `cgroupControllers` field on the response reports the
+delegated cgroup v2 controllers and which expected ones are missing —
+see [Cgroup controller delegation](#cgroup-controller-delegation) for
+what missing controllers mean for resource limits.
 
 ### Generate a starter snippet
 
@@ -598,7 +604,12 @@ nothing happened." The drop is logged at `debug` level with the reason
 cpu, io, pids)`); the live `effective` resource response also reflects
 only what's actually in place.
 
-**Check whether `memory` is delegated to your SK container:**
+**The deployment doctor flags this automatically** with `status:
+cgroup-controllers-incomplete` and a ready-to-paste remediation block.
+Hit `/api/doctor/deployment` (see above) and check the `status` and
+`cgroupControllers` fields.
+
+**Manual check from a shell:**
 
 ```bash
 podman exec <sk-container> cat /sys/fs/cgroup/cgroup.controllers

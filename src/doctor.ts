@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import type {
   ContainerConfig,
   ContainerRuntimeInfo,
@@ -119,7 +120,31 @@ export interface SelfDeploymentProbes {
   ) => Promise<string | null>;
   /** Read an env var, returning undefined when unset. */
   readEnv?: (key: string) => string | undefined;
+  /**
+   * Read the cgroup v2 controllers delegated to the current cgroup
+   * (production: `/sys/fs/cgroup/cgroup.controllers`). Returns the list
+   * of controller names, or `null` when the file is unreadable
+   * (cgroup v1 host, non-Linux, unusual mount layout) — in which case
+   * the doctor skips the cgroup status escalation entirely.
+   */
+  readCgroupControllers?: () => Promise<string[] | null>;
 }
+
+/**
+ * cgroup v2 controllers that the consumer-plugin layer needs to be able
+ * to enforce its resource limits. `cpu`/`cpuset` back `cpus`/`cpusetCpus`,
+ * `memory` backs `memory`/`memorySwap`/`memoryReservation`, `pids` backs
+ * `pidsLimit`. Missing any of these means the corresponding limit fields
+ * are silently dropped by `filterUnsupportedLimits` in resources.ts.
+ *
+ * `io` is intentionally NOT here even though the remediation snippet
+ * recommends delegating it: no `ContainerResourceLimits` field maps to
+ * the io controller, so `io` missing causes no silent-drop bug. We
+ * still recommend delegating it because `cpu cpuset io memory pids` is
+ * the standard systemd delegate set and operators are likely to look
+ * it up; deviating would just look like an unexplained omission.
+ */
+const EXPECTED_CGROUP_CONTROLLERS = ["cpu", "cpuset", "memory", "pids"];
 
 /**
  * Diagnose whether this Signal K deployment can drive `podman`/`docker`
@@ -147,6 +172,8 @@ export async function selfDeployment(
   const probeReadBinaryVersion =
     probes.readBinaryVersion ?? defaultReadBinaryVersion;
   const probeReadEnv = probes.readEnv ?? ((k) => process.env[k]);
+  const probeReadCgroupControllers =
+    probes.readCgroupControllers ?? defaultReadCgroupControllers;
 
   const containerized = probeIsContainerized();
   const env = {
@@ -154,6 +181,9 @@ export async function selfDeployment(
     CONTAINER_HOST: probeReadEnv("CONTAINER_HOST") ?? null,
     XDG_RUNTIME_DIR: probeReadEnv("XDG_RUNTIME_DIR") ?? null,
   };
+  const cgroupControllers = await probeCgroupControllers(
+    probeReadCgroupControllers,
+  );
 
   // 1. Binary discovery — honour preference; auto tries podman first.
   const candidates: RuntimeName[] =
@@ -185,6 +215,7 @@ export async function selfDeployment(
       },
       env,
       selfId: { value: null, source: null },
+      cgroupControllers,
       status: "no-runtime",
       remediation: containerized
         ? REMEDIATION_NO_RUNTIME_CONTAINERIZED
@@ -199,6 +230,7 @@ export async function selfDeployment(
     isContainerized: containerized,
     binary: { name: binaryName, path: binaryPath, version: binaryVersion },
     env,
+    cgroupControllers,
   };
 
   if (!info.reachable) {
@@ -241,6 +273,23 @@ export async function selfDeployment(
         remediation: REMEDIATION_SELF_ID_UNRESOLVED,
       };
     }
+  }
+
+  // 4. Cgroup controller delegation (containerized only — bare-metal hosts
+  // virtually always have full delegation, and we can't act on it anyway).
+  if (containerized && cgroupControllers.missing.length > 0) {
+    return {
+      ...baseResult,
+      daemon: {
+        reachable: true,
+        rootless: info.rootless,
+        socketPath,
+        error: null,
+      },
+      selfId,
+      status: "cgroup-controllers-incomplete",
+      remediation: remediationCgroupControllers(cgroupControllers.missing),
+    };
   }
 
   return {
@@ -392,6 +441,65 @@ function inferSocketPath(
   // docker-API compat mode, so fall through to it when CONTAINER_HOST
   // is unset.
   return env.CONTAINER_HOST ?? env.DOCKER_HOST ?? null;
+}
+
+/**
+ * Production default for the cgroup-controllers probe. Reads cgroup v2's
+ * `/sys/fs/cgroup/cgroup.controllers`, returning the space-separated
+ * controller names. Returns `null` on any read failure (cgroup v1 host,
+ * non-Linux, unusual mount layout) — never throws.
+ */
+async function defaultReadCgroupControllers(): Promise<string[] | null> {
+  try {
+    const raw = await readFile("/sys/fs/cgroup/cgroup.controllers", "utf8");
+    return raw.trim().split(/\s+/).filter(Boolean);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Run the cgroup-controllers probe and compute the missing set against
+ * `EXPECTED_CGROUP_CONTROLLERS`. When the probe returns `null`, missing
+ * is `[]` — we won't escalate status on a host we can't inspect.
+ */
+async function probeCgroupControllers(
+  readControllers: () => Promise<string[] | null>,
+): Promise<SelfDeploymentResult["cgroupControllers"]> {
+  const available = await readControllers();
+  if (available === null) {
+    return { available: null, missing: [] };
+  }
+  const have = new Set(available);
+  const missing = EXPECTED_CGROUP_CONTROLLERS.filter((c) => !have.has(c));
+  return { available, missing };
+}
+
+/**
+ * Remediation block for `cgroup-controllers-incomplete`. Names the
+ * missing controllers so the operator can match the symptom in their
+ * config panel ("memory limit didn't stick"); the systemd snippet is
+ * the same regardless of which controllers are absent.
+ */
+function remediationCgroupControllers(missing: string[]): string[] {
+  return [
+    `Signal K is containerized and the host has not delegated these cgroup v2 controllers: ${missing.join(", ")}.`,
+    "Consumer plugins requesting limits on the missing controllers will have those limits silently dropped.",
+    "",
+    "Enable delegation on the host (one-time, requires root):",
+    "  sudo mkdir -p /etc/systemd/system/user@.service.d",
+    "  sudo tee /etc/systemd/system/user@.service.d/delegate.conf <<'EOF'",
+    "  [Service]",
+    "  Delegate=cpu cpuset io memory pids",
+    "  EOF",
+    "  sudo systemctl daemon-reload",
+    "",
+    "Log the SK-owning user out and back in (or reboot), then restart Signal K.",
+    "Signal K's next start re-applies the requested resource limits to managed containers automatically — no manual container recreation needed.",
+    "Verify inside the SK container (the host view can differ from what the process sees):",
+    "  podman exec <sk-container> cat /sys/fs/cgroup/cgroup.controllers",
+    "  # or: docker exec <sk-container> cat /sys/fs/cgroup/cgroup.controllers",
+  ];
 }
 
 /**
