@@ -2272,6 +2272,12 @@ export default (app: App) => {
   return plugin;
 };
 
+/**
+ * Map a `SelfDeploymentResult.status` to the short, single-line text
+ * shown in `app.setPluginError` (the admin UI surface). The full
+ * remediation block goes to `app.error` separately — this is just the
+ * headline operators see at a glance.
+ */
 function headlineForDoctorStatus(
   status: SelfDeploymentResult["status"],
 ): string {

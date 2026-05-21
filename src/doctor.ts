@@ -375,6 +375,12 @@ function classifyDaemonFailure(stderr: string): SelfDeploymentStatus {
   return "socket-unreachable";
 }
 
+/**
+ * Best-effort guess at the socket path the binary used, based purely on
+ * the relevant env vars. Reported back to the operator so they can
+ * confirm whether their bind-mount matches what the CLI actually saw.
+ * Returns null when no relevant env var is set.
+ */
 function inferSocketPath(
   binary: RuntimeName,
   env: SelfDeploymentResult["env"],
@@ -409,6 +415,13 @@ async function resolveSelfIdWithSource(
   return { value, source: "cgroup" };
 }
 
+/**
+ * Pick the right remediation block for a non-`ok` daemon outcome.
+ * Permission-denied is binary-agnostic; for socket-unreachable we
+ * branch on `binary` so the operator sees podman-specific
+ * (`systemctl --user`) vs docker-specific (`/var/run/docker.sock`)
+ * guidance.
+ */
 function remediationForDaemonFailure(
   status: SelfDeploymentStatus,
   binary: RuntimeName,
@@ -420,6 +433,11 @@ function remediationForDaemonFailure(
     : remediationDockerSocket(env.DOCKER_HOST);
 }
 
+/**
+ * Docker-specific socket-unreachable text. Built dynamically (not a
+ * constant) so the `DOCKER_HOST=<value>` line echoes whatever the
+ * operator actually has set, including `(unset)` when null.
+ */
 function remediationDockerSocket(dockerHost: string | null): string[] {
   return [
     "Found docker binary, but cannot connect to the Docker daemon.",
