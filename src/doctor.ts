@@ -495,7 +495,7 @@ function remediationCgroupControllers(missing: string[]): string[] {
     "  sudo systemctl daemon-reload",
     "",
     "Log the SK-owning user out and back in (or reboot), then restart Signal K.",
-    "Signal K's next start re-runs each consumer plugin's `ensureRunning`, which detects the limit drift and recreates the affected containers automatically — no manual `podman rm` needed.",
+    "Signal K's next start re-applies the requested resource limits to managed containers automatically — no manual container recreation needed.",
     "Verify inside the SK container (the host view can differ from what the process sees):",
     "  podman exec <sk-container> cat /sys/fs/cgroup/cgroup.controllers",
     "  # or: docker exec <sk-container> cat /sys/fs/cgroup/cgroup.controllers",
