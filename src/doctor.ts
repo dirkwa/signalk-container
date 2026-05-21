@@ -488,7 +488,9 @@ function remediationCgroupControllers(missing: string[]): string[] {
     "  sudo systemctl daemon-reload",
     "",
     "Log the SK-owning user out and back in (or reboot), then restart Signal K.",
-    "Verify with: cat /sys/fs/cgroup/cgroup.controllers",
+    "Verify inside the SK container (the host view can differ from what the process sees):",
+    "  podman exec <sk-container> cat /sys/fs/cgroup/cgroup.controllers",
+    "  # or: docker exec <sk-container> cat /sys/fs/cgroup/cgroup.controllers",
   ];
 }
 
