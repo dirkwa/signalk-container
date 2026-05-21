@@ -1578,7 +1578,21 @@ export async function ensureRunning(
 
       debug(`Creating container ${fullName}`);
       const runArgs = buildRunArgs(name, config, runtime);
-      const runResult = await exec(runtime, runArgs);
+      let runResult = await exec(runtime, runArgs);
+      if (
+        runResult.exitCode !== 0 &&
+        runResult.stderr.includes("already in use")
+      ) {
+        // getContainerState reported "missing" because `inspect` failed,
+        // but a container with this name still exists in a state inspect
+        // cannot read (e.g. a corrupt storage layer after an unclean
+        // shutdown). Remove the stale container and retry the create once.
+        debug(
+          `Container ${fullName} name conflict despite "missing" state; removing stale container and retrying`,
+        );
+        await removeContainer(runtime, name, exec);
+        runResult = await exec(runtime, runArgs);
+      }
       if (runResult.exitCode !== 0) {
         throw new Error(`Failed to create ${fullName}: ${runResult.stderr}`);
       }
