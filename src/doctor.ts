@@ -6,6 +6,8 @@ import type {
   RuntimePreference,
   SelfDeploymentResult,
   SelfDeploymentStatus,
+  SetupSnippetFormat,
+  SetupSnippetResult,
 } from "./types.js";
 import {
   type ExecFn,
@@ -522,3 +524,274 @@ const REMEDIATION_SELF_ID_UNRESOLVED: string[] = [
   "",
   "(Cascade tried: $SIGNALK_CONTAINER_ID, $HOSTNAME, /proc/self/cgroup)",
 ];
+
+/**
+ * Default Signal K HTTP port published by the generated snippets. Kept
+ * as a single named constant so the compose and `run` render paths can
+ * never diverge.
+ */
+const DEFAULT_SIGNALK_PORT = 3000;
+
+/**
+ * Produce a ready-to-paste compose fragment or `podman/docker run`
+ * command line tailored to the detected deployment shape, plus a
+ * minimal Dockerfile sidecar showing image-side prereqs.
+ *
+ * Pure templating — runs no probes. All inputs come from a previously
+ * gathered `SelfDeploymentResult` plus an optional `hostUser`. When
+ * `hostUser` is omitted, snippets use `$(id -u):$(id -g)` placeholders
+ * so the result stays portable across operator machines.
+ *
+ * Falls back to the recommended default (rootless podman) when the
+ * input has no detected binary — the generator's job is to always
+ * produce something usable.
+ */
+export function generateSetupSnippet(
+  result: SelfDeploymentResult,
+  format: SetupSnippetFormat = "compose",
+  hostUser: { uid: number; gid: number } | null = null,
+): SetupSnippetResult {
+  const runtime: RuntimeName = result.binary.name ?? "podman";
+  const rootless = pickRootless(runtime, result.daemon.rootless);
+  const uid = hostUser?.uid ?? null;
+  const gid = hostUser?.gid ?? null;
+
+  const ctx: SnippetContext = {
+    runtime,
+    rootless,
+    uid,
+    gid,
+    needsExplicitSelfId:
+      result.isContainerized &&
+      result.selfId.value !== null &&
+      result.selfId.source !== "env",
+    isSelfIdUnresolved: result.isContainerized && result.selfId.value === null,
+    hostUserKnown: hostUser !== null,
+  };
+
+  const snippet =
+    format === "compose" ? renderCompose(ctx) : renderRunCommand(ctx);
+  const dockerfile = hostUser === null ? "" : renderDockerfile(runtime);
+  const notes = buildSnippetNotes(ctx, result);
+
+  return { format, runtime, rootless, snippet, dockerfile, notes };
+}
+
+interface SnippetContext {
+  runtime: RuntimeName;
+  rootless: boolean;
+  uid: number | null;
+  gid: number | null;
+  /** SK is containerized, self-id was detected non-explicitly — adding
+   *  SIGNALK_CONTAINER_ID is defensive but not required. */
+  needsExplicitSelfId: boolean;
+  /** SK is containerized but self-id resolution failed — operator MUST
+   *  set SIGNALK_CONTAINER_ID for the in-container path to work. */
+  isSelfIdUnresolved: boolean;
+  hostUserKnown: boolean;
+}
+
+/**
+ * Decide whether the generated snippet should use the rootless shape.
+ * Trusts the probe's detection when present; otherwise defaults rootless
+ * for podman (matches Dirk's standard deployment + AGENTS.md guidance)
+ * and rootful for docker (the common case).
+ */
+function pickRootless(runtime: RuntimeName, detected: boolean | null): boolean {
+  if (detected !== null) return detected;
+  return runtime === "podman";
+}
+
+/**
+ * Compose YAML fragment. Indentation is two spaces; the snippet is
+ * meant to be pasted into a `services:` block where the `signalk`
+ * entry replaces or merges with an existing one.
+ */
+function renderCompose(ctx: SnippetContext): string {
+  const userLine = ctx.hostUserKnown
+    ? `    user: "${ctx.uid}:${ctx.gid}"`
+    : '    user: "${UID}:${GID}" # or $(id -u):$(id -g) from the host';
+  const socketLines = socketBindAndEnv(ctx, "compose");
+  const selfIdLine =
+    ctx.needsExplicitSelfId || ctx.isSelfIdUnresolved
+      ? "      - SIGNALK_CONTAINER_ID=signalk"
+      : null;
+  const groupAddBlock =
+    ctx.runtime === "docker" && !ctx.rootless
+      ? [
+          "    group_add:",
+          '      - "${DOCKER_GID}" # `getent group docker | cut -d: -f3`',
+        ]
+      : [];
+
+  const lines: string[] = [
+    "services:",
+    "  signalk:",
+    "    image: signalk/signalk-server",
+    userLine,
+    "    volumes:",
+    ...socketLines.volumeYaml,
+    "      - ~/.signalk:/home/node/.signalk",
+    "    environment:",
+    ...socketLines.envYaml,
+  ];
+  if (selfIdLine) lines.push(selfIdLine);
+  lines.push(
+    "    ports:",
+    `      - "${DEFAULT_SIGNALK_PORT}:${DEFAULT_SIGNALK_PORT}"`,
+  );
+  lines.push(...groupAddBlock);
+  return lines.join("\n");
+}
+
+/**
+ * Multi-line `podman run` / `docker run` shell command. Uses backslash
+ * line continuations so operators can copy the whole thing into a
+ * terminal and run it as one invocation.
+ */
+function renderRunCommand(ctx: SnippetContext): string {
+  const cmd = ctx.runtime;
+  const userFlag = ctx.hostUserKnown
+    ? `--user ${ctx.uid}:${ctx.gid}`
+    : '--user "$(id -u):$(id -g)"';
+  const socket = socketBindAndEnv(ctx, "run");
+  const groupAdd =
+    ctx.runtime === "docker" && !ctx.rootless
+      ? ['--group-add "$(getent group docker | cut -d: -f3)"']
+      : [];
+  const selfIdEnv =
+    ctx.needsExplicitSelfId || ctx.isSelfIdUnresolved
+      ? ["-e SIGNALK_CONTAINER_ID=signalk"]
+      : [];
+
+  const parts: string[] = [
+    `${cmd} run -d`,
+    "--name signalk",
+    userFlag,
+    ...socket.runArgs,
+    "-v ~/.signalk:/home/node/.signalk",
+    ...selfIdEnv,
+    ...groupAdd,
+    `-p ${DEFAULT_SIGNALK_PORT}:${DEFAULT_SIGNALK_PORT}`,
+    "signalk/signalk-server",
+  ];
+  return parts.join(" \\\n  ");
+}
+
+interface SocketLines {
+  /** YAML lines for the compose `volumes:` section (already indented). */
+  volumeYaml: string[];
+  /** YAML lines for the compose `environment:` section (already indented). */
+  envYaml: string[];
+  /** Arg fragments for the shell `run` command (one flag per element). */
+  runArgs: string[];
+}
+
+/**
+ * Per-(runtime, rootless) socket bind paths and matching env vars.
+ * Rootless podman uses the user-scoped socket path with a literal uid
+ * (or `${UID}` placeholder); rootful uses the system socket; docker uses
+ * `/var/run/docker.sock` and no env var.
+ */
+function socketBindAndEnv(
+  ctx: SnippetContext,
+  format: SetupSnippetFormat,
+): SocketLines {
+  if (ctx.runtime === "podman" && ctx.rootless) {
+    const uidStr = ctx.hostUserKnown ? String(ctx.uid) : "${UID}";
+    const sockPath = `/run/user/${uidStr}/podman/podman.sock`;
+    const envVal = `unix://${sockPath}`;
+    return {
+      volumeYaml: [`      - ${sockPath}:${sockPath}`],
+      envYaml: [`      - CONTAINER_HOST=${envVal}`],
+      runArgs: [`-v ${sockPath}:${sockPath}`, `-e CONTAINER_HOST=${envVal}`],
+    };
+  }
+  if (ctx.runtime === "podman") {
+    const sockPath = "/run/podman/podman.sock";
+    const envVal = `unix://${sockPath}`;
+    return {
+      volumeYaml: [`      - ${sockPath}:${sockPath}`],
+      envYaml: [`      - CONTAINER_HOST=${envVal}`],
+      runArgs: [`-v ${sockPath}:${sockPath}`, `-e CONTAINER_HOST=${envVal}`],
+    };
+  }
+  // docker (rootless or rootful — same socket convention from compose's POV)
+  void format;
+  return {
+    volumeYaml: ["      - /var/run/docker.sock:/var/run/docker.sock"],
+    envYaml: [],
+    runArgs: ["-v /var/run/docker.sock:/var/run/docker.sock"],
+  };
+}
+
+/**
+ * Minimal Dockerfile sidecar: install the runtime CLI inside the
+ * Signal K image. Operators can append this to their existing Dockerfile.
+ */
+function renderDockerfile(runtime: RuntimeName): string {
+  const pkg = runtime === "podman" ? "podman" : "docker-ce-cli";
+  return [
+    "# Add this to your Signal K image Dockerfile so the runtime CLI is",
+    "# available inside the container at runtime:",
+    `RUN apt-get update && apt-get install -y ${pkg} && rm -rf /var/lib/apt/lists/*`,
+    "# Fedora/RHEL alternative:",
+    runtime === "podman"
+      ? "# RUN dnf install -y podman-remote"
+      : "# RUN dnf install -y docker-ce-cli",
+  ].join("\n");
+}
+
+/**
+ * Build the `notes` array — SELinux warnings, Windows-uid caveats,
+ * defensive SIGNALK_CONTAINER_ID hints, etc. Order matters: the most
+ * actionable items come first.
+ */
+function buildSnippetNotes(
+  ctx: SnippetContext,
+  result: SelfDeploymentResult,
+): string[] {
+  const out: string[] = [];
+
+  if (ctx.isSelfIdUnresolved) {
+    out.push(
+      "Self-id detection failed in your current setup. The snippet sets " +
+        "SIGNALK_CONTAINER_ID=signalk explicitly; rename it if your " +
+        "service is called something else.",
+    );
+  } else if (ctx.needsExplicitSelfId) {
+    out.push(
+      "SIGNALK_CONTAINER_ID is set defensively. Your current install " +
+        `resolved its own container id via the ${result.selfId.source} ` +
+        "cascade step, which is reliable but not under your control.",
+    );
+  }
+
+  if (!ctx.hostUserKnown) {
+    out.push(
+      "host UID/GID could not be determined (Windows or non-POSIX " +
+        "platform). The snippet uses ${UID}/${GID} placeholders; on " +
+        "Docker Desktop UID translation is handled internally and the " +
+        "--user flag can be dropped.",
+    );
+  }
+
+  if (ctx.runtime === "podman" && !ctx.rootless) {
+    out.push(
+      "Rootful podman: bind-mount the runtime socket and add `:Z` to " +
+        "any host-path volumes on SELinux-enforcing distributions " +
+        "(Fedora/RHEL) — signalk-container does this automatically for " +
+        "managed containers but the Signal K container itself is yours " +
+        "to configure.",
+    );
+  }
+
+  if (ctx.runtime === "docker" && !ctx.rootless) {
+    out.push(
+      "Mounting /var/run/docker.sock grants root-equivalent access to " +
+        "the host. Prefer rootless podman for production deployments.",
+    );
+  }
+
+  return out;
+}

@@ -20,6 +20,8 @@ import {
   ResolveResult,
   RuntimePreference,
   SelfDeploymentResult,
+  SetupSnippetFormat,
+  SetupSnippetResult,
   UpdateResourcesResult,
   VolumeIssue,
 } from "./types.js";
@@ -74,7 +76,11 @@ import { FileUpdateCache } from "./updates/cache.js";
 import { registerUpdateRoutes } from "./updates/routes.js";
 import { DIGEST_RE, resolveImage } from "./manifest/resolver.js";
 import { ManifestStore } from "./manifest/store.js";
-import { imageRunsAsUser, selfDeployment } from "./doctor.js";
+import {
+  generateSetupSnippet,
+  imageRunsAsUser,
+  selfDeployment,
+} from "./doctor.js";
 
 interface App {
   debug: (...args: unknown[]) => void;
@@ -1487,6 +1493,13 @@ export default (app: App) => {
     async selfDeployment(): Promise<SelfDeploymentResult> {
       return selfDeployment(runtimePreference);
     },
+    async generateSetupSnippet(
+      format: SetupSnippetFormat = "compose",
+      result?: SelfDeploymentResult,
+    ): Promise<SetupSnippetResult> {
+      const dep = result ?? (await selfDeployment(runtimePreference));
+      return generateSetupSnippet(dep, format, runtimeInfo?.hostUser ?? null);
+    },
   };
 
   const stubDoctor: DoctorApi = {
@@ -1508,6 +1521,17 @@ export default (app: App) => {
     // (defaults to "auto" at module init).
     async selfDeployment(): Promise<SelfDeploymentResult> {
       return selfDeployment(runtimePreference);
+    },
+    // generateSetupSnippet is similarly pre-start-safe: it's pure
+    // templating over a SelfDeploymentResult, useful exactly when the
+    // operator is trying to build a working deployment. hostUser is
+    // null pre-start, so snippets default to `${UID}/${GID}` placeholders.
+    async generateSetupSnippet(
+      format: SetupSnippetFormat = "compose",
+      result?: SelfDeploymentResult,
+    ): Promise<SetupSnippetResult> {
+      const dep = result ?? (await selfDeployment(runtimePreference));
+      return generateSetupSnippet(dep, format, null);
     },
   };
 
@@ -2254,6 +2278,42 @@ export default (app: App) => {
         try {
           const result = await api.doctor.selfDeployment();
           res.json(result);
+        } catch (err) {
+          res.status(500).json({
+            error: err instanceof Error ? err.message : "Unknown error",
+          });
+        }
+      });
+
+      // Snippet generator. Plain text by default so operators can
+      // `curl ... > docker-compose.yml`; JSON form available via
+      // `Accept: application/json` for programmatic consumers.
+      router.get("/api/doctor/snippet", async (req, res) => {
+        const rawFormat =
+          typeof req.query.format === "string"
+            ? (req.query.format as string).toLowerCase()
+            : "compose";
+        if (rawFormat !== "compose" && rawFormat !== "run") {
+          res.status(400).send("format must be 'compose' or 'run'");
+          return;
+        }
+        try {
+          const result = await api.doctor.generateSetupSnippet(
+            rawFormat as SetupSnippetFormat,
+          );
+          if (req.accepts(["text", "json"]) === "json") {
+            res.json(result);
+            return;
+          }
+          const body = [
+            result.snippet,
+            result.dockerfile && "\n" + result.dockerfile,
+            result.notes.length > 0 &&
+              "\n# Notes:\n" + result.notes.map((n) => "# - " + n).join("\n"),
+          ]
+            .filter(Boolean)
+            .join("\n");
+          res.type("text/plain; charset=utf-8").send(body);
         } catch (err) {
           res.status(500).json({
             error: err instanceof Error ? err.message : "Unknown error",
