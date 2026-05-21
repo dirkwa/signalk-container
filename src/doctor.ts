@@ -136,6 +136,13 @@ export interface SelfDeploymentProbes {
  * `memory` backs `memory`/`memorySwap`/`memoryReservation`, `pids` backs
  * `pidsLimit`. Missing any of these means the corresponding limit fields
  * are silently dropped by `filterUnsupportedLimits` in resources.ts.
+ *
+ * `io` is intentionally NOT here even though the remediation snippet
+ * recommends delegating it: no `ContainerResourceLimits` field maps to
+ * the io controller, so `io` missing causes no silent-drop bug. We
+ * still recommend delegating it because `cpu cpuset io memory pids` is
+ * the standard systemd delegate set and operators are likely to look
+ * it up; deviating would just look like an unexplained omission.
  */
 const EXPECTED_CGROUP_CONTROLLERS = ["cpu", "cpuset", "memory", "pids"];
 
