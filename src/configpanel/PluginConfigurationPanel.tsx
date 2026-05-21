@@ -5,6 +5,7 @@ import type {
   ContainerResourceLimits,
   ContainerRuntimeInfo,
   PluginConfig,
+  SelfDeploymentResult,
 } from "../types";
 import type { UpdateCheckResult } from "../updates/types";
 
@@ -154,6 +155,17 @@ const S: Record<string, CSSProperties> = {
   runtimeInfo: { flex: 1 },
   runtimeName: { fontSize: 15, fontWeight: 600, color: "#333" },
   runtimeVersion: { fontSize: 12, color: "#888" },
+  // Doctor-remediation block shown beneath the "No runtime" headline.
+  // Preformatted so the multi-line shell snippets stay readable.
+  runtimeRemediation: {
+    fontSize: 12,
+    color: "#666",
+    fontFamily:
+      'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
+    whiteSpace: "pre-wrap",
+    marginTop: 6,
+    lineHeight: 1.45,
+  },
   containerItem: {
     display: "flex",
     alignItems: "center",
@@ -1023,6 +1035,29 @@ function ResourceLimitsEditor({
   );
 }
 
+/**
+ * Map a deployment-doctor status to the short headline shown in the
+ * runtime error card. Mirrors `headlineForDoctorStatus` in src/index.ts
+ * — kept in sync by convention; if you change one, change the other.
+ */
+function noRuntimeHeadline(doctor: SelfDeploymentResult | null): string {
+  if (!doctor) return "No container runtime found";
+  switch (doctor.status) {
+    case "no-runtime":
+      return "No container runtime found";
+    case "socket-unreachable":
+      return "Runtime socket unreachable";
+    case "permission-denied":
+      return "Runtime socket: permission denied";
+    case "self-id-unresolved":
+      return "Signal K container ID unresolved";
+    case "ok":
+      // unreachable in practice — we only render the error card when
+      // runtimeInfo is null — but stay defensive.
+      return "Container runtime ready";
+  }
+}
+
 export default function PluginConfigurationPanel({
   configuration,
   save,
@@ -1055,6 +1090,11 @@ export default function PluginConfigurationPanel({
   const [runtimeInfo, setRuntimeInfo] = useState<ContainerRuntimeInfo | null>(
     null,
   );
+  // Deployment doctor snapshot — populated when runtimeInfo is null so the
+  // "no runtime" error card can render the doctor's tailored remediation
+  // (in-container vs bare-metal etc.) instead of a generic hardcoded line.
+  const [deploymentDoctor, setDeploymentDoctor] =
+    useState<SelfDeploymentResult | null>(null);
   const [containers, setContainers] = useState<ContainerInfo[]>([]);
   // Per-container effective resource limits, keyed by UNPREFIXED name.
   // Populated by fetchStatus() which hits /api/containers/:name/resources.
@@ -1107,10 +1147,35 @@ export default function PluginConfigurationPanel({
         fetch("/plugins/signalk-container/api/containers"),
       ]);
 
+      let runtimeOk = false;
       if (rtRes.ok) {
-        setRuntimeInfo(await rtRes.json());
+        const rt = (await rtRes.json()) as ContainerRuntimeInfo | null;
+        setRuntimeInfo(rt);
+        runtimeOk = rt !== null;
       } else {
         setRuntimeInfo(null);
+      }
+
+      // When no runtime is up, fetch the deployment doctor so the error
+      // card can show the right remediation block (bare-metal vs in-
+      // container, socket-unreachable vs permission-denied, etc.). Best-
+      // effort: failure leaves deploymentDoctor null and the card falls
+      // back to its generic text.
+      if (!runtimeOk) {
+        try {
+          const dxRes = await fetch(
+            "/plugins/signalk-container/api/doctor/deployment",
+          );
+          if (dxRes.ok) {
+            setDeploymentDoctor((await dxRes.json()) as SelfDeploymentResult);
+          } else {
+            setDeploymentDoctor(null);
+          }
+        } catch {
+          setDeploymentDoctor(null);
+        }
+      } else {
+        setDeploymentDoctor(null);
       }
 
       let ctList = [];
@@ -1555,10 +1620,19 @@ export default function PluginConfigurationPanel({
             !
           </div>
           <div style={S.runtimeInfo}>
-            <div style={S.runtimeName}>No container runtime found</div>
-            <div style={S.runtimeVersion}>
-              Install Podman: sudo apt install podman
+            <div style={S.runtimeName}>
+              {noRuntimeHeadline(deploymentDoctor)}
             </div>
+            {deploymentDoctor && deploymentDoctor.remediation.length > 0 ? (
+              <div style={S.runtimeRemediation}>
+                {deploymentDoctor.remediation.join("\n")}
+              </div>
+            ) : (
+              <div style={S.runtimeVersion}>
+                See GET /plugins/signalk-container/api/doctor/deployment for
+                details.
+              </div>
+            )}
           </div>
         </div>
       )}
