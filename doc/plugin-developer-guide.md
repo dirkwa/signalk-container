@@ -642,7 +642,7 @@ Also surfaced over REST at `GET /plugins/signalk-container/api/doctor/deployment
 
 ### `containers.doctor.generateSetupSnippet(format?, result?): Promise<SetupSnippetResult>`
 
-Pure-templating companion to `selfDeployment()`: produces a ready-to-paste `docker-compose.yml` fragment (`format: "compose"`, the default) or a `podman run` / `docker run` shell command (`format: "run"`) tailored to the detected runtime. Bundles a minimal Dockerfile sidecar showing image-side prereqs and an `notes` array with operator-facing caveats.
+Pure-templating companion to `selfDeployment()`: produces a ready-to-paste `docker-compose.yml` fragment (`format: "compose"`, the default) or a `podman run` / `docker run` shell command (`format: "run"`) tailored to the detected runtime. Bundles a minimal Dockerfile sidecar showing image-side prereqs and a `notes` array with operator-facing caveats.
 
 Useful when a consumer plugin wants to surface "you need to deploy Signal K with these settings" guidance in its own onboarding UI rather than redirecting the user to signalk-container's admin panel.
 
