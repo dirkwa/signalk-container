@@ -1361,46 +1361,15 @@ What you must **not** do: `volumes: { "/in-container/path": app.getDataDirPath()
 
 ### Worked example: signalk-questdb
 
-The [signalk-questdb 1.0.0 → 1.0.1 fix](https://github.com/dirkwa/signalk-questdb/pull/21) is the canonical illustration. Before:
+The [signalk-questdb 1.0.0 → 1.0.1 fix](https://github.com/dirkwa/signalk-questdb/pull/21) is the canonical illustration. Before, the volume source was the raw `app.getDataDirPath()` — works on bare-metal, fails in-container. The fix routes that path through `containers.resolveHostPath()` before passing it as a bind-mount source.
 
-```typescript
-const containerConfig = {
-  // …
-  volumes: {
-    "/var/lib/questdb": app.getDataDirPath(), // ← breaks in-container
-  },
-};
-```
+The three invariants the resolver should preserve:
 
-After:
-
-```typescript
-async function resolveQuestdbVolumeSource(
-  containers: ContainerManagerApi,
-): Promise<string> {
-  const dataPath = app.getDataDirPath();
-  if (typeof containers.resolveHostPath !== "function") return dataPath;
-  try {
-    const resolved = await containers.resolveHostPath(dataPath);
-    return resolved?.source ?? dataPath;
-  } catch {
-    return dataPath;
-  }
-}
-
-// …
-const volumeSource = await resolveQuestdbVolumeSource(containers);
-const containerConfig = {
-  // …
-  volumes: { "/var/lib/questdb": volumeSource },
-};
-```
-
-Three things this idiom does:
-
-1. **Falls back to the original path** when `resolveHostPath` isn't available — keeps the plugin working against signalk-container `< 1.7.0`.
+1. **Falls back to the original path** when `resolveHostPath` isn't available — keeps the plugin working against signalk-container `< 1.7.0` where the API didn't exist.
 2. **Falls back on a thrown error** — `resolveHostPath` is documented as non-throwing in current signalk-container, but cross-plugin APIs are consumed through `(globalThis as any).__signalk_containerManager` (no type-level guarantee), so wrapping is the safer pattern.
-3. **Preserves per-plugin scoping** — only the plugin's own subdirectory is mounted into the managed container, not the entire SK data dir.
+3. **Preserves per-plugin scoping** — `app.getDataDirPath()` for a plugin already resolves to `<configRoot>/plugin-config-data/<pluginId>` (Signal K server rewrites it per-plugin), so the managed container sees only the plugin's own subdirectory after translation, not the whole SK data dir.
+
+The implementation of these three invariants is in [signalk-questdb's `src/index.ts`](https://github.com/dirkwa/signalk-questdb/blob/main/src/index.ts) — pinning the code inline here would risk drift as that plugin evolves.
 
 ---
 
