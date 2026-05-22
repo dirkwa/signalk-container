@@ -117,28 +117,27 @@ describe("detectRuntime — podman remote-mode fallback", () => {
     }
   });
 
-  it("returns null when podman info fails and no remote socket is available", async () => {
+  it("returns null when both direct and remote podman info fail", async () => {
     const origContainerHost = process.env.CONTAINER_HOST;
     const origContainer = process.env.container;
     delete process.env.CONTAINER_HOST;
     process.env.container = "podman";
     try {
+      // Match the remote-info call too so this test stays robust on CI
+      // hosts that happen to have /var/run/docker.sock on disk (Linux
+      // GitHub Actions runners do): if findRemoteSocket finds it, the
+      // remote retry runs and also fails → null. If no socket exists,
+      // tryRuntime returns null before reaching the remote call. Both
+      // paths converge on null, which is the contract under test.
       const exec = scriptedExec([
         {
           match: "podman --version",
           result: { stdout: "podman version 5.7.0", exitCode: 0 },
         },
+        { match: "podman --remote", result: { stdout: "", exitCode: 125 } },
         { match: "podman info", result: { stdout: "", exitCode: 125 } },
       ]);
-      // No CONTAINER_HOST and no socket on disk (would need to check
-      // /var/run/docker.sock — covered by the unit test's lack of one in
-      // CI's sandbox; if a CI runner happens to have docker installed this
-      // test will skip via the early return).
       const result = await detectRuntime("podman", exec);
-      if (result !== null) {
-        // CI runner has a docker socket — skip rather than fail.
-        return;
-      }
       assert.equal(result, null);
     } finally {
       if (origContainerHost === undefined) delete process.env.CONTAINER_HOST;
@@ -148,24 +147,26 @@ describe("detectRuntime — podman remote-mode fallback", () => {
     }
   });
 
-  it("returns null when podman info fails outside a container even if CONTAINER_HOST is set", async () => {
+  it("returns null when not containerized and direct podman info fails", async () => {
     const origContainerHost = process.env.CONTAINER_HOST;
     const origContainer = process.env.container;
-    process.env.CONTAINER_HOST = "unix:///var/run/docker.sock";
+    delete process.env.CONTAINER_HOST;
     delete process.env.container;
     try {
+      // Same robustness note as above: the remote matcher covers the
+      // case where /.dockerenv or /run/.containerenv happens to exist
+      // on the CI host (rare but possible) and isContainerized()
+      // returns true despite the env var being deleted. Without a
+      // working remote, the contract is still "return null".
       const exec = scriptedExec([
         {
           match: "podman --version",
           result: { stdout: "podman version 5.7.0", exitCode: 0 },
         },
+        { match: "podman --remote", result: { stdout: "", exitCode: 125 } },
         { match: "podman info", result: { stdout: "", exitCode: 125 } },
       ]);
-      // Not containerized → no fallback even with CONTAINER_HOST present.
-      // (isContainerized also checks /.dockerenv and /run/.containerenv on
-      // disk; if either exists this test skips by checking the result.)
       const result = await detectRuntime("podman", exec);
-      if (result !== null) return;
       assert.equal(result, null);
     } finally {
       if (origContainerHost === undefined) delete process.env.CONTAINER_HOST;
