@@ -31,11 +31,29 @@ function cleanEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
-function exec(
+/**
+ * Result shape for `execFile`-style runtime probes. Exposed for the
+ * injectable `ExecFn` used by `detectRuntime` tests.
+ */
+export interface ExecResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+}
+
+/**
+ * Injectable command-runner shape. The default implementation in this
+ * module wraps `child_process.execFile`; tests pass a stub returning
+ * canned `ExecResult`s so detection logic can be exercised without a
+ * real podman/docker installation.
+ */
+export type ExecFn = (
   cmd: string,
   args: string[],
   env?: NodeJS.ProcessEnv,
-): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+) => Promise<ExecResult>;
+
+const defaultExec: ExecFn = (cmd, args, env) => {
   return new Promise((resolve) => {
     execFile(
       cmd,
@@ -46,19 +64,42 @@ function exec(
           stdout: (stdout ?? "").toString().trim(),
           stderr: (stderr ?? "").toString().trim(),
           exitCode: error
-            ? typeof (error as any).code === "number"
-              ? (error as any).code
+            ? typeof (error as { code?: unknown }).code === "number"
+              ? ((error as { code: number }).code as number)
               : 1
             : 0,
         });
       },
     );
   });
+};
+
+/**
+ * Socket paths probed when falling back to podman-remote mode. The
+ * canonical mount point for both Docker-style and Podman setups is
+ * `/var/run/docker.sock`; `/run/docker.sock` covers distros where
+ * `/var/run` isn't symlinked to `/run`.
+ */
+const REMOTE_SOCKET_PATHS = ["/var/run/docker.sock", "/run/docker.sock"];
+
+/**
+ * Pick a socket to use for podman-remote fallback. `CONTAINER_HOST`
+ * (podman's canonical remote-mode env var) wins when set; otherwise
+ * we look for a bind-mounted Docker-style socket. Returns the
+ * `unix://` URL form podman expects via `--url`.
+ */
+function findRemoteSocket(): string | null {
+  if (process.env.CONTAINER_HOST) return process.env.CONTAINER_HOST;
+  for (const path of REMOTE_SOCKET_PATHS) {
+    if (existsSync(path)) return `unix://${path}`;
+  }
+  return null;
 }
 
 async function tryRuntime(
   name: RuntimeName,
   env: NodeJS.ProcessEnv,
+  exec: ExecFn = defaultExec,
 ): Promise<ContainerRuntimeInfo | null> {
   const result = await exec(name, ["--version"], env);
   if (result.exitCode !== 0) return null;
@@ -72,8 +113,40 @@ async function tryRuntime(
   }
 
   const realRuntime: RuntimeName = isPodmanDockerShim ? "podman" : name;
-  const cgroupControllers = await probeCgroupControllers(realRuntime, env);
-  const isRootless = await probeRootless(realRuntime, env);
+
+  // For podman, validate the binary can actually operate. Inside a
+  // container, the in-image podman often fails its first real call
+  // with `exec: "newuidmap": executable file not found in $PATH`
+  // because the image lacks the `uidmap` package and rootless
+  // user-namespace mapping can't proceed. If a host podman socket is
+  // bind-mounted in we transparently switch to `--remote --url
+  // <socket>` so commands route to the host daemon — the actual
+  // runtime stays podman, the in-container binary just acts as a
+  // client.
+  let remoteSocketUrl: string | undefined;
+  if (realRuntime === "podman") {
+    const directInfo = await exec(name, ["info"], env);
+    if (directInfo.exitCode !== 0) {
+      const socket = isContainerized() ? findRemoteSocket() : null;
+      if (socket === null) return null;
+      const remoteInfo = await exec(
+        name,
+        ["--remote", "--url", socket, "info"],
+        env,
+      );
+      if (remoteInfo.exitCode !== 0) return null;
+      remoteSocketUrl = socket;
+    }
+  }
+
+  const prefixArgs = remoteArgs(remoteSocketUrl);
+  const cgroupControllers = await probeCgroupControllers(
+    realRuntime,
+    env,
+    prefixArgs,
+    exec,
+  );
+  const isRootless = await probeRootless(realRuntime, env, prefixArgs, exec);
   const hostUser = probeHostUser();
 
   return {
@@ -83,7 +156,17 @@ async function tryRuntime(
     cgroupControllers,
     isRootless,
     hostUser,
+    remoteSocketUrl,
   };
+}
+
+/**
+ * Prefix args to prepend to every podman invocation when the runtime
+ * is operating in remote-fallback mode. Empty for local invocations
+ * and for docker (DOCKER_HOST env handles docker's equivalent path).
+ */
+function remoteArgs(remoteSocketUrl: string | undefined): string[] {
+  return remoteSocketUrl ? ["--remote", "--url", remoteSocketUrl] : [];
 }
 
 /**
@@ -212,13 +295,15 @@ function assertNonNegativeInt(field: string, value: number): void {
 async function probeRootless(
   runtime: RuntimeName,
   env: NodeJS.ProcessEnv,
+  prefixArgs: string[] = [],
+  exec: ExecFn = defaultExec,
 ): Promise<boolean | null> {
   if (runtime !== "podman") {
     return false;
   }
   const result = await exec(
     "podman",
-    ["info", "--format", "{{.Host.Security.Rootless}}"],
+    [...prefixArgs, "info", "--format", "{{.Host.Security.Rootless}}"],
     env,
   );
   if (result.exitCode !== 0) {
@@ -244,6 +329,8 @@ async function probeRootless(
 async function probeCgroupControllers(
   runtime: RuntimeName,
   env: NodeJS.ProcessEnv,
+  prefixArgs: string[] = [],
+  exec: ExecFn = defaultExec,
 ): Promise<string[] | null> {
   if (runtime !== "podman") {
     // Docker doesn't expose CgroupControllers via `info --format`.
@@ -256,7 +343,7 @@ async function probeCgroupControllers(
 
   const result = await exec(
     "podman",
-    ["info", "--format", "{{json .Host.CgroupControllers}}"],
+    [...prefixArgs, "info", "--format", "{{json .Host.CgroupControllers}}"],
     env,
   );
   if (result.exitCode !== 0) {
@@ -278,17 +365,18 @@ async function probeCgroupControllers(
 
 export async function detectRuntime(
   preference: RuntimePreference,
+  exec: ExecFn = defaultExec,
 ): Promise<ContainerRuntimeInfo | null> {
   const env = cleanEnv();
 
   if (preference !== "auto") {
-    return tryRuntime(preference, env);
+    return tryRuntime(preference, env, exec);
   }
 
-  const podman = await tryRuntime("podman", env);
+  const podman = await tryRuntime("podman", env, exec);
   if (podman) return podman;
 
-  const docker = await tryRuntime("docker", env);
+  const docker = await tryRuntime("docker", env, exec);
   if (docker) return docker;
 
   return null;
@@ -298,11 +386,23 @@ export function runtimeCmd(info: ContainerRuntimeInfo): string {
   return info.isPodmanDockerShim ? "docker" : info.runtime;
 }
 
+/**
+ * Build the full argv for a runtime invocation. Prepends
+ * `--remote --url <socket>` when `info.remoteSocketUrl` is set so
+ * commands route to a host podman daemon instead of attempting local
+ * execution; otherwise returns args unchanged.
+ */
+function runtimeArgv(info: ContainerRuntimeInfo, args: string[]): string[] {
+  return info.remoteSocketUrl
+    ? ["--remote", "--url", info.remoteSocketUrl, ...args]
+    : args;
+}
+
 export async function execRuntime(
   info: ContainerRuntimeInfo,
   args: string[],
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  return exec(runtimeCmd(info), args, cleanEnv());
+  return defaultExec(runtimeCmd(info), runtimeArgv(info, args), cleanEnv());
 }
 
 /**
@@ -347,6 +447,7 @@ export async function execRuntimeLong(
   onStderrLine?: (line: string) => void,
 ): Promise<{ exitCode: number; log: string[] }> {
   const cmd = runtimeCmd(info);
+  const fullArgs = runtimeArgv(info, args);
   const env = cleanEnv();
   const log: string[] = [];
   const maxLogLines = 200;
@@ -370,7 +471,7 @@ export async function execRuntimeLong(
     //
     // child_process treats timeout=0 as "no timeout", so we forward it
     // when the caller didn't supply one.
-    const proc = execFile(cmd, args, {
+    const proc = execFile(cmd, fullArgs, {
       env,
       maxBuffer: 10 * 1024 * 1024,
       timeout: timeout ?? 0,
@@ -480,13 +581,14 @@ export function spawnRuntimeStreaming(
   },
 ): StreamingProcessHandle {
   const cmd = options?.binary ?? runtimeCmd(info);
+  const fullArgs = runtimeArgv(info, args);
   const env = options?.env ?? cleanEnv();
   const mergeStderr = options?.mergeStderr ?? false;
 
   let stopped = false;
   let proc: ChildProcess | null = null;
   try {
-    proc = spawn(cmd, args, {
+    proc = spawn(cmd, fullArgs, {
       env,
       stdio: ["ignore", "pipe", "pipe"],
     });

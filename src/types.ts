@@ -52,6 +52,22 @@ export interface ContainerRuntimeInfo {
    * (Windows); callers must not emit `--user` flags in that case.
    */
   hostUser?: { uid: number; gid: number } | null;
+  /**
+   * Socket URL (e.g. `unix:///var/run/docker.sock`) for podman remote
+   * mode. Set when the in-container podman binary can't operate
+   * locally — typically because the image lacks the `uidmap` package
+   * and rootless user-namespace mapping fails with
+   * `exec: "newuidmap": executable file not found in $PATH` — but a
+   * host podman socket has been bind-mounted into the container.
+   *
+   * When set, every podman invocation is prefixed with
+   * `--remote --url <socket>` so commands route to the host daemon
+   * instead of attempting local execution. The actual runtime is
+   * still podman; the in-container binary just acts as a client.
+   *
+   * `undefined` for docker and for podman running directly.
+   */
+  remoteSocketUrl?: string;
 }
 
 export type ContainerState = "running" | "stopped" | "missing" | "no-runtime";

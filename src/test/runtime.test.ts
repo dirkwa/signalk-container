@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { detectRuntime, probeHostUser } from "../runtime.js";
+import { detectRuntime, probeHostUser, type ExecFn } from "../runtime.js";
 
 describe("detectRuntime", () => {
   it("returns a runtime info object when podman or docker is available", async () => {
@@ -39,6 +39,141 @@ describe("detectRuntime", () => {
     assert.ok(result.hostUser);
     assert.equal(result.hostUser.uid, process.getuid());
     assert.equal(result.hostUser.gid, process.getgid!());
+  });
+});
+
+/**
+ * Build an ExecFn stub that responds based on a per-call matcher list.
+ * Each entry matches against `[cmd, ...args]` (joined with spaces) and
+ * returns its canned result. Unmatched calls fail the test loudly so a
+ * detection-path change can't silently pick the wrong branch.
+ */
+function scriptedExec(
+  responses: Array<{
+    match: string;
+    result: { stdout: string; exitCode: number };
+  }>,
+): ExecFn {
+  return async (cmd, args) => {
+    const joined = [cmd, ...args].join(" ");
+    for (const { match, result } of responses) {
+      if (joined.includes(match)) {
+        return { stdout: result.stdout, stderr: "", exitCode: result.exitCode };
+      }
+    }
+    throw new Error(`scriptedExec: unmatched call: ${joined}`);
+  };
+}
+
+describe("detectRuntime — podman remote-mode fallback", () => {
+  it("returns info without remoteSocketUrl when local podman works", async () => {
+    const exec = scriptedExec([
+      {
+        match: "podman --version",
+        result: { stdout: "podman version 5.7.0", exitCode: 0 },
+      },
+      {
+        match: "podman info --format",
+        result: { stdout: "true", exitCode: 0 },
+      },
+      // The first `podman info` without --format is the operability probe;
+      // subsequent calls with --format are the cgroup/rootless probes.
+      { match: "podman info", result: { stdout: "ok", exitCode: 0 } },
+    ]);
+    const result = await detectRuntime("podman", exec);
+    assert.ok(result);
+    assert.equal(result.runtime, "podman");
+    assert.equal(result.remoteSocketUrl, undefined);
+  });
+
+  it("falls back to remote mode when in-container podman info fails", async () => {
+    const origContainerHost = process.env.CONTAINER_HOST;
+    const origContainer = process.env.container;
+    process.env.CONTAINER_HOST = "unix:///var/run/docker.sock";
+    process.env.container = "podman";
+    try {
+      const exec = scriptedExec([
+        {
+          match: "podman --version",
+          result: { stdout: "podman version 5.7.0", exitCode: 0 },
+        },
+        {
+          match: "podman --remote --url unix:///var/run/docker.sock info",
+          result: { stdout: "ok", exitCode: 0 },
+        },
+        // `podman info` (no remote) — the operability probe. Simulates the
+        // newuidmap-not-found error path: exit non-zero.
+        { match: "podman info", result: { stdout: "", exitCode: 125 } },
+      ]);
+      const result = await detectRuntime("podman", exec);
+      assert.ok(result);
+      assert.equal(result.runtime, "podman");
+      assert.equal(result.remoteSocketUrl, "unix:///var/run/docker.sock");
+    } finally {
+      if (origContainerHost === undefined) delete process.env.CONTAINER_HOST;
+      else process.env.CONTAINER_HOST = origContainerHost;
+      if (origContainer === undefined) delete process.env.container;
+      else process.env.container = origContainer;
+    }
+  });
+
+  it("returns null when both direct and remote podman info fail", async () => {
+    const origContainerHost = process.env.CONTAINER_HOST;
+    const origContainer = process.env.container;
+    delete process.env.CONTAINER_HOST;
+    process.env.container = "podman";
+    try {
+      // Match the remote-info call too so this test stays robust on CI
+      // hosts that happen to have /var/run/docker.sock on disk (Linux
+      // GitHub Actions runners do): if findRemoteSocket finds it, the
+      // remote retry runs and also fails → null. If no socket exists,
+      // tryRuntime returns null before reaching the remote call. Both
+      // paths converge on null, which is the contract under test.
+      const exec = scriptedExec([
+        {
+          match: "podman --version",
+          result: { stdout: "podman version 5.7.0", exitCode: 0 },
+        },
+        { match: "podman --remote", result: { stdout: "", exitCode: 125 } },
+        { match: "podman info", result: { stdout: "", exitCode: 125 } },
+      ]);
+      const result = await detectRuntime("podman", exec);
+      assert.equal(result, null);
+    } finally {
+      if (origContainerHost === undefined) delete process.env.CONTAINER_HOST;
+      else process.env.CONTAINER_HOST = origContainerHost;
+      if (origContainer === undefined) delete process.env.container;
+      else process.env.container = origContainer;
+    }
+  });
+
+  it("returns null when not containerized and direct podman info fails", async () => {
+    const origContainerHost = process.env.CONTAINER_HOST;
+    const origContainer = process.env.container;
+    delete process.env.CONTAINER_HOST;
+    delete process.env.container;
+    try {
+      // Same robustness note as above: the remote matcher covers the
+      // case where /.dockerenv or /run/.containerenv happens to exist
+      // on the CI host (rare but possible) and isContainerized()
+      // returns true despite the env var being deleted. Without a
+      // working remote, the contract is still "return null".
+      const exec = scriptedExec([
+        {
+          match: "podman --version",
+          result: { stdout: "podman version 5.7.0", exitCode: 0 },
+        },
+        { match: "podman --remote", result: { stdout: "", exitCode: 125 } },
+        { match: "podman info", result: { stdout: "", exitCode: 125 } },
+      ]);
+      const result = await detectRuntime("podman", exec);
+      assert.equal(result, null);
+    } finally {
+      if (origContainerHost === undefined) delete process.env.CONTAINER_HOST;
+      else process.env.CONTAINER_HOST = origContainerHost;
+      if (origContainer === undefined) delete process.env.container;
+      else process.env.container = origContainer;
+    }
   });
 });
 
