@@ -638,6 +638,29 @@ is in cgroup state, not just on the command line.
 This is purely a host-side prerequisite; signalk-container cannot
 override the kernel's controller delegation.
 
+#### Raspberry Pi OS: `cgroup_disable=memory` in the kernel cmdline
+
+If you're on a Raspberry Pi 4/5 running Raspberry Pi OS Trixie (and
+likely earlier Pi OS releases) and the systemd `Delegate=memory` snippet
+above **doesn't work** — `cat /sys/fs/cgroup/cgroup.controllers` still
+shows `cpuset cpu io pids` after a reboot — the cause is one level
+deeper. The Pi's GPU firmware injects `cgroup_disable=memory` into the
+kernel boot cmdline, so the memory controller never reaches systemd.
+
+Quick check:
+
+```bash
+grep -o "cgroup_disable=memory" /proc/cmdline
+# Prints "cgroup_disable=memory" → you're hit.
+```
+
+Full runbook with copy-pasteable commands, verification steps, and
+revert instructions: **[doc/cgroup-memory-on-raspberry-pi-os.md](doc/cgroup-memory-on-raspberry-pi-os.md)**.
+
+The deployment doctor at `/api/doctor/deployment` also detects this
+scenario and surfaces the same kernel-cmdline fix in its `remediation`
+array, so you don't have to guess which layer is broken first.
+
 ### Watch out for systemd auto-restart (Quadlet / `Restart=always`)
 
 If you run Signal K via a podman Quadlet (`*.container` in

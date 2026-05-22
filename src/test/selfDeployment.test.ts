@@ -44,6 +44,13 @@ function probesWith(overrides: SelfDeploymentProbes): SelfDeploymentProbes {
     readCgroupControllers:
       overrides.readCgroupControllers ??
       (async () => ["cpu", "cpuset", "io", "memory", "pids"]),
+    // Default to a "memory enabled" kernel cmdline so the
+    // kernel-disabled-memory escalation never fires for tests that
+    // don't opt in. Override per-test to drive the Raspberry-Pi-OS
+    // Trixie scenario.
+    readKernelCmdline:
+      overrides.readKernelCmdline ??
+      (async () => "root=PARTUUID=abc rootwait quiet"),
   };
 }
 
@@ -575,6 +582,143 @@ describe("selfDeployment — cgroup controllers", () => {
         assert.equal(result.status, "self-id-unresolved");
         // Cgroup data still surfaced in the body.
         assert.deepEqual(result.cgroupControllers.missing, ["memory"]);
+      },
+    );
+  });
+});
+
+describe("selfDeployment — kernel cgroup_disable=memory detection", () => {
+  // WHY: Raspberry Pi OS Trixie's GPU firmware injects cgroup_disable=memory
+  // into the kernel cmdline. The systemd-Delegate fix doesn't help in that
+  // case — the doctor must surface the kernel-level fix instead.
+
+  it("flags kernelDisabledMemory when cmdline contains cgroup_disable=memory", async () => {
+    const result = await selfDeployment(
+      "auto",
+      happyExec("sk-test-host"),
+      probesWith({
+        isContainerized: () => true,
+        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+        readCgroupControllers: async () => ["cpu", "cpuset", "io", "pids"],
+        readKernelCmdline: async () =>
+          "root=PARTUUID=abc cgroup_disable=memory rootwait quiet",
+      }),
+    );
+    assert.equal(result.cgroupControllers.kernelDisabledMemory, true);
+  });
+
+  it("does NOT flag kernelDisabledMemory when a later cgroup_enable=memory overrides it", async () => {
+    // Kernel evaluates cmdline left-to-right; a later occurrence wins.
+    // This is exactly the fix path documented in the remediation block.
+    const result = await selfDeployment(
+      "auto",
+      happyExec("sk-test-host"),
+      probesWith({
+        isContainerized: () => true,
+        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+        readCgroupControllers: async () => [
+          "cpu",
+          "cpuset",
+          "io",
+          "memory",
+          "pids",
+        ],
+        readKernelCmdline: async () =>
+          "root=PARTUUID=abc cgroup_disable=memory rootwait cgroup_enable=memory cgroup_memory=1",
+      }),
+    );
+    assert.equal(result.cgroupControllers.kernelDisabledMemory, false);
+  });
+
+  it("DOES flag when an earlier cgroup_enable is overridden by a LATER cgroup_disable (last-token wins)", async () => {
+    // Defensive against the wrong direction — last-token-wins must work
+    // for the disable side too, otherwise we'd silently miss this case.
+    const result = await selfDeployment(
+      "auto",
+      happyExec("sk-test-host"),
+      probesWith({
+        isContainerized: () => true,
+        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+        readCgroupControllers: async () => ["cpu", "cpuset", "io", "pids"],
+        readKernelCmdline: async () =>
+          "root=PARTUUID=abc cgroup_enable=memory cgroup_memory=1 cgroup_disable=memory rootwait",
+      }),
+    );
+    assert.equal(result.cgroupControllers.kernelDisabledMemory, true);
+  });
+
+  it("kernel-disabled remediation block names the cmdline.txt edit, not the systemd snippet", async () => {
+    await withEnv(
+      { SIGNALK_CONTAINER_ID: "sk-test-host", HOSTNAME: "sk-test-host" },
+      async () => {
+        const result = await selfDeployment(
+          "auto",
+          happyExec("sk-test-host"),
+          probesWith({
+            isContainerized: () => true,
+            findBinary: async (n) =>
+              n === "podman" ? "/usr/bin/podman" : null,
+            readCgroupControllers: async () => ["cpu", "cpuset", "io", "pids"],
+            readKernelCmdline: async () =>
+              "root=PARTUUID=abc cgroup_disable=memory rootwait",
+          }),
+        );
+        assert.equal(result.status, "cgroup-controllers-incomplete");
+        const remediation = result.remediation.join("\n");
+        assert.match(remediation, /cgroup_disable=memory/);
+        assert.match(remediation, /cmdline\.txt/);
+        assert.match(remediation, /cgroup_enable=memory/);
+        assert.match(remediation, /sudo reboot/);
+      },
+    );
+  });
+
+  it("plain-missing-delegation remediation block still names the systemd snippet (no kernel disable)", async () => {
+    // Regression guard: the kernel-disabled branch must not leak into
+    // the "memory missing, but kernel is fine" case.
+    await withEnv(
+      { SIGNALK_CONTAINER_ID: "sk-test-host", HOSTNAME: "sk-test-host" },
+      async () => {
+        const result = await selfDeployment(
+          "auto",
+          happyExec("sk-test-host"),
+          probesWith({
+            isContainerized: () => true,
+            findBinary: async (n) =>
+              n === "podman" ? "/usr/bin/podman" : null,
+            readCgroupControllers: async () => ["cpu", "cpuset", "io", "pids"],
+            readKernelCmdline: async () => "root=PARTUUID=abc rootwait quiet",
+          }),
+        );
+        assert.equal(result.status, "cgroup-controllers-incomplete");
+        const remediation = result.remediation.join("\n");
+        assert.match(remediation, /Delegate=cpu cpuset io memory pids/);
+        assert.doesNotMatch(remediation, /cmdline\.txt/);
+      },
+    );
+  });
+
+  it("treats unreadable cmdline as 'not kernel-disabled' (false negative is safer than false positive)", async () => {
+    // Non-Linux hosts, restricted /proc, weird sandboxes all return null.
+    // We prefer to fall through to the systemd-only remediation than to
+    // wrongly tell the operator to edit a cmdline.txt they don't have.
+    await withEnv(
+      { SIGNALK_CONTAINER_ID: "sk-test-host", HOSTNAME: "sk-test-host" },
+      async () => {
+        const result = await selfDeployment(
+          "auto",
+          happyExec("sk-test-host"),
+          probesWith({
+            isContainerized: () => true,
+            findBinary: async (n) =>
+              n === "podman" ? "/usr/bin/podman" : null,
+            readCgroupControllers: async () => ["cpu", "cpuset", "io", "pids"],
+            readKernelCmdline: async () => null,
+          }),
+        );
+        assert.equal(result.cgroupControllers.kernelDisabledMemory, false);
+        const remediation = result.remediation.join("\n");
+        assert.match(remediation, /Delegate=cpu cpuset io memory pids/);
       },
     );
   });
