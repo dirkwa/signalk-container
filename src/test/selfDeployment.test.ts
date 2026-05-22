@@ -157,12 +157,9 @@ describe("selfDeployment — no-runtime branch", () => {
   });
 
   it("containerized, no binaries → no-runtime + end-user-friendly bind-mount remediation", async () => {
-    // Regression guard for the Thomas-Christoffel feedback: a HALOS
-    // user running an off-the-shelf SK Docker image hit "install
-    // podman" advice that didn't apply to them. The end-user path
-    // must lead with the bind-mount approach (no Dockerfile edits
-    // needed), and both Docker and Podman host scenarios must be
-    // covered side-by-side.
+    // WHY: end users of off-the-shelf SK Docker images can't edit a
+    // Dockerfile, so the remediation must lead with the bind-mount path
+    // and cover both Docker and Podman hosts.
     const result = await selfDeployment(
       "auto",
       fakeExec({ stdout: "", exitCode: 0 }),
@@ -174,31 +171,20 @@ describe("selfDeployment — no-runtime branch", () => {
     assert.equal(result.status, "no-runtime");
     const joined = result.remediation.join("\n");
 
-    // Both runtime sections must be present.
     assert.match(joined, /If your host runs Docker/);
     assert.match(joined, /If your host runs Podman/);
-
-    // The end-user-friendly bind-mount lines must appear in both
-    // sections (no Dockerfile rebuild required).
     assert.match(joined, /-v \/usr\/bin\/docker:\/usr\/bin\/docker:ro/);
     assert.match(joined, /-v \/usr\/bin\/podman:\/usr\/bin\/podman:ro/);
-
-    // Socket bind-mounts for both runtimes must be present.
     assert.match(joined, /\/var\/run\/docker\.sock/);
     assert.match(joined, /podman\.sock/);
-
-    // The image-maintainer install path is present but de-emphasized
-    // (lives under its own section, not as the primary advice).
     assert.match(joined, /For image maintainers/);
     assert.match(joined, /install -y docker-ce-cli/);
     assert.match(joined, /install -y podman/);
 
-    // Don't promise one runtime as "recommended" globally — match the
-    // host's daemon. (We can't auto-detect which here; the user picks.)
+    // WHY: doctor probe can't know which runtime the host uses, so the
+    // remediation must not promote one as "recommended" globally.
     assert.doesNotMatch(joined, /Podman \(recommended\)/);
 
-    // The bind-mount approach should appear BEFORE the maintainer
-    // section so end-users see the easy path first.
     const dockerBindIdx = joined.indexOf("/usr/bin/docker:/usr/bin/docker");
     const maintainerIdx = joined.indexOf("For image maintainers");
     assert.ok(
