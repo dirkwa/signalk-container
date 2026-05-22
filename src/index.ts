@@ -33,7 +33,7 @@ import {
   resourceLimitsEqual,
   tryLiveUpdate,
 } from "./resources.js";
-import { detectRuntime, isContainerized } from "./runtime.js";
+import { detectRuntime, isContainerized, setDisableUserns } from "./runtime.js";
 import {
   classifyVolumeSources,
   collectRecoveredVolumes,
@@ -1638,6 +1638,13 @@ export default (app: App) => {
           description:
             "Periodically check for container image updates in the background. Disable on metered connections — manual checks via the UI button still work.",
         },
+        disableUserNamespaceRemap: {
+          type: "boolean",
+          default: false,
+          title: "Disable user-namespace remap (ZFS workaround)",
+          description:
+            "Suppress the rootless-Podman --userns=keep-id flag for every managed container. Enable on hosts whose backing filesystem cannot be id-mapped by the kernel (ZFS is the common case; symptom is 'crun: writing file /proc/.../gid_map: Invalid argument' on container create). Bind-mount file ownership still lands on the host caller for root-by-default images. Leave off unless you actually see the error.",
+        },
         containerOverrides: {
           type: "object" as const,
           title: "Per-container resource overrides",
@@ -1706,6 +1713,10 @@ export default (app: App) => {
       // to stop+start this plugin, so the new overrides take effect
       // on the next ensureRunning() call from each consumer.
       currentOverrides = config.containerOverrides ?? {};
+      // Propagate the ZFS-style opt-out from plugin config into the
+      // runtime layer. Default `false` is restored on stop() below
+      // so the toggle does not leak across plugin restarts.
+      setDisableUserns(config.disableUserNamespaceRemap === true);
 
       // Instantiate the update service synchronously so consumer
       // plugins can call containers.updates.register(...) before
@@ -1868,6 +1879,10 @@ export default (app: App) => {
       pluginDefaults.clear();
       currentOverrides = {};
       currentConfig = null;
+      // Restore the userns-remap default so a future start() that
+      // omits the flag (older saved config) does not inherit the
+      // previous run's toggle.
+      setDisableUserns(false);
       cachedDataSource = null;
       pendingDataSource = null;
       cachedConfigRootSource = null;

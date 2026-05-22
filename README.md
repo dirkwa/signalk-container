@@ -41,6 +41,7 @@ The plugin embeds a React config panel in the Signal K Admin UI (via Module Fede
 - **Auto-prune images** -- off, weekly, or monthly scheduled cleanup of dangling images
 - **Update check interval** -- how often to check consumer plugins for new container images (1h to 1 week, default 24h)
 - **Background update checks** -- toggle for metered connections; manual checks still work when off
+- **Disable user-namespace remap (ZFS escape hatch)** -- off by default. Secondary fix for ZFS / id-map-less hosts; prefer the host-side `fuse-overlayfs` storage driver first ([ZFS host notes](#zfs-host-notes)). Enable only if container creation fails with `crun: writing file /proc/<pid>/gid_map: Invalid argument` and you cannot switch storage drivers. With the flag on, signalk-container stops emitting `--userns=keep-id` for rootless Podman; bind-mount file ownership still lands on the host caller for root-by-default images (questdb, grafana, mayara), but non-root images lose host-caller ownership in exchange for being able to start at all.
 
 ### Managed Containers (one card per running or stopped container)
 
@@ -182,14 +183,40 @@ All mounted at `/plugins/signalk-container/api/`:
 
 ## Configuration
 
-| Setting                  | Default  | Description                                                                                                                    |
-| ------------------------ | -------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| Preferred runtime        | `auto`   | Auto-detect, or force `podman`/`docker`                                                                                        |
-| Auto-prune images        | `weekly` | `off`, `weekly`, or `monthly`                                                                                                  |
-| Max concurrent jobs      | `2`      | Limit parallel one-shot job executions                                                                                         |
-| Update check interval    | `24h`    | How often to check for container image updates (e.g. `24h`, `12h`, `1h`). Min 1h.                                              |
-| Background update checks | `true`   | Periodically check for updates in the background. Disable on metered connections — manual checks via the UI button still work. |
-| Container overrides      | `{}`     | Per-container resource limits (CPU, memory, PIDs). Field-level merged on top of consumer plugin defaults. See dev guide.       |
+| Setting                      | Default  | Description                                                                                                                                                                                                                                            |
+| ---------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Preferred runtime            | `auto`   | Auto-detect, or force `podman`/`docker`                                                                                                                                                                                                                |
+| Auto-prune images            | `weekly` | `off`, `weekly`, or `monthly`                                                                                                                                                                                                                          |
+| Max concurrent jobs          | `2`      | Limit parallel one-shot job executions                                                                                                                                                                                                                 |
+| Update check interval        | `24h`    | How often to check for container image updates (e.g. `24h`, `12h`, `1h`). Min 1h.                                                                                                                                                                      |
+| Background update checks     | `true`   | Periodically check for updates in the background. Disable on metered connections — manual checks via the UI button still work.                                                                                                                         |
+| Disable user-namespace remap | `false`  | Suppress rootless-Podman `--userns=keep-id` on filesystems that cannot be id-mapped (ZFS, some encrypted FS). Secondary escape hatch only — the recommended primary fix is host-side `fuse-overlayfs` storage (see [ZFS host notes](#zfs-host-notes)). |
+| Container overrides          | `{}`     | Per-container resource limits (CPU, memory, PIDs). Field-level merged on top of consumer plugin defaults. See dev guide.                                                                                                                               |
+
+### ZFS host notes
+
+Rootless Podman on ZFS (or any filesystem the kernel cannot id-map) needs configuration on the **host** before `--userns=keep-id` works reliably. The symptom that brings you here is one of:
+
+- `crun: writing file /proc/<pid>/gid_map: Invalid argument` at container create time.
+- Container starts but takes minutes because Podman is `chown`-ing every file in the image to the new UID mapping ([upstream issue tracker](https://github.com/containers/podman/issues) has multiple reports of this on ZFS).
+
+The doctor (`GET /plugins/signalk-container/api/doctor/deployment`) detects this proactively: when Podman is rootless and the path backing `~/.local/share/containers` is on a hazard-list filesystem (currently `zfs`), the response carries a `containerStorage` block whose `advice` field lists the remediation below. The doctor advisory is informational — it does not flag the deployment as broken.
+
+**Primary fix — switch the storage driver to `fuse-overlayfs`.** It records virtual ownership in xattrs instead of materializing chowns, which makes `--keep-id` cheap on CoW filesystems. As the Signal K host user, edit `~/.config/containers/storage.conf` (create if missing):
+
+```toml
+[storage]
+driver = "overlay"
+
+[storage.options.overlay]
+mount_program = "/usr/bin/fuse-overlayfs"
+```
+
+Then `podman system reset && podman system migrate` so existing images and storage state are re-staged under the new driver. The `fuse-overlayfs` binary ships with most distros' `fuse-overlayfs` package (Debian/Ubuntu) and is included in the dirkwa/signalk-server-images SignalK Docker image as well.
+
+**Secondary fix — enable the "Disable user-namespace remap" setting** in the signalk-container config panel. Use this only if you cannot switch storage drivers (older Podman, restricted host, etc.). Trade-off: root-by-default managed containers (questdb, grafana, mayara) keep correct bind-mount ownership; non-root images (`charts-toolbox` at UID 1001) lose host-caller ownership.
+
+**Newest kernels (6.x) + Podman ≥ 4.5 + ZFS ≥ 2.2** support idmapped mounts natively, in which case neither fix is required. Worth testing if your stack is recent enough before either workaround.
 
 ## Mounting the SignalK data directory (`signalkDataMount`)
 

@@ -140,6 +140,30 @@ export interface SelfDeploymentProbes {
    * surfaces the cmdline fix instead.
    */
   readKernelCmdline?: () => Promise<string | null>;
+  /**
+   * Read `/proc/mounts` (or equivalent) as parsed entries. Returns
+   * `null` when the file is unreadable (non-Linux, sandboxed). Used by
+   * the rootless-Podman storage-driver probe to determine the
+   * filesystem backing `~/.local/share/containers` and warn on
+   * filesystems known to interact poorly with `--userns=keep-id`.
+   */
+  readMounts?: () => Promise<MountEntry[] | null>;
+  /**
+   * Resolve the path of the rootless container-storage root for the
+   * current user. Defaults to `$XDG_DATA_HOME/containers` (or
+   * `$HOME/.local/share/containers`) — tests can override.
+   */
+  resolveContainerStoragePath?: () => string | null;
+}
+
+/**
+ * One row from `/proc/mounts`. Only the fields the doctor cares about.
+ */
+export interface MountEntry {
+  /** Mount point. */
+  mountPoint: string;
+  /** Filesystem type token. */
+  fstype: string;
 }
 
 /**
@@ -157,6 +181,119 @@ export interface SelfDeploymentProbes {
  * it up; deviating would just look like an unexplained omission.
  */
 const EXPECTED_CGROUP_CONTROLLERS = ["cpu", "cpuset", "memory", "pids"];
+
+/**
+ * Filesystem types where rootless Podman's default `overlay` storage
+ * driver triggers Podman's per-file `chown` sweep
+ * (`storage-chown-by-maps`) on first `--userns=keep-id` use. ZFS is
+ * the common case; CoW metadata makes the chown sweep catastrophically
+ * slow and on some kernels the gid_map write fails outright. Hosts on
+ * one of these filesystems should switch to `fuse-overlayfs` (which
+ * stores virtual ownership in xattrs) or disable the keep-id mapping
+ * via signalk-container's `disableUserNamespaceRemap` setting.
+ *
+ * Not exhaustive — operators can hit similar issues on encrypted
+ * filesystems and some bcachefs configurations. The list captures
+ * what's reported often enough to be worth proactive remediation.
+ */
+const IDMAP_HAZARD_FSTYPES = new Set(["zfs"]);
+
+const REMEDIATION_IDMAP_HAZARD = [
+  "Rootless Podman storage appears to live on a filesystem that interacts poorly with --userns=keep-id (Podman has to chown every image file via storage-chown-by-maps).",
+  "Primary fix: switch the rootless storage driver to fuse-overlayfs (virtual ownership via xattrs, no chown sweep).",
+  "  ~/.config/containers/storage.conf:",
+  "    [storage]",
+  '    driver = "overlay"',
+  "    [storage.options.overlay]",
+  '    mount_program = "/usr/bin/fuse-overlayfs"',
+  "  Then: podman system reset && podman system migrate",
+  "  (the fuse-overlayfs binary ships in most distros' fuse-overlayfs package).",
+  "Secondary fix: enable signalk-container's 'Disable user-namespace remap' setting to drop --userns=keep-id. Root-by-default images keep correct bind-mount ownership; non-root images give up host-caller ownership.",
+];
+
+/**
+ * Choose the most-specific mount entry that covers `path`. `/proc/mounts`
+ * lists mounts in mount order; the deepest mount whose `mountPoint` is
+ * a prefix of `path` is the effective backing mount.
+ */
+function findCoveringMount(
+  mounts: MountEntry[],
+  path: string,
+): MountEntry | null {
+  let best: MountEntry | null = null;
+  for (const entry of mounts) {
+    if (entry.mountPoint === "/" || path === entry.mountPoint) {
+      if (!best || entry.mountPoint.length >= best.mountPoint.length) {
+        best = entry;
+      }
+      continue;
+    }
+    const prefix = entry.mountPoint.endsWith("/")
+      ? entry.mountPoint
+      : entry.mountPoint + "/";
+    if (path.startsWith(prefix)) {
+      if (!best || entry.mountPoint.length > best.mountPoint.length) {
+        best = entry;
+      }
+    }
+  }
+  return best;
+}
+
+async function defaultReadMounts(): Promise<MountEntry[] | null> {
+  try {
+    const raw = await readFile("/proc/mounts", "utf8");
+    const entries: MountEntry[] = [];
+    for (const line of raw.split("\n")) {
+      if (!line) continue;
+      // `device mountpoint fstype options ...` — fields are
+      // whitespace-separated, mountpoint may contain octal escapes
+      // (`\040` for space). We only need mountpoint and fstype.
+      const parts = line.split(/\s+/);
+      if (parts.length < 3) continue;
+      entries.push({
+        mountPoint: parts[1].replace(/\\040/g, " "),
+        fstype: parts[2],
+      });
+    }
+    return entries;
+  } catch {
+    return null;
+  }
+}
+
+function defaultResolveContainerStoragePath(): string | null {
+  const xdg = process.env.XDG_DATA_HOME;
+  if (xdg) return `${xdg}/containers`;
+  const home = process.env.HOME;
+  if (home) return `${home}/.local/share/containers`;
+  return null;
+}
+
+/**
+ * Probe the filesystem backing the rootless Podman storage root. Only
+ * meaningful for rootless Podman; callers gate before invoking.
+ * Returns `null` when the mount list or storage path can't be
+ * determined (non-Linux, sandboxed read of /proc/mounts, etc.).
+ */
+async function probeContainerStorage(
+  readMounts: () => Promise<MountEntry[] | null>,
+  resolveStoragePath: () => string | null,
+): Promise<SelfDeploymentResult["containerStorage"]> {
+  const storagePath = resolveStoragePath();
+  if (!storagePath) return null;
+  const mounts = await readMounts();
+  if (!mounts) return null;
+  const covering = findCoveringMount(mounts, storagePath);
+  const fstype = covering?.fstype ?? null;
+  const idmapHazard = fstype !== null && IDMAP_HAZARD_FSTYPES.has(fstype);
+  return {
+    storagePath,
+    fstype,
+    idmapHazard,
+    advice: idmapHazard ? [...REMEDIATION_IDMAP_HAZARD] : [],
+  };
+}
 
 /**
  * Diagnose whether this Signal K deployment can drive `podman`/`docker`
@@ -188,6 +325,9 @@ export async function selfDeployment(
     probes.readCgroupControllers ?? defaultReadCgroupControllers;
   const probeReadKernelCmdline =
     probes.readKernelCmdline ?? defaultReadKernelCmdline;
+  const probeReadMounts = probes.readMounts ?? defaultReadMounts;
+  const probeResolveStoragePath =
+    probes.resolveContainerStoragePath ?? defaultResolveContainerStoragePath;
 
   const containerized = probeIsContainerized();
   const env = {
@@ -231,6 +371,7 @@ export async function selfDeployment(
       env,
       selfId: { value: null, source: null },
       cgroupControllers,
+      containerStorage: null,
       status: "no-runtime",
       remediation: containerized
         ? REMEDIATION_NO_RUNTIME_CONTAINERIZED
@@ -241,11 +382,25 @@ export async function selfDeployment(
   // 2. Daemon reachability — call `<binary> info` and classify.
   const info = await probeDaemon(binaryName, binaryVersion, exec);
   const socketPath = inferSocketPath(binaryName, env);
+
+  // Storage-driver / backing-filesystem advisory. Only meaningful for
+  // rootless Podman: rootful Podman and Docker do not run the
+  // `storage-chown-by-maps` path that the ZFS hazard triggers. Run the
+  // probe regardless of `--keep-id` outcome — we want to advise even
+  // when the user's containers happen to be working, so they can
+  // proactively switch storage before a non-trivial image lands them
+  // in the slow path.
+  const containerStorage =
+    binaryName === "podman" && info.reachable && info.rootless === true
+      ? await probeContainerStorage(probeReadMounts, probeResolveStoragePath)
+      : null;
+
   const baseResult = {
     isContainerized: containerized,
     binary: { name: binaryName, path: binaryPath, version: binaryVersion },
     env,
     cgroupControllers,
+    containerStorage,
   };
 
   if (!info.reachable) {
