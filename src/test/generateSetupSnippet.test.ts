@@ -22,7 +22,11 @@ function fakeResult(
     },
     env: { DOCKER_HOST: null, CONTAINER_HOST: null, XDG_RUNTIME_DIR: null },
     selfId: { value: null, source: null },
-    cgroupControllers: { available: null, missing: [] },
+    cgroupControllers: {
+      available: null,
+      missing: [],
+      kernelDisabledMemory: false,
+    },
     status: "ok",
     remediation: [],
     ...overrides,

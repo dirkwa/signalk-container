@@ -638,6 +638,45 @@ is in cgroup state, not just on the command line.
 This is purely a host-side prerequisite; signalk-container cannot
 override the kernel's controller delegation.
 
+#### Raspberry Pi OS Trixie: `cgroup_disable=memory` in the kernel cmdline
+
+If you're on a Raspberry Pi 4/5 running Raspberry Pi OS Trixie (and
+likely earlier Pi OS releases) and the systemd `Delegate=memory` snippet
+above **doesn't work** — `cat /sys/fs/cgroup/cgroup.controllers` still
+shows `cpuset cpu io pids` after a reboot — the cause is one level
+deeper. The Pi's GPU firmware injects `cgroup_disable=memory` into the
+kernel boot cmdline. The memory controller never reaches systemd, so
+delegating it does nothing.
+
+Check `/proc/cmdline` for the disable token:
+
+```bash
+grep -o "cgroup_disable=memory" /proc/cmdline
+# Prints "cgroup_disable=memory" → you're hit. Empty output → not this case.
+```
+
+Override it by appending the enable token to `cmdline.txt` (the kernel
+evaluates left-to-right, so the later flag wins):
+
+```bash
+sudo cp /boot/firmware/cmdline.txt /boot/firmware/cmdline.txt.bak.$(date +%Y%m%d)
+sudo sed -i 's/$/ cgroup_enable=memory cgroup_memory=1/' /boot/firmware/cmdline.txt
+# IMPORTANT: cmdline.txt must remain a single line. Verify with:
+sudo wc -l /boot/firmware/cmdline.txt        # 0 (no trailing newline is fine)
+sudo cat /boot/firmware/cmdline.txt
+sudo reboot
+```
+
+After reboot, `/proc/cmdline` will contain BOTH the disable and enable
+tokens; that's expected. `cat /sys/fs/cgroup/cgroup.controllers` should
+now include `memory`, and the systemd `Delegate=` snippet from above
+takes effect normally.
+
+The deployment doctor at `/api/doctor/deployment` detects this scenario
+and surfaces the kernel-cmdline fix in its `remediation` array instead
+of the (here-irrelevant) systemd snippet, so you can paste the right
+commands without having to figure out which layer is broken first.
+
 ### Watch out for systemd auto-restart (Quadlet / `Restart=always`)
 
 If you run Signal K via a podman Quadlet (`*.container` in

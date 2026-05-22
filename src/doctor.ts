@@ -128,6 +128,18 @@ export interface SelfDeploymentProbes {
    * the doctor skips the cgroup status escalation entirely.
    */
   readCgroupControllers?: () => Promise<string[] | null>;
+  /**
+   * Read the kernel boot cmdline (production: `/proc/cmdline`). Used to
+   * detect the `cgroup_disable=memory` Raspberry-Pi-OS-Trixie quirk: the
+   * firmware-injected cmdline disables the memory cgroup controller
+   * before systemd ever gets a chance to delegate it. systemd's
+   * `Delegate=memory` then has nothing to delegate, and the "missing
+   * controller" symptom looks identical to plain missing delegation —
+   * the systemd-snippet remediation won't help. When this probe returns
+   * a cmdline containing the disable token, the remediation block
+   * surfaces the cmdline fix instead.
+   */
+  readKernelCmdline?: () => Promise<string | null>;
 }
 
 /**
@@ -174,6 +186,8 @@ export async function selfDeployment(
   const probeReadEnv = probes.readEnv ?? ((k) => process.env[k]);
   const probeReadCgroupControllers =
     probes.readCgroupControllers ?? defaultReadCgroupControllers;
+  const probeReadKernelCmdline =
+    probes.readKernelCmdline ?? defaultReadKernelCmdline;
 
   const containerized = probeIsContainerized();
   const env = {
@@ -183,6 +197,7 @@ export async function selfDeployment(
   };
   const cgroupControllers = await probeCgroupControllers(
     probeReadCgroupControllers,
+    probeReadKernelCmdline,
   );
 
   // 1. Binary discovery — honour preference; auto tries podman first.
@@ -288,7 +303,10 @@ export async function selfDeployment(
       },
       selfId,
       status: "cgroup-controllers-incomplete",
-      remediation: remediationCgroupControllers(cgroupControllers.missing),
+      remediation: remediationCgroupControllers(
+        cgroupControllers.missing,
+        cgroupControllers.kernelDisabledMemory,
+      ),
     };
   }
 
@@ -459,29 +477,106 @@ async function defaultReadCgroupControllers(): Promise<string[] | null> {
 }
 
 /**
- * Run the cgroup-controllers probe and compute the missing set against
- * `EXPECTED_CGROUP_CONTROLLERS`. When the probe returns `null`, missing
- * is `[]` — we won't escalate status on a host we can't inspect.
+ * Production default for the kernel-cmdline probe. Reads `/proc/cmdline`,
+ * returning the single-line contents. Returns `null` on any read failure
+ * (non-Linux, restricted /proc) — never throws.
  */
-async function probeCgroupControllers(
-  readControllers: () => Promise<string[] | null>,
-): Promise<SelfDeploymentResult["cgroupControllers"]> {
-  const available = await readControllers();
-  if (available === null) {
-    return { available: null, missing: [] };
+async function defaultReadKernelCmdline(): Promise<string | null> {
+  try {
+    const raw = await readFile("/proc/cmdline", "utf8");
+    return raw.trim();
+  } catch {
+    return null;
   }
-  const have = new Set(available);
-  const missing = EXPECTED_CGROUP_CONTROLLERS.filter((c) => !have.has(c));
-  return { available, missing };
 }
 
 /**
- * Remediation block for `cgroup-controllers-incomplete`. Names the
- * missing controllers so the operator can match the symptom in their
- * config panel ("memory limit didn't stick"); the systemd snippet is
- * the same regardless of which controllers are absent.
+ * Detect whether the kernel was booted with the memory cgroup controller
+ * explicitly disabled. True when `cgroup_disable=memory` appears in the
+ * cmdline AND there is NO later `cgroup_enable=memory` overriding it.
+ * (Kernel parameters are evaluated left-to-right, so a later occurrence
+ * wins.) The Raspberry Pi OS Trixie firmware injects the disable token
+ * for legacy reasons; appending `cgroup_enable=memory cgroup_memory=1`
+ * to `/boot/firmware/cmdline.txt` is how you flip it back without
+ * touching the firmware blob.
  */
-function remediationCgroupControllers(missing: string[]): string[] {
+function isKernelMemoryDisabled(cmdline: string | null): boolean {
+  if (!cmdline) return false;
+  const disableIdx = cmdline.lastIndexOf("cgroup_disable=memory");
+  if (disableIdx < 0) return false;
+  const enableIdx = cmdline.lastIndexOf("cgroup_enable=memory");
+  return enableIdx <= disableIdx;
+}
+
+/**
+ * Run the cgroup-controllers probe and compute the missing set against
+ * `EXPECTED_CGROUP_CONTROLLERS`. When the controllers probe returns
+ * `null`, missing is `[]` — we won't escalate status on a host we can't
+ * inspect. The cmdline probe runs in parallel and feeds the
+ * `kernelDisabledMemory` flag for the remediation block.
+ */
+async function probeCgroupControllers(
+  readControllers: () => Promise<string[] | null>,
+  readKernelCmdline: () => Promise<string | null>,
+): Promise<SelfDeploymentResult["cgroupControllers"]> {
+  const [available, cmdline] = await Promise.all([
+    readControllers(),
+    readKernelCmdline(),
+  ]);
+  const kernelDisabledMemory = isKernelMemoryDisabled(cmdline);
+  if (available === null) {
+    return { available: null, missing: [], kernelDisabledMemory };
+  }
+  const have = new Set(available);
+  const missing = EXPECTED_CGROUP_CONTROLLERS.filter((c) => !have.has(c));
+  return { available, missing, kernelDisabledMemory };
+}
+
+/**
+ * Remediation block for `cgroup-controllers-incomplete`. The cause has
+ * two distinct shapes; the operator needs different fixes for each.
+ *
+ *   1. Kernel was booted with `cgroup_disable=memory` (Raspberry Pi OS
+ *      Trixie default). The memory controller never reaches systemd, so
+ *      `Delegate=memory` does nothing. Fix is in the boot cmdline.
+ *
+ *   2. Kernel has the memory controller but the user@.service hasn't
+ *      been told to delegate it. Fix is the systemd Delegate= snippet.
+ *
+ * We detect the kernel-level shape from /proc/cmdline and surface the
+ * correct fix; otherwise the systemd-level fix is the default.
+ */
+function remediationCgroupControllers(
+  missing: string[],
+  kernelDisabledMemory: boolean,
+): string[] {
+  if (kernelDisabledMemory) {
+    return [
+      `Signal K is containerized and the kernel was booted with cgroup_disable=memory (common on Raspberry Pi OS Trixie — the GPU firmware injects this token).`,
+      "Until the memory controller is enabled at the kernel level, systemd's Delegate=memory has nothing to delegate, and consumer-plugin memory limits are silently dropped.",
+      "",
+      "Enable the memory controller in the kernel cmdline (one-time, requires root):",
+      "  sudo cp /boot/firmware/cmdline.txt /boot/firmware/cmdline.txt.bak.$(date +%Y%m%d)",
+      "  sudo sed -i 's/$/ cgroup_enable=memory cgroup_memory=1/' /boot/firmware/cmdline.txt",
+      "  # Note: /boot/firmware/cmdline.txt must remain a single line — verify with `wc -l`.",
+      "",
+      "Reboot the host to pick up the new cmdline:",
+      "  sudo reboot",
+      "",
+      "After reboot, the memory controller will appear in /sys/fs/cgroup/cgroup.controllers and systemd's Delegate=memory will start working.",
+      "If systemd's Delegate= isn't already configured for the user@.service, apply the snippet below first; otherwise the user slice still won't have memory in its subtree_control after reboot.",
+      "  sudo mkdir -p /etc/systemd/system/user@.service.d",
+      "  sudo tee /etc/systemd/system/user@.service.d/delegate.conf <<'EOF'",
+      "  [Service]",
+      "  Delegate=cpu cpuset io memory pids",
+      "  EOF",
+      "  sudo systemctl daemon-reload",
+      "",
+      "Verify inside the SK container after reboot:",
+      "  podman exec <sk-container> cat /sys/fs/cgroup/cgroup.controllers",
+      "  # memory should appear in the output",
+    ];
+  }
   return [
     `Signal K is containerized and the host has not delegated these cgroup v2 controllers: ${missing.join(", ")}.`,
     "Consumer plugins requesting limits on the missing controllers will have those limits silently dropped.",

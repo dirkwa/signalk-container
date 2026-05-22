@@ -933,10 +933,20 @@ export interface SelfDeploymentResult {
    * true AND `missing` is non-empty, `status` escalates to
    * `cgroup-controllers-incomplete` (lower priority than runtime/socket/
    * self-id failures — those block more functionality).
+   *
+   * `kernelDisabledMemory` is true when `/proc/cmdline` contains
+   * `cgroup_disable=memory` without a later overriding
+   * `cgroup_enable=memory`. Hit on Raspberry Pi OS Trixie (and other
+   * RPi OS variants); the firmware-injected cmdline disables the memory
+   * controller before systemd ever sees it, so systemd's
+   * `Delegate=memory` has nothing to delegate. The doctor's remediation
+   * block surfaces the cmdline.txt fix in that case instead of the
+   * systemd-only fix that wouldn't help.
    */
   cgroupControllers: {
     available: string[] | null;
     missing: string[];
+    kernelDisabledMemory: boolean;
   };
   status: SelfDeploymentStatus;
   /** Empty when `status === "ok"`. */
