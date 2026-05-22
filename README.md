@@ -463,12 +463,18 @@ containers. The plugin auto-detects this scenario via `/.dockerenv` or
 For the plugin to work, two things must be true inside the Signal K
 container:
 
-1. **The runtime CLI is installed.** Bake `podman` (or `podman-remote`)
-   into your Signal K image — this is the recommended path. As a quick
-   alternative you can bind-mount the host binary read-only, but that
-   couples the container to the host's exact runtime version.
-2. **The runtime socket is bind-mounted** from the host (rootless or
-   rootful, podman or docker — see examples below).
+1. **A matching runtime CLI is available** (CLI inside must match the
+   daemon outside — Docker host → `docker`; Podman host → `podman`).
+   The easy path for end users is to bind-mount the host binary into
+   the SK container — no image rebuild needed:
+   `-v /usr/bin/docker:/usr/bin/docker:ro` (or
+   `-v /usr/bin/podman:/usr/bin/podman:ro`).
+   Image maintainers can instead bake the CLI in via
+   `RUN apt-get install -y docker-ce-cli` (or `podman`); that decouples
+   the SK image from the host's runtime version at the cost of needing
+   a custom image build.
+2. **The matching runtime socket is bind-mounted** from the host
+   (rootless or rootful podman, or docker — see examples below).
 
 ### Quick check: `/api/doctor/deployment`
 

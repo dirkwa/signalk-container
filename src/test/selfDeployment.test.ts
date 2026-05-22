@@ -156,7 +156,13 @@ describe("selfDeployment — no-runtime branch", () => {
     assert.doesNotMatch(joined, /bind-mount/i);
   });
 
-  it("containerized, no binaries → no-runtime + in-container remediation (podman-remote first)", async () => {
+  it("containerized, no binaries → no-runtime + end-user-friendly bind-mount remediation", async () => {
+    // Regression guard for the Thomas-Christoffel feedback: a HALOS
+    // user running an off-the-shelf SK Docker image hit "install
+    // podman" advice that didn't apply to them. The end-user path
+    // must lead with the bind-mount approach (no Dockerfile edits
+    // needed), and both Docker and Podman host scenarios must be
+    // covered side-by-side.
     const result = await selfDeployment(
       "auto",
       fakeExec({ stdout: "", exitCode: 0 }),
@@ -167,22 +173,38 @@ describe("selfDeployment — no-runtime branch", () => {
     );
     assert.equal(result.status, "no-runtime");
     const joined = result.remediation.join("\n");
-    // The README prereq path comes first — install in your image.
-    assert.match(
-      joined,
-      /add `podman` \(or `podman-remote`\) to your Signal K image/,
-    );
-    // Bind-mount of the host binary is offered as a fallback only.
-    const installIdx = joined.indexOf("install -y podman");
-    const bindIdx = joined.indexOf("bind-mount the host binary");
+
+    // Both runtime sections must be present.
+    assert.match(joined, /If your host runs Docker/);
+    assert.match(joined, /If your host runs Podman/);
+
+    // The end-user-friendly bind-mount lines must appear in both
+    // sections (no Dockerfile rebuild required).
+    assert.match(joined, /-v \/usr\/bin\/docker:\/usr\/bin\/docker:ro/);
+    assert.match(joined, /-v \/usr\/bin\/podman:\/usr\/bin\/podman:ro/);
+
+    // Socket bind-mounts for both runtimes must be present.
+    assert.match(joined, /\/var\/run\/docker\.sock/);
+    assert.match(joined, /podman\.sock/);
+
+    // The image-maintainer install path is present but de-emphasized
+    // (lives under its own section, not as the primary advice).
+    assert.match(joined, /For image maintainers/);
+    assert.match(joined, /install -y docker-ce-cli/);
+    assert.match(joined, /install -y podman/);
+
+    // Don't promise one runtime as "recommended" globally — match the
+    // host's daemon. (We can't auto-detect which here; the user picks.)
+    assert.doesNotMatch(joined, /Podman \(recommended\)/);
+
+    // The bind-mount approach should appear BEFORE the maintainer
+    // section so end-users see the easy path first.
+    const dockerBindIdx = joined.indexOf("/usr/bin/docker:/usr/bin/docker");
+    const maintainerIdx = joined.indexOf("For image maintainers");
     assert.ok(
-      installIdx >= 0 && bindIdx >= 0 && installIdx < bindIdx,
-      "install instruction should appear before bind-mount fallback",
+      dockerBindIdx >= 0 && maintainerIdx > dockerBindIdx,
+      "bind-mount path must appear before the image-maintainer section",
     );
-    // Rootless podman example must be present and listed first.
-    const rootlessIdx = joined.indexOf("Rootless Podman");
-    const rootfulIdx = joined.indexOf("Rootful Podman");
-    assert.ok(rootlessIdx >= 0 && rootlessIdx < rootfulIdx);
   });
 });
 
