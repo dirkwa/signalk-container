@@ -382,7 +382,10 @@ async function probeRootless(
   // an exact stdout match. Some podman setups print a warning above
   // the template value (e.g. `WARN[0000] ...\ntrue`) which would
   // otherwise leave us with `null` and break the keep-id decision.
-  const match = result.stdout.trim().match(/\b(true|false)\b\s*$/m);
+  // Anchor to end-of-string (no /m flag) so a warning line that
+  // happens to end in `true` or `false` doesn't outrank the actual
+  // template value below it.
+  const match = result.stdout.trim().match(/\b(true|false)\b\s*$/);
   if (match) {
     return match[1] === "true";
   }

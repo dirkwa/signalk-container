@@ -958,4 +958,23 @@ describe("selfDeployment — defensive rootless-probe parsing", () => {
     );
     assert.equal(result.daemon.rootless, null);
   });
+
+  it("picks the trailing template value over a warning line ending in 'true'", async () => {
+    // A warning line that itself ends in `true` (e.g.
+    // 'WARN[0000] some config is not true') used to win against
+    // the actual template value on the next line under the `/m`
+    // flag. Anchoring to end-of-string makes the trailing token
+    // authoritative.
+    const result = await selfDeployment(
+      "auto",
+      fakeExec({
+        stdout: "WARN[0000] configuration is not true\nfalse",
+        exitCode: 0,
+      }),
+      probesWith({
+        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+      }),
+    );
+    assert.equal(result.daemon.rootless, false);
+  });
 });

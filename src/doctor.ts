@@ -572,7 +572,9 @@ async function probeDaemon(
     // template value (e.g. when XDG_RUNTIME_DIR is unset and rootless
     // state can't be cached). Scan for the final standalone
     // `true`/`false` token instead of demanding an exact match.
-    const match = trimmed.match(/\b(true|false)\b\s*$/m);
+    // Anchor to end-of-string (no /m flag) so a warning line ending
+    // in `true`/`false` cannot outrank the actual template value.
+    const match = trimmed.match(/\b(true|false)\b\s*$/);
     if (match) {
       rootless = match[1] === "true";
     }
