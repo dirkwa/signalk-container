@@ -273,13 +273,19 @@ describe("userMappingFlags", () => {
 
     it("restores keep-id when the toggle is flipped back off", () => {
       // start() → stop() → start() cycle must not strand a previous
-      // run's toggle. Sanity-check the after-restore behaviour.
+      // run's toggle. Sanity-check the after-restore behaviour, with
+      // a try/finally guard so a failed assertion leaves the toggle
+      // in the historical default for downstream suites.
       setDisableUserns(true);
-      setDisableUserns(false);
-      assert.deepEqual(
-        userMappingFlags(podmanRootlessRuntime, undefined, linuxIds),
-        ["--userns", "keep-id:uid=0,gid=0"],
-      );
+      try {
+        setDisableUserns(false);
+        assert.deepEqual(
+          userMappingFlags(podmanRootlessRuntime, undefined, linuxIds),
+          ["--userns", "keep-id:uid=0,gid=0"],
+        );
+      } finally {
+        setDisableUserns(false);
+      }
     });
 
     it("models a plugin start/stop/start lifecycle without state leak", () => {
@@ -291,26 +297,29 @@ describe("userMappingFlags", () => {
       // setting before a new start() reads from a fresh config.
       assert.equal(isDisableUserns(), false, "default state is false");
 
-      // First start with the flag on.
       setDisableUserns(true);
-      assert.equal(isDisableUserns(), true);
-      assert.deepEqual(
-        userMappingFlags(podmanRootlessRuntime, undefined, linuxIds),
-        [],
-        "rootless podman emits no userns flag while toggle is on",
-      );
+      try {
+        assert.equal(isDisableUserns(), true);
+        assert.deepEqual(
+          userMappingFlags(podmanRootlessRuntime, undefined, linuxIds),
+          [],
+          "rootless podman emits no userns flag while toggle is on",
+        );
 
-      // stop() clears.
-      setDisableUserns(false);
-      assert.equal(isDisableUserns(), false);
+        // stop() clears.
+        setDisableUserns(false);
+        assert.equal(isDisableUserns(), false);
 
-      // Second start, this time with the flag off (the historical
-      // default). Must NOT inherit the previous run's "true".
-      assert.deepEqual(
-        userMappingFlags(podmanRootlessRuntime, undefined, linuxIds),
-        ["--userns", "keep-id:uid=0,gid=0"],
-        "second start with default config restores keep-id",
-      );
+        // Second start, this time with the flag off (the historical
+        // default). Must NOT inherit the previous run's "true".
+        assert.deepEqual(
+          userMappingFlags(podmanRootlessRuntime, undefined, linuxIds),
+          ["--userns", "keep-id:uid=0,gid=0"],
+          "second start with default config restores keep-id",
+        );
+      } finally {
+        setDisableUserns(false);
+      }
     });
   });
 });
