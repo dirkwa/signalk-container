@@ -212,6 +212,40 @@ export function _setCurrentHostIdsForTesting(
 }
 
 /**
+ * Module-level "skip user-namespace remapping" toggle. When `true`,
+ * `userMappingFlags()` suppresses the rootless-Podman `--userns=keep-id`
+ * flag and emits no flag at all on that branch (the in-image root then
+ * maps to the host caller via the default rootless userns).
+ *
+ * Set from the plugin config (`disableUserNamespaceRemap`) for hosts
+ * where the kernel cannot id-map the bind-mount backing filesystem and
+ * `--userns=keep-id` aborts at container create time with
+ * `crun: writing file /proc/<pid>/gid_map: Invalid argument`. ZFS is
+ * the common case (`idmapped mounts` support is filesystem-specific
+ * and kernel-version-dependent); some encrypted filesystems behave
+ * the same way.
+ */
+let usernsRemapDisabled = false;
+
+/**
+ * Apply the plugin-config "disable user-namespace remap" toggle.
+ * Called from `plugin.start()` whenever the config is (re)read.
+ * Defaults to `false` so existing deployments keep the historical
+ * keep-id behaviour verbatim.
+ */
+export function setDisableUserns(disabled: boolean): void {
+  usernsRemapDisabled = disabled === true;
+}
+
+/**
+ * Read the current "disable user-namespace remap" toggle. Exposed
+ * for tests; consumer code should not need to call this directly.
+ */
+export function isDisableUserns(): boolean {
+  return usernsRemapDisabled;
+}
+
+/**
  * Shape shared by `ContainerJobConfig.user` and `ContainerConfig.user`.
  * Inline-typed rather than imported to keep `runtime.ts` free of
  * `types.ts` imports (it's the lowest layer).
@@ -233,6 +267,13 @@ type UserMappingIntent =
  *     container doesn't write to a host-owned bind mount).
  *   - host UID resolver returns null (Windows) → no flag. Docker
  *     Desktop / Windows handles UID translation internally.
+ *   - rootless Podman with `disableUserNamespaceRemap` active → no
+ *     flag. Used on hosts whose backing filesystem refuses kernel
+ *     idmapped mounts (ZFS being the canonical case). Container runs
+ *     in the default rootless userns; for root-by-default images
+ *     (`inImageUid === 0`) bind-mount file ownership still lands on
+ *     the host caller. Non-root in-image images give up host-caller
+ *     ownership in exchange for being able to start at all.
  *   - rootless Podman → `--userns=keep-id:uid=<inImageUID>,gid=<inImageGID>`.
  *     Rewrites the in-image UID back to the host caller via the user-
  *     namespace mapping; rootful Podman would error on the same flag.
@@ -271,6 +312,9 @@ export function userMappingFlags(
   assertNonNegativeInt("inImageGid", inImageGid);
 
   if (runtime.runtime === "podman" && runtime.isRootless === true) {
+    if (usernsRemapDisabled) {
+      return [];
+    }
     return ["--userns", `keep-id:uid=${inImageUid},gid=${inImageGid}`];
   }
   return ["--user", `${host.uid}:${host.gid}`];

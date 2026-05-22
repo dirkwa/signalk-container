@@ -51,6 +51,15 @@ function probesWith(overrides: SelfDeploymentProbes): SelfDeploymentProbes {
     readKernelCmdline:
       overrides.readKernelCmdline ??
       (async () => "root=PARTUUID=abc rootwait quiet"),
+    // Default to "mounts unreadable" so the containerStorage probe
+    // short-circuits to `null` for tests that don't care about it.
+    // Override per-test to drive the rootless-Podman + ZFS scenario.
+    readMounts: overrides.readMounts ?? (async () => null),
+    // Default to "no storage path resolvable" so the probe also
+    // short-circuits to `null` even if readMounts is overridden.
+    // Override per-test to point at a synthetic storage root.
+    resolveContainerStoragePath:
+      overrides.resolveContainerStoragePath ?? (() => null),
   };
 }
 
@@ -740,5 +749,146 @@ describe("selfDeployment — kernel cgroup_disable=memory detection", () => {
         assert.match(remediation, /Delegate=cpu cpuset io memory pids/);
       },
     );
+  });
+});
+
+describe("selfDeployment — containerStorage probe (rootless podman)", () => {
+  // Reusable mount tables. Each list is in the same order `/proc/mounts`
+  // would emit; the doctor's findCoveringMount() picks the deepest
+  // match, so order matters less than coverage.
+  const ext4Mounts = [
+    { mountPoint: "/", fstype: "ext4" },
+    { mountPoint: "/home", fstype: "ext4" },
+  ];
+  const zfsHomeMounts = [
+    { mountPoint: "/", fstype: "ext4" },
+    { mountPoint: "/home", fstype: "zfs" },
+    { mountPoint: "/var/lib/synthetic", fstype: "zfs" },
+  ];
+
+  it("flags idmapHazard true on rootless podman backed by ZFS", async () => {
+    const result = await selfDeployment(
+      "auto",
+      fakeExec({ stdout: "true", exitCode: 0 }),
+      probesWith({
+        isContainerized: () => false,
+        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+        readMounts: async () => zfsHomeMounts,
+        resolveContainerStoragePath: () =>
+          "/var/lib/synthetic/.local/share/containers",
+      }),
+    );
+    assert.equal(result.status, "ok"); // advisory, never escalates
+    assert.notEqual(result.containerStorage, null);
+    assert.equal(result.containerStorage?.fstype, "zfs");
+    assert.equal(result.containerStorage?.idmapHazard, true);
+    assert.equal(
+      result.containerStorage?.storagePath,
+      "/var/lib/synthetic/.local/share/containers",
+    );
+    const advice = result.containerStorage?.advice.join("\n") ?? "";
+    assert.match(advice, /fuse-overlayfs/);
+    assert.match(advice, /disableUserNamespaceRemap|Disable user-namespace/i);
+  });
+
+  it("does not flag idmapHazard on rootless podman backed by ext4", async () => {
+    const result = await selfDeployment(
+      "auto",
+      fakeExec({ stdout: "true", exitCode: 0 }),
+      probesWith({
+        isContainerized: () => false,
+        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+        readMounts: async () => ext4Mounts,
+        resolveContainerStoragePath: () =>
+          "/var/lib/synthetic/.local/share/containers",
+      }),
+    );
+    assert.equal(result.containerStorage?.fstype, "ext4");
+    assert.equal(result.containerStorage?.idmapHazard, false);
+    assert.deepEqual(result.containerStorage?.advice, []);
+  });
+
+  it("returns containerStorage null on rootful podman (probe is not relevant)", async () => {
+    const result = await selfDeployment(
+      "auto",
+      fakeExec({ stdout: "false", exitCode: 0 }), // rootless=false
+      probesWith({
+        isContainerized: () => false,
+        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+        readMounts: async () => zfsHomeMounts,
+        resolveContainerStoragePath: () =>
+          "/var/lib/synthetic/.local/share/containers",
+      }),
+    );
+    assert.equal(result.daemon.rootless, false);
+    assert.equal(result.containerStorage, null);
+  });
+
+  it("returns containerStorage null on docker (probe is podman-only)", async () => {
+    const result = await selfDeployment(
+      "auto",
+      fakeExec({ stdout: "ok", exitCode: 0 }),
+      probesWith({
+        isContainerized: () => false,
+        findBinary: async (n) => (n === "docker" ? "/usr/bin/docker" : null),
+        readMounts: async () => zfsHomeMounts,
+        resolveContainerStoragePath: () =>
+          "/var/lib/synthetic/.local/share/containers",
+      }),
+    );
+    assert.equal(result.binary.name, "docker");
+    assert.equal(result.containerStorage, null);
+  });
+
+  it("returns containerStorage null when mounts are unreadable", async () => {
+    const result = await selfDeployment(
+      "auto",
+      fakeExec({ stdout: "true", exitCode: 0 }),
+      probesWith({
+        isContainerized: () => false,
+        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+        readMounts: async () => null, // simulate non-Linux / sandboxed
+        resolveContainerStoragePath: () =>
+          "/var/lib/synthetic/.local/share/containers",
+      }),
+    );
+    assert.equal(result.containerStorage, null);
+  });
+
+  it("returns containerStorage null when the storage path can't be resolved", async () => {
+    const result = await selfDeployment(
+      "auto",
+      fakeExec({ stdout: "true", exitCode: 0 }),
+      probesWith({
+        isContainerized: () => false,
+        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+        readMounts: async () => zfsHomeMounts,
+        resolveContainerStoragePath: () => null,
+      }),
+    );
+    assert.equal(result.containerStorage, null);
+  });
+
+  it("picks the deepest covering mount when nested mounts overlap", async () => {
+    // `/var/lib/synthetic/podman` is its own ZFS dataset nested under a parent
+    // ext4 home mount. The doctor must report zfs, not ext4.
+    const nestedMounts = [
+      { mountPoint: "/", fstype: "ext4" },
+      { mountPoint: "/home", fstype: "ext4" },
+      { mountPoint: "/var/lib/synthetic/podman", fstype: "zfs" },
+    ];
+    const result = await selfDeployment(
+      "auto",
+      fakeExec({ stdout: "true", exitCode: 0 }),
+      probesWith({
+        isContainerized: () => false,
+        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+        readMounts: async () => nestedMounts,
+        resolveContainerStoragePath: () =>
+          "/var/lib/synthetic/podman/.local/share/containers",
+      }),
+    );
+    assert.equal(result.containerStorage?.fstype, "zfs");
+    assert.equal(result.containerStorage?.idmapHazard, true);
   });
 });

@@ -97,6 +97,20 @@ This works uniformly across podman and docker, parses cheaply, and avoids the JS
 
 Docker reports `HostConfig.NetworkMode` as `"default"` or `"bridge"` when no `--network` was passed. Podman rootless reports `"slirp4netns"` or `"pasta"`. These are runtime defaults equivalent to "user did not request a specific network." `canonicalNetworkMode()` in `src/containers.ts` normalizes all of them to `""` so comparison against a requested `undefined`/`""` is correct. Any new comparison of `networkMode` between requested and live state must go through this helper.
 
+### `disableUserNamespaceRemap` (rootless-Podman + idmap-incompatible storage)
+
+Some filesystems (ZFS is the canonical case) cannot be id-mapped by the kernel. `--userns=keep-id` either fails outright on container create or triggers Podman's `storage-chown-by-maps` sweep, which is catastrophically slow on CoW metadata. The README's user-facing section documents the host-side primary fix (storage driver swap to `fuse-overlayfs`); the plugin-side escape hatch below covers the case where the operator cannot or will not change storage drivers.
+
+Invariants:
+
+- `disableUserNamespaceRemap` is a plugin-config boolean; default `false` preserves the historical `keep-id` behaviour for every existing deployment.
+- The flag affects **only** the rootless-Podman branch of `userMappingFlags()`. Docker and rootful-Podman paths are untouched because they never emit `keep-id` to begin with.
+- When the flag is active, `userMappingFlags()` returns `[]` for rootless-Podman — no `--userns` and no `--user`. The default rootless mapping (in-image UID 0 → host caller's UID) then drives bind-mount ownership for root-by-default images. Non-root images lose host-caller ownership; that's the documented trade-off.
+- The toggle lives in module state in `src/runtime.ts`, set by `setDisableUserns()` from `plugin.start()` and reset to `false` in `plugin.stop()`. Stop/start cycles must not strand a previous run's setting.
+- Drift detection in `ensureRunning` composes through `userMappingFlags()`, so the toggle is automatically reflected; never add a parallel codepath that re-derives the same decision.
+
+Discoverability — `selfDeployment().containerStorage` reports the filesystem backing the rootless-Podman storage root and emits `advice` lines when the filesystem is in `IDMAP_HAZARD_FSTYPES`. Advisory only; never escalates `status`.
+
 ### Auto-recreate on config drift
 
 `ensureRunning` compares the requested `ContainerConfig` against the live container's effective config on every call. On drift across `image+tag`, `command`, `networkMode`, `env`, `volumes`, or `ports`, it removes and recreates the container transparently. `resources` follows the existing live-update path. Consumer plugins do not need (and should remove) per-plugin `${dataDir}.container-hash` files — this is centralized.

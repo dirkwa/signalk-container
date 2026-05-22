@@ -964,6 +964,30 @@ export interface SelfDeploymentResult {
     missing: string[];
     kernelDisabledMemory: boolean;
   };
+  /**
+   * Storage-driver / backing-filesystem situation for rootless Podman.
+   * Populated when the daemon is reachable AND rootless. Advisory
+   * only — does not escalate `status` because the host is not in a
+   * broken state. `idmapHazard` flags filesystems known to misbehave
+   * when `--userns=keep-id` triggers Podman's `storage-chown-by-maps`
+   * sweep (ZFS is the canonical case; some encrypted filesystems
+   * behave the same way). `advice` carries operator-facing remediation
+   * lines pointing at the recommended `fuse-overlayfs` storage driver
+   * and the `disableUserNamespaceRemap` config flag.
+   *
+   * `null` when the probe could not run (non-Linux, mounts file
+   * unreadable, no rootless Podman detected).
+   */
+  containerStorage: {
+    /** Mount point covering the rootless storage root, or `null` if unknown. */
+    storagePath: string | null;
+    /** Filesystem type as reported by `/proc/mounts`, or `null` if unknown. */
+    fstype: string | null;
+    /** True when `fstype` is in the "may cause `--userns=keep-id` trouble" set. */
+    idmapHazard: boolean;
+    /** Operator-facing remediation; empty when `idmapHazard` is false. */
+    advice: string[];
+  } | null;
   status: SelfDeploymentStatus;
   /** Empty when `status === "ok"`. */
   remediation: string[];
@@ -1012,6 +1036,26 @@ export interface PluginConfig {
    * set by the plugin.
    */
   containerOverrides?: Record<string, ContainerResourceLimits>;
+  /**
+   * Suppress the rootless-Podman `--userns=keep-id` flag for every
+   * managed container. Enable on hosts whose backing filesystem
+   * cannot be id-mapped by the kernel — ZFS is the common case (the
+   * idmapped-mounts feature is filesystem-specific and arrived in
+   * recent kernels only). Symptom without this flag:
+   * `crun: writing file /proc/<pid>/gid_map: Invalid argument` at
+   * container create time.
+   *
+   * With the flag active, containers run in the default rootless
+   * userns. For root-by-default images (most managed containers:
+   * questdb, grafana, mayara) bind-mount file ownership still lands
+   * on the host caller because in-image UID 0 maps to the host
+   * caller's UID under the default rootless mapping. Non-root images
+   * (e.g. `charts-toolbox`'s `USER toolbox`) trade host-caller
+   * ownership for the ability to start at all.
+   *
+   * Default: `false` (historical keep-id behaviour preserved).
+   */
+  disableUserNamespaceRemap?: boolean;
 }
 
 /**

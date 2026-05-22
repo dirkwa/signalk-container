@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { userMappingFlags } from "../jobs.js";
+import { isDisableUserns, setDisableUserns } from "../runtime.js";
 import type { ContainerRuntimeInfo } from "../types.js";
 
 const dockerRuntime: ContainerRuntimeInfo = {
@@ -186,6 +187,139 @@ describe("userMappingFlags", () => {
           ),
         /inImageUid must be a non-negative integer, got Infinity/,
       );
+    });
+  });
+
+  describe("disableUserNamespaceRemap toggle", () => {
+    // The toggle is a module-level switch driven by the plugin config
+    // (`disableUserNamespaceRemap`). Tests below set it on entry and
+    // restore the historical default on exit so unrelated suites that
+    // also exercise `userMappingFlags` stay deterministic.
+
+    it("suppresses --userns=keep-id on rootless podman", () => {
+      // Reproduces the ZFS workaround path. With the toggle active,
+      // rootless podman emits no userns flag — the container runs in
+      // the default rootless userns, in-image UID 0 → host caller's
+      // UID via the implicit mapping.
+      setDisableUserns(true);
+      try {
+        assert.deepEqual(
+          userMappingFlags(podmanRootlessRuntime, undefined, linuxIds),
+          [],
+        );
+      } finally {
+        setDisableUserns(false);
+      }
+    });
+
+    it("still suppresses the flag when the caller declared a non-root in-image UID", () => {
+      // Non-root images (charts-toolbox at UID 1001) lose host-caller
+      // ownership on bind mounts under this branch — but starting at
+      // all beats clean ownership on a filesystem the kernel cannot
+      // id-map.
+      setDisableUserns(true);
+      try {
+        assert.deepEqual(
+          userMappingFlags(
+            podmanRootlessRuntime,
+            { inImageUid: 1001, inImageGid: 1001 },
+            linuxIds,
+          ),
+          [],
+        );
+      } finally {
+        setDisableUserns(false);
+      }
+    });
+
+    it("does not change the rootful-podman branch", () => {
+      // Rootful podman already used `--user`, never `--userns=keep-id`.
+      // The toggle is a no-op there.
+      setDisableUserns(true);
+      try {
+        assert.deepEqual(
+          userMappingFlags(podmanRootfulRuntime, undefined, linuxIds),
+          ["--user", "1000:1000"],
+        );
+      } finally {
+        setDisableUserns(false);
+      }
+    });
+
+    it("does not change the docker branch", () => {
+      // Docker is unaffected regardless of the toggle.
+      setDisableUserns(true);
+      try {
+        assert.deepEqual(userMappingFlags(dockerRuntime, undefined, linuxIds), [
+          "--user",
+          "1000:1000",
+        ]);
+      } finally {
+        setDisableUserns(false);
+      }
+    });
+
+    it("still honours the per-call user: false opt-out", () => {
+      setDisableUserns(true);
+      try {
+        assert.deepEqual(
+          userMappingFlags(podmanRootlessRuntime, false, linuxIds),
+          [],
+        );
+      } finally {
+        setDisableUserns(false);
+      }
+    });
+
+    it("restores keep-id when the toggle is flipped back off", () => {
+      // start() → stop() → start() cycle must not strand a previous
+      // run's toggle. Sanity-check the after-restore behaviour, with
+      // a try/finally guard so a failed assertion leaves the toggle
+      // in the historical default for downstream suites.
+      setDisableUserns(true);
+      try {
+        setDisableUserns(false);
+        assert.deepEqual(
+          userMappingFlags(podmanRootlessRuntime, undefined, linuxIds),
+          ["--userns", "keep-id:uid=0,gid=0"],
+        );
+      } finally {
+        setDisableUserns(false);
+      }
+    });
+
+    it("models a plugin start/stop/start lifecycle without state leak", () => {
+      // The plugin wrapper does:
+      //   start(config)  → setDisableUserns(config.disableUserNamespaceRemap === true)
+      //   stop()         → setDisableUserns(false)
+      // This test exercises the toggle directly the same way to lock
+      // in the invariant: stop() always clears the previous run's
+      // setting before a new start() reads from a fresh config.
+      assert.equal(isDisableUserns(), false, "default state is false");
+
+      setDisableUserns(true);
+      try {
+        assert.equal(isDisableUserns(), true);
+        assert.deepEqual(
+          userMappingFlags(podmanRootlessRuntime, undefined, linuxIds),
+          [],
+          "rootless podman emits no userns flag while toggle is on",
+        );
+
+        // stop() clears.
+        setDisableUserns(false);
+        assert.equal(isDisableUserns(), false);
+
+        // Second start, this time with the flag off (the historical
+        // default). Must NOT inherit the previous run's "true".
+        assert.deepEqual(
+          userMappingFlags(podmanRootlessRuntime, undefined, linuxIds),
+          ["--userns", "keep-id:uid=0,gid=0"],
+          "second start with default config restores keep-id",
+        );
+      } finally {
+        setDisableUserns(false);
+      }
     });
   });
 });
