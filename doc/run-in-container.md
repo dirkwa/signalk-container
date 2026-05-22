@@ -21,7 +21,7 @@ The reference quadlet [below](#a-reference-quadlet-rootless-podman-host) uses on
 
 ## The architecture in one diagram
 
-```
+```text
 host (rootless podman as uid 1000)
   │
   ├─ podman.sock  ◄── bind-mounted as /var/run/docker.sock into signalk-server
@@ -51,7 +51,7 @@ The in-container plugin reaches the host daemon through `/var/run/docker.sock`. 
 
 **Rootless podman host** (the common Pi / boat-computer case):
 
-```
+```ini
 Volume=%t/podman/podman.sock:/var/run/docker.sock
 ```
 
@@ -73,7 +73,7 @@ volumes:
 
 `docker` reads `DOCKER_HOST`; podman in remote mode reads `CONTAINER_HOST` or the `--url` flag. Set whichever your image's primary CLI uses:
 
-```
+```ini
 Environment=DOCKER_HOST=unix:///var/run/docker.sock
 ```
 
@@ -90,13 +90,13 @@ The plugin's auto-detection cascade (`HOSTNAME` → `/proc/self/cgroup`) fails o
 
 Together, these mean the cascade returns null, and `resolveHostPath` falls back to passing the in-container path unchanged. The host daemon then fails with:
 
-```
+```text
 Error: statfs /home/node/.signalk: no such file or directory
 ```
 
 The fix is to set the override explicitly to the container's name:
 
-```
+```ini
 Environment=SIGNALK_CONTAINER_ID=signalk-master
 ```
 
@@ -108,26 +108,17 @@ Environment=SIGNALK_CONTAINER_ID=signalk-master
 
 The standard pattern (rootless podman quadlet):
 
-```
+```ini
 Volume=%h/.signalk:/home/node/.signalk
 ```
 
 `%h` expands to the host user's home (`/home/dirk`). On the host the data lives at `/home/dirk/.signalk`; inside SK it appears as `/home/node/.signalk`; consumer plugins request `/home/node/.signalk` as the data mount and `resolveHostPath` translates back to `/home/dirk/.signalk` when calling the host daemon.
 
-## What works automatically since 1.9.4
+## Automatic remote-mode fallback
 
-Older versions failed at runtime detection when the in-container podman binary couldn't operate locally:
+When the in-container podman binary can't operate locally — typically because the image ships the podman CLI but not the full rootless infrastructure (`uidmap`, `slirp4netns`, `fuse-overlayfs`) — `tryRuntime` falls back to talking to the host daemon over the bind-mounted socket. Concretely: after `podman --version` succeeds, the plugin probes `podman info`; if that fails inside a container with a socket reachable via `CONTAINER_HOST` or `/var/run/docker.sock`, it switches to `podman --remote --url <socket>` for every subsequent invocation. The runtime stays podman; the in-container binary is just a client.
 
-```
-Error: command required for rootless mode with multiple IDs:
-exec: "newuidmap": executable file not found in $PATH
-```
-
-This happens because many slim Signal K images ship the podman CLI but not the full rootless infrastructure (`uidmap`, `slirp4netns`, `fuse-overlayfs`). The in-container podman fails its first real call.
-
-**As of 1.9.4**, `tryRuntime` probes `podman info` after the version check. If it fails inside a container with a socket bind-mounted in, the plugin transparently switches to `podman --remote --url <socket>` for every invocation — every command routes to the host daemon, the in-container binary is just a client. No image changes required.
-
-The same logic also picks up `CONTAINER_HOST` if you've set it.
+This means the recommended image doesn't need to carry the entire rootless stack. The plugin records the chosen socket on `ContainerRuntimeInfo.remoteSocketUrl` so consumers can inspect what it picked.
 
 ## A reference quadlet (rootless podman host)
 
