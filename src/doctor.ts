@@ -574,6 +574,7 @@ function remediationCgroupControllers(
       "",
       "Verify inside the SK container after reboot:",
       "  podman exec <sk-container> cat /sys/fs/cgroup/cgroup.controllers",
+      "  # or: docker exec <sk-container> cat /sys/fs/cgroup/cgroup.controllers",
       "  # memory should appear in the output",
     ];
   }

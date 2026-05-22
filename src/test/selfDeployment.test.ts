@@ -630,7 +630,7 @@ describe("selfDeployment — kernel cgroup_disable=memory detection", () => {
     assert.equal(result.cgroupControllers.kernelDisabledMemory, false);
   });
 
-  it("does NOT flag when an earlier cgroup_enable is overridden by a LATER cgroup_disable", async () => {
+  it("DOES flag when an earlier cgroup_enable is overridden by a LATER cgroup_disable (last-token wins)", async () => {
     // Defensive against the wrong direction — last-token-wins must work
     // for the disable side too, otherwise we'd silently miss this case.
     const result = await selfDeployment(
