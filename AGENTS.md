@@ -36,7 +36,7 @@ Do not add error handling, fallbacks, or validation for scenarios that cannot ha
 ### Testing
 
 - Test runner is `node:test`. Tests in `src/test/*.ts`, compiled to `dist/test/*.js`. Globs in `package.json` **must** be double-quoted so Windows expands them.
-- Unit tests live directly under `src/test/`. Integration tests that need a real container runtime (image pulls, cgroup probes, etc.) live under `src/test/integration/`. The split keeps `npm test` runnable in any sandbox — the SignalK plugin registry harness firewalls outbound network when scoring plugins, which used to drop our score by 30 points when the integration tests tried to `docker pull alpine:3.19`.
+- Unit tests live directly under `src/test/`. Integration tests that need a real container runtime (image pulls, cgroup probes, etc.) live under `src/test/integration/`. The split keeps `npm test` runnable in restricted sandboxes where outbound network access may be unavailable.
 - Three scripts:
   - `npm test` — unit only (`dist/test/*.test.js`, no recursion). Safe to run anywhere.
   - `npm run test:integration` — integration only (`dist/test/integration/*.test.js`). Requires podman or docker; tests still self-skip on Windows and when no runtime is found.
