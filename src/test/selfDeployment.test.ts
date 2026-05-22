@@ -185,7 +185,18 @@ describe("selfDeployment — no-runtime branch", () => {
     // remediation must not promote one as "recommended" globally.
     assert.doesNotMatch(joined, /Podman \(recommended\)/);
 
+    // WHY: the pre-built image is the lowest-friction option for users
+    // who can pick their SK image. Surface it before the bind-mount
+    // recipes so users see it first.
+    assert.match(joined, /ghcr\.io\/dirkwa\/signalk-server:latest/);
+    assert.match(joined, /pre-built image/i);
+    const prebuiltIdx = joined.indexOf("ghcr.io/dirkwa/signalk-server");
     const dockerBindIdx = joined.indexOf("/usr/bin/docker:/usr/bin/docker");
+    assert.ok(
+      prebuiltIdx >= 0 && prebuiltIdx < dockerBindIdx,
+      "pre-built image section must appear before the bind-mount recipes",
+    );
+
     const maintainerIdx = joined.indexOf("For image maintainers");
     assert.ok(
       dockerBindIdx >= 0 && maintainerIdx > dockerBindIdx,
