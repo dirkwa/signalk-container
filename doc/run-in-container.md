@@ -4,6 +4,21 @@ This guide is for operators deploying Signal K **itself** as a container — typ
 
 Bare-metal Signal K just works — skip to the [main README](../README.md). This page covers the in-container case end to end.
 
+## Recommended image
+
+We build and publish ready-to-use Signal K server images at **<https://github.com/dirkwa/signalk-server-images>**. They ship the `docker` and `podman` CLIs (so the in-container `signalk-container` plugin can talk to the host daemon via the mounted socket) and the `crun` / `conmon` minimum-rootless infrastructure, but stay slim — no buildah, no full local-rootless plumbing (the [remote-mode fallback](#what-works-automatically-since-194) makes that unnecessary).
+
+Drop one of these references straight into your quadlet `Image=` line or compose `image:` line:
+
+| Image reference                        | Tracks                              |
+| -------------------------------------- | ----------------------------------- |
+| `ghcr.io/dirkwa/signalk-server:latest` | Latest stable Signal K release      |
+| `ghcr.io/dirkwa/signalk-server:beta`   | Latest Signal K beta release        |
+| `ghcr.io/dirkwa/signalk-server:master` | Tip of upstream `master`            |
+| `ghcr.io/dirkwa/signalk-server:diwa`   | `master` + experimental Dirk addons |
+
+The reference quadlet [below](#a-reference-quadlet-rootless-podman-host) uses one of these directly.
+
 ## The architecture in one diagram
 
 ```
@@ -123,7 +138,7 @@ Wants=network-online.target
 After=network-online.target
 
 [Container]
-Image=ghcr.io/your-org/signalk-server:latest
+Image=ghcr.io/dirkwa/signalk-server:latest
 ContainerName=signalk-master
 Network=host
 UserNS=keep-id
