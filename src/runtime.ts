@@ -21,12 +21,37 @@ export function isContainerized(): boolean {
   );
 }
 
-function cleanEnv(): NodeJS.ProcessEnv {
+/**
+ * Build the environment passed to every podman/docker invocation.
+ * Strips systemd-activation leftovers (`LISTEN_*`) and backfills
+ * `XDG_RUNTIME_DIR` so rootless Podman can locate its socket and
+ * storage under system-scoped service units.
+ *
+ * Exported for unit tests; production callers should not need to
+ * touch it directly.
+ */
+export function cleanEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
   for (const key of Object.keys(env)) {
     if (key.startsWith("LISTEN_")) {
       delete env[key];
     }
+  }
+  // Rootless Podman reads its socket and storage paths via
+  // `XDG_RUNTIME_DIR` (e.g. `/run/user/<uid>/podman/podman.sock`,
+  // `/run/user/<uid>/containers/...`). When Signal K runs as a
+  // system-scoped systemd unit (the usual `User=signalk` setup),
+  // the variable is NOT inherited from the user's session — only
+  // `loginctl enable-linger` style user-scope units get it. Without
+  // it, `podman info` falls back to ambiguous defaults: the rootless
+  // probe returns null, socket inference produces no path, and the
+  // ZFS storage probe never runs. Backfill from the process UID
+  // when it's missing.
+  if (
+    env.XDG_RUNTIME_DIR === undefined &&
+    typeof process.getuid === "function"
+  ) {
+    env.XDG_RUNTIME_DIR = `/run/user/${process.getuid()}`;
   }
   return env;
 }
@@ -353,9 +378,14 @@ async function probeRootless(
   if (result.exitCode !== 0) {
     return null;
   }
-  const trimmed = result.stdout.trim();
-  if (trimmed === "true") return true;
-  if (trimmed === "false") return false;
+  // Scan for the trailing `true`/`false` token rather than requiring
+  // an exact stdout match. Some podman setups print a warning above
+  // the template value (e.g. `WARN[0000] ...\ntrue`) which would
+  // otherwise leave us with `null` and break the keep-id decision.
+  const match = result.stdout.trim().match(/\b(true|false)\b\s*$/m);
+  if (match) {
+    return match[1] === "true";
+  }
   return null;
 }
 

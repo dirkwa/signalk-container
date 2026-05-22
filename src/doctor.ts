@@ -568,8 +568,14 @@ async function probeDaemon(
   let rootless: boolean | null = null;
   const trimmed = r.stdout.trim();
   if (binary === "podman") {
-    if (trimmed === "true") rootless = true;
-    else if (trimmed === "false") rootless = false;
+    // Some podman setups print a warning to stdout before the
+    // template value (e.g. when XDG_RUNTIME_DIR is unset and rootless
+    // state can't be cached). Scan for the final standalone
+    // `true`/`false` token instead of demanding an exact match.
+    const match = trimmed.match(/\b(true|false)\b\s*$/m);
+    if (match) {
+      rootless = match[1] === "true";
+    }
   } else {
     rootless = /name=rootless/.test(trimmed) ? true : false;
   }
