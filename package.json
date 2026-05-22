@@ -28,8 +28,11 @@
     "lint": "eslint --fix",
     "format": "npm run prettier && npm run lint",
     "ci-lint": "eslint && prettier --check .",
-    "test": "node --test \"dist/test/**/*.test.js\"",
+    "test": "node --test \"dist/test/*.test.js\"",
+    "test:integration": "node --test \"dist/test/integration/*.test.js\"",
+    "test:all": "node --test \"dist/test/**/*.test.js\"",
     "build:all": "npm run build && npm test",
+    "build:all:integration": "npm run build && npm run test:all",
     "prepublishOnly": "npm run build"
   },
   "engines": {

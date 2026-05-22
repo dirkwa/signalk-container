@@ -35,11 +35,16 @@ Do not add error handling, fallbacks, or validation for scenarios that cannot ha
 
 ### Testing
 
-- Test runner is `node:test`. Tests in `src/test/*.ts`, compiled to `dist/test/*.js`, run via `node --test "dist/test/**/*.test.js"`. The glob **must** be double-quoted so Windows expands it.
+- Test runner is `node:test`. Tests in `src/test/*.ts`, compiled to `dist/test/*.js`. Globs in `package.json` **must** be double-quoted so Windows expands them.
+- Unit tests live directly under `src/test/`. Integration tests that need a real container runtime (image pulls, cgroup probes, etc.) live under `src/test/integration/`. The split keeps `npm test` runnable in restricted sandboxes where outbound network access may be unavailable.
+- Three scripts:
+  - `npm test` — unit only (`dist/test/*.test.js`, no recursion). Safe to run anywhere.
+  - `npm run test:integration` — integration only (`dist/test/integration/*.test.js`). Requires podman or docker; tests still self-skip on Windows and when no runtime is found.
+  - `npm run test:all` — both. The pre-PR full sweep on a dev box.
 - All new code requires tests. Test behavior at the function boundary, not internal control flow.
 - Inject `exec: ExecFn = execRuntime` rather than calling the runtime directly. Tests stub via `fakeExec`. See `src/test/getLiveResources.test.ts` for the canonical pattern: synthetic `{stdout, stderr, exitCode}`, no real podman invocations.
-- Container-integration tests (those that actually pull `alpine:3.19`) gate on `hasContainerRuntime()` which returns `null` on Windows. Do not add new tests that pull real Linux images without the same guard.
-- All tests must pass on every commit. Run `npm test` after `npm run build` (or `npm run build:all` to do both); `node --test` runs the compiled `dist/test/**/*.test.js` glob, so a fresh build is required before testing.
+- Container-integration tests (those that actually pull `alpine:3.19`) live under `src/test/integration/` and gate on `hasContainerRuntime()` which returns `null` on Windows. Do not add new tests that pull real Linux images without putting them under `src/test/integration/` AND gating on the helper.
+- All tests must pass on every commit. Run `npm run build:all:integration` (= `build && test:all`) locally before opening a PR; CI's `npm test` covers the unit half and you cover the integration half.
 
 ## Runtime Invariants
 
@@ -152,7 +157,7 @@ This repo is maintained by Dirk Wahrheit. Workflow is deliberate; AI tools shoul
 Before pushing or opening a PR:
 
 1. `npm run format` — `prettier --write .` + `eslint --fix` (writes back fixes)
-2. `npm run build:all` — `build && test`, where `build` = `clean && build:server (tsc) && build:configpanel (vite build)`. All tests must pass.
+2. `npm run build:all:integration` — `build && test:all`, where `build` = `clean && build:server (tsc) && build:configpanel (vite build)`. All tests (unit + integration) must pass. CI runs `npm test` (unit only), so the integration coverage is your responsibility before pushing.
 3. `npm run ci-lint` — `eslint && prettier --check .` — read-only verification of step 1's output; this is what CI runs and what catches uncommitted format/lint drift.
 4. `cr review --plain | tee /tmp/cr-review-<branch>.txt` — local CodeRabbit pass. `cr` only sees committed changes, so commit first, then review. The CLI is rate-limited (~50min cooldown); pipe to a file so reruns aren't needed.
 
