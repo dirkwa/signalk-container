@@ -763,7 +763,7 @@ describe("selfDeployment — containerStorage probe (rootless podman)", () => {
   const zfsHomeMounts = [
     { mountPoint: "/", fstype: "ext4" },
     { mountPoint: "/home", fstype: "zfs" },
-    { mountPoint: "/home/sailor", fstype: "zfs" },
+    { mountPoint: "/var/lib/synthetic", fstype: "zfs" },
   ];
 
   it("flags idmapHazard true on rootless podman backed by ZFS", async () => {
@@ -775,7 +775,7 @@ describe("selfDeployment — containerStorage probe (rootless podman)", () => {
         findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
         readMounts: async () => zfsHomeMounts,
         resolveContainerStoragePath: () =>
-          "/home/sailor/.local/share/containers",
+          "/var/lib/synthetic/.local/share/containers",
       }),
     );
     assert.equal(result.status, "ok"); // advisory, never escalates
@@ -784,7 +784,7 @@ describe("selfDeployment — containerStorage probe (rootless podman)", () => {
     assert.equal(result.containerStorage?.idmapHazard, true);
     assert.equal(
       result.containerStorage?.storagePath,
-      "/home/sailor/.local/share/containers",
+      "/var/lib/synthetic/.local/share/containers",
     );
     const advice = result.containerStorage?.advice.join("\n") ?? "";
     assert.match(advice, /fuse-overlayfs/);
@@ -800,7 +800,7 @@ describe("selfDeployment — containerStorage probe (rootless podman)", () => {
         findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
         readMounts: async () => ext4Mounts,
         resolveContainerStoragePath: () =>
-          "/home/sailor/.local/share/containers",
+          "/var/lib/synthetic/.local/share/containers",
       }),
     );
     assert.equal(result.containerStorage?.fstype, "ext4");
@@ -817,7 +817,7 @@ describe("selfDeployment — containerStorage probe (rootless podman)", () => {
         findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
         readMounts: async () => zfsHomeMounts,
         resolveContainerStoragePath: () =>
-          "/home/sailor/.local/share/containers",
+          "/var/lib/synthetic/.local/share/containers",
       }),
     );
     assert.equal(result.daemon.rootless, false);
@@ -833,7 +833,7 @@ describe("selfDeployment — containerStorage probe (rootless podman)", () => {
         findBinary: async (n) => (n === "docker" ? "/usr/bin/docker" : null),
         readMounts: async () => zfsHomeMounts,
         resolveContainerStoragePath: () =>
-          "/home/sailor/.local/share/containers",
+          "/var/lib/synthetic/.local/share/containers",
       }),
     );
     assert.equal(result.binary.name, "docker");
@@ -849,7 +849,7 @@ describe("selfDeployment — containerStorage probe (rootless podman)", () => {
         findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
         readMounts: async () => null, // simulate non-Linux / sandboxed
         resolveContainerStoragePath: () =>
-          "/home/sailor/.local/share/containers",
+          "/var/lib/synthetic/.local/share/containers",
       }),
     );
     assert.equal(result.containerStorage, null);
@@ -870,12 +870,12 @@ describe("selfDeployment — containerStorage probe (rootless podman)", () => {
   });
 
   it("picks the deepest covering mount when nested mounts overlap", async () => {
-    // `/home/sailor/podman` is its own ZFS dataset nested under a parent
+    // `/var/lib/synthetic/podman` is its own ZFS dataset nested under a parent
     // ext4 home mount. The doctor must report zfs, not ext4.
     const nestedMounts = [
       { mountPoint: "/", fstype: "ext4" },
       { mountPoint: "/home", fstype: "ext4" },
-      { mountPoint: "/home/sailor/podman", fstype: "zfs" },
+      { mountPoint: "/var/lib/synthetic/podman", fstype: "zfs" },
     ];
     const result = await selfDeployment(
       "auto",
@@ -885,7 +885,7 @@ describe("selfDeployment — containerStorage probe (rootless podman)", () => {
         findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
         readMounts: async () => nestedMounts,
         resolveContainerStoragePath: () =>
-          "/home/sailor/podman/.local/share/containers",
+          "/var/lib/synthetic/podman/.local/share/containers",
       }),
     );
     assert.equal(result.containerStorage?.fstype, "zfs");

@@ -97,32 +97,19 @@ This works uniformly across podman and docker, parses cheaply, and avoids the JS
 
 Docker reports `HostConfig.NetworkMode` as `"default"` or `"bridge"` when no `--network` was passed. Podman rootless reports `"slirp4netns"` or `"pasta"`. These are runtime defaults equivalent to "user did not request a specific network." `canonicalNetworkMode()` in `src/containers.ts` normalizes all of them to `""` so comparison against a requested `undefined`/`""` is correct. Any new comparison of `networkMode` between requested and live state must go through this helper.
 
-### `disableUserNamespaceRemap` (rootless-Podman + ZFS escape hatch)
+### `disableUserNamespaceRemap` (rootless-Podman + idmap-incompatible storage)
 
-`userMappingFlags()` emits `--userns=keep-id` for rootless Podman by default. On hosts whose backing filesystem cannot be id-mapped by the kernel — ZFS is the canonical case; some encrypted filesystems behave the same way — the kernel either rejects the flag outright (`crun: writing file /proc/<pid>/gid_map: Invalid argument`) or accepts it but triggers a per-file `chown` sweep across the image layers (Podman's `storage-chown-by-maps`) that is catastrophically slow on CoW filesystems.
-
-The recommended primary fix is **host-side**: configure rootless Podman to use `fuse-overlayfs` as its storage `mount_program`. `fuse-overlayfs` stores virtual ownership in xattrs instead of materializing chowns, which makes `--keep-id` cheap on ZFS. Edit `~/.config/containers/storage.conf` on the host running Signal K (or `/etc/containers/storage.conf` system-wide) and add:
-
-```toml
-[storage]
-driver = "overlay"
-
-[storage.options.overlay]
-mount_program = "/usr/bin/fuse-overlayfs"
-```
-
-Then `podman system reset && podman system migrate` to re-stage existing images under the new driver. The dirkwa/signalk-server-images Docker image ships the `fuse-overlayfs` binary so it is available inside the SignalK container too if Signal K itself runs rootless in a container on a ZFS host.
-
-The plugin-config flag `disableUserNamespaceRemap` is a **secondary escape hatch** for users who cannot or do not want to switch storage drivers (older Podman, restricted hosts, etc.). It flips a module-level toggle (`setDisableUserns(true)` in `src/runtime.ts`) that makes `userMappingFlags()` emit no flag at all on the rootless-Podman branch. Root-by-default images (most managed containers: questdb, grafana, mayara) keep correct bind-mount file ownership because in-image UID 0 maps to the host caller's UID under the default rootless mapping; non-root images (`charts-toolbox` at UID 1001) trade host-caller ownership for the ability to start at all.
+Some filesystems (ZFS is the canonical case) cannot be id-mapped by the kernel. `--userns=keep-id` either fails outright on container create or triggers Podman's `storage-chown-by-maps` sweep, which is catastrophically slow on CoW metadata. The README's user-facing section documents the host-side primary fix (storage driver swap to `fuse-overlayfs`); the plugin-side escape hatch below covers the case where the operator cannot or will not change storage drivers.
 
 Invariants:
 
-- The toggle is reset to `false` in `plugin.stop()` so a stop/start cycle does not strand the previous run's setting.
-- The toggle only affects the rootless-Podman branch. Docker and rootful-Podman paths still emit `--user host:host` as before, because they do not use `keep-id`.
-- Drift detection in the `ensureRunning` path composes through `userMappingFlags()`, so when the toggle is active no `--user` drift is reported for live containers running without explicit `--user` — automatic, no extra wiring.
-- Tests live in `src/test/userMappingFlags.test.ts` under `describe("disableUserNamespaceRemap toggle", …)`. They wrap each `setDisableUserns(true)` in `try/finally` to restore the default so unrelated suites stay deterministic.
+- `disableUserNamespaceRemap` is a plugin-config boolean; default `false` preserves the historical `keep-id` behaviour for every existing deployment.
+- The flag affects **only** the rootless-Podman branch of `userMappingFlags()`. Docker and rootful-Podman paths are untouched because they never emit `keep-id` to begin with.
+- When the flag is active, `userMappingFlags()` returns `[]` for rootless-Podman — no `--userns` and no `--user`. The default rootless mapping (in-image UID 0 → host caller's UID) then drives bind-mount ownership for root-by-default images. Non-root images lose host-caller ownership; that's the documented trade-off.
+- The toggle lives in module state in `src/runtime.ts`, set by `setDisableUserns()` from `plugin.start()` and reset to `false` in `plugin.stop()`. Stop/start cycles must not strand a previous run's setting.
+- Drift detection in `ensureRunning` composes through `userMappingFlags()`, so the toggle is automatically reflected; never add a parallel codepath that re-derives the same decision.
 
-Discoverability — the doctor probes the backing filesystem for rootless-Podman storage (`SelfDeploymentResult.containerStorage`) and emits a `containerStorage.advice` block when the filesystem is in `IDMAP_HAZARD_FSTYPES` (currently `{ "zfs" }`). The advice points operators at `fuse-overlayfs` as the primary fix and the `disableUserNamespaceRemap` toggle as the secondary escape hatch. Advisory only — does **not** escalate `status`, because the host is not in a broken state until they actually try to use `--keep-id` against a non-trivial image. Tests are in `src/test/selfDeployment.test.ts` under `describe("selfDeployment — containerStorage probe (rootless podman)", …)`.
+Discoverability — `selfDeployment().containerStorage` reports the filesystem backing the rootless-Podman storage root and emits `advice` lines when the filesystem is in `IDMAP_HAZARD_FSTYPES`. Advisory only; never escalates `status`.
 
 ### Auto-recreate on config drift
 

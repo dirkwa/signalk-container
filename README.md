@@ -193,30 +193,16 @@ All mounted at `/plugins/signalk-container/api/`:
 | Disable user-namespace remap | `false`  | Suppress rootless-Podman `--userns=keep-id` on filesystems that cannot be id-mapped (ZFS, some encrypted FS). Secondary escape hatch only — the recommended primary fix is host-side `fuse-overlayfs` storage (see [ZFS host notes](#zfs-host-notes)). |
 | Container overrides          | `{}`     | Per-container resource limits (CPU, memory, PIDs). Field-level merged on top of consumer plugin defaults. See dev guide.                                                                                                                               |
 
-### ZFS host notes
+### ZFS and other idmap-incompatible filesystems
 
-Rootless Podman on ZFS (or any filesystem the kernel cannot id-map) needs configuration on the **host** before `--userns=keep-id` works reliably. The symptom that brings you here is one of:
+Rootless Podman uses `--userns=keep-id` so files written into bind mounts land owned by the Signal K host user. On filesystems the Linux kernel cannot id-map — ZFS is the canonical case, some encrypted filesystems behave the same way — this mapping either fails at container create or triggers a multi-minute per-file `chown` sweep across the image layers.
 
-- `crun: writing file /proc/<pid>/gid_map: Invalid argument` at container create time.
-- Container starts but takes minutes because Podman is `chown`-ing every file in the image to the new UID mapping ([upstream issue tracker](https://github.com/containers/podman/issues) has multiple reports of this on ZFS).
+The doctor (`GET /plugins/signalk-container/api/doctor/deployment`) flags this proactively when Podman is rootless and the storage root sits on a known-hazard filesystem; the response's `containerStorage.advice` array carries the up-to-date remediation steps. Two fixes exist, in order of preference:
 
-The doctor (`GET /plugins/signalk-container/api/doctor/deployment`) detects this proactively: when Podman is rootless and the path backing `~/.local/share/containers` is on a hazard-list filesystem (currently `zfs`), the response carries a `containerStorage` block whose `advice` field lists the remediation below. The doctor advisory is informational — it does not flag the deployment as broken.
+1. **Switch the host's rootless Podman storage driver to `fuse-overlayfs`.** Recommended whenever possible. Avoids the chown sweep entirely while preserving correct bind-mount ownership for every image. See [Podman's storage configuration docs](https://github.com/containers/storage/blob/main/docs/containers-storage.conf.5.md) for the exact `storage.conf` form and migration steps; modern Podman releases also document `fuse-overlayfs` in `man containers-storage.conf`.
+2. **Enable the "Disable user-namespace remap" setting** in this plugin's config panel. Escape hatch for hosts that cannot switch storage drivers. Bind-mount ownership stays correct for root-by-default managed containers (questdb, grafana, mayara); non-root images give up host-caller ownership in exchange for being able to start at all.
 
-**Primary fix — switch the storage driver to `fuse-overlayfs`.** It records virtual ownership in xattrs instead of materializing chowns, which makes `--keep-id` cheap on CoW filesystems. As the Signal K host user, edit `~/.config/containers/storage.conf` (create if missing):
-
-```toml
-[storage]
-driver = "overlay"
-
-[storage.options.overlay]
-mount_program = "/usr/bin/fuse-overlayfs"
-```
-
-Then `podman system reset && podman system migrate` so existing images and storage state are re-staged under the new driver. The `fuse-overlayfs` binary ships with most distros' `fuse-overlayfs` package (Debian/Ubuntu) and is included in the dirkwa/signalk-server-images SignalK Docker image as well.
-
-**Secondary fix — enable the "Disable user-namespace remap" setting** in the signalk-container config panel. Use this only if you cannot switch storage drivers (older Podman, restricted host, etc.). Trade-off: root-by-default managed containers (questdb, grafana, mayara) keep correct bind-mount ownership; non-root images (`charts-toolbox` at UID 1001) lose host-caller ownership.
-
-**Newest kernels (6.x) + Podman ≥ 4.5 + ZFS ≥ 2.2** support idmapped mounts natively, in which case neither fix is required. Worth testing if your stack is recent enough before either workaround.
+If the host runs a recent-enough kernel + Podman + ZFS combination that supports kernel-level idmapped mounts natively, neither workaround is required — the doctor advisory will fall silent on its own once the hazard heuristic no longer matches.
 
 ## Mounting the SignalK data directory (`signalkDataMount`)
 
