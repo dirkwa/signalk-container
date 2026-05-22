@@ -270,6 +270,22 @@ export interface ContainerConfig {
    * default — set a field to `null` to explicitly remove the limit.
    */
   resources?: ContainerResourceLimits;
+  /**
+   * Container labels emitted as `--label key=value` flags. Use this to
+   * declare static metadata that survives `inspect`. Drift detection
+   * does *not* compare labels — they are informational only and not
+   * recreate-triggering.
+   *
+   * Recommended namespace for SignalK-ecosystem labels:
+   *   `io.signalk.role`         — one of `server`, `updater`, `plugin-engine`, `one-shot`
+   *   `io.signalk.persistent`   — `"true"` for containers external lifecycles own
+   *   `io.signalk.managed-by`   — `"updater"`, `"signalk-container"`, or `"external"`
+   *   `io.signalk.plugin-id`    — the plugin that registered this container
+   *
+   * The config panel will treat `io.signalk.persistent=true` as a hint
+   * to hide destructive actions (Stop / Remove). See Phase 9b for that UI work.
+   */
+  labels?: Record<string, string>;
 }
 
 /**

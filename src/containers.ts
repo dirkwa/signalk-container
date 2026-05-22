@@ -1387,6 +1387,15 @@ function buildRunArgs(
   // runtime are silently dropped.
   args.push(...resourceFlagsForRun(config.resources, runtime));
 
+  // Container labels. Informational only — not part of drift detection.
+  // Use the `io.signalk.*` namespace for cross-plugin metadata (see the
+  // `ContainerConfig.labels` docstring).
+  if (config.labels) {
+    for (const [key, value] of Object.entries(config.labels)) {
+      args.push("--label", `${key}=${value}`);
+    }
+  }
+
   args.push(imageRef);
 
   if (config.command) {
