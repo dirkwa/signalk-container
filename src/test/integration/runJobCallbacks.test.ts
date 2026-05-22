@@ -2,60 +2,16 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { makeLineSplitter } from "../runtime.js";
-import { runJob } from "../jobs.js";
-import type { ContainerRuntimeInfo } from "../types.js";
+import { runJob } from "../../jobs.js";
+import type { ContainerRuntimeInfo } from "../../types.js";
 
 const execFileP = promisify(execFile);
-
-describe("makeLineSplitter", () => {
-  it("emits one line per LF", () => {
-    const lines: string[] = [];
-    const s = makeLineSplitter((l) => lines.push(l));
-    s.push("a\nb\nc\n");
-    s.flush();
-    assert.deepEqual(lines, ["a", "b", "c"]);
-  });
-
-  it("treats CRLF, LF and bare CR as line terminators", () => {
-    const lines: string[] = [];
-    const s = makeLineSplitter((l) => lines.push(l));
-    // tippecanoe-style: same line repainted with bare \r, then a real \n
-    s.push("progress 10%\rprogress 20%\rprogress 30%\nfinal\n");
-    s.flush();
-    assert.deepEqual(lines, [
-      "progress 10%",
-      "progress 20%",
-      "progress 30%",
-      "final",
-    ]);
-  });
-
-  it("buffers partial lines across pushes", () => {
-    const lines: string[] = [];
-    const s = makeLineSplitter((l) => lines.push(l));
-    s.push("hel");
-    s.push("lo\nwor");
-    s.push("ld");
-    assert.deepEqual(lines, ["hello"]);
-    s.flush();
-    assert.deepEqual(lines, ["hello", "world"]);
-  });
-
-  it("drops empty lines", () => {
-    const lines: string[] = [];
-    const s = makeLineSplitter((l) => lines.push(l));
-    s.push("\n\na\n\nb\n");
-    s.flush();
-    assert.deepEqual(lines, ["a", "b"]);
-  });
-});
 
 /**
  * Integration test for runJob's per-stream callbacks.  Skipped when no
  * container runtime is available (CI without podman/docker, etc.) — the
- * splitter unit tests above cover the line-buffering logic without
- * needing a runtime.
+ * splitter unit tests in ../makeLineSplitter.test.ts cover the line-
+ * buffering logic without needing a runtime.
  *
  * Also skipped on Windows: GitHub-hosted Windows runners ship Docker
  * Desktop in Windows-container mode, where `docker --version` succeeds
