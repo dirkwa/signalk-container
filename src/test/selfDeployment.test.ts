@@ -947,11 +947,29 @@ describe("selfDeployment — defensive rootless-probe parsing", () => {
   });
 
   it("does not match boolean substrings inside other words", async () => {
-    // `\b...\b` anchors guard against `something-trueish` etc.
-    // matching as a positive.
+    // The last non-empty line must be exactly `true` or `false`;
+    // prose containing the substring doesn't qualify.
     const result = await selfDeployment(
       "auto",
       fakeExec({ stdout: "value=truthful", exitCode: 0 }),
+      probesWith({
+        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+      }),
+    );
+    assert.equal(result.daemon.rootless, null);
+  });
+
+  it("rejects warning-only output whose last line ends with the word 'true'", async () => {
+    // Final correctness gate: a podman that emits only warnings (no
+    // template value at all) used to parse as `true` under the
+    // `\\b(true|false)\\b\\s*$` regex. The last-non-empty-line-is-
+    // exactly-bool rule rejects it.
+    const result = await selfDeployment(
+      "auto",
+      fakeExec({
+        stdout: "WARN[0000] configuration is not true",
+        exitCode: 0,
+      }),
       probesWith({
         findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
       }),

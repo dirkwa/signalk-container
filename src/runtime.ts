@@ -378,16 +378,20 @@ async function probeRootless(
   if (result.exitCode !== 0) {
     return null;
   }
-  // Scan for the trailing `true`/`false` token rather than requiring
-  // an exact stdout match. Some podman setups print a warning above
-  // the template value (e.g. `WARN[0000] ...\ntrue`) which would
-  // otherwise leave us with `null` and break the keep-id decision.
-  // Anchor to end-of-string (no /m flag) so a warning line that
-  // happens to end in `true` or `false` doesn't outrank the actual
-  // template value below it.
-  const match = result.stdout.trim().match(/\b(true|false)\b\s*$/);
-  if (match) {
-    return match[1] === "true";
+  // Some podman setups print a warning to stdout above the template
+  // value (e.g. `WARN[0000] ...\ntrue`) when rootless state can't be
+  // cached. Take the last non-empty line and require it to be exactly
+  // `true` or `false`. Anything else (warning-only output, prose
+  // ending in the word "true", JSON, older podman that doesn't expose
+  // Host.Security.Rootless) falls through to `null`.
+  const lastLine = result.stdout
+    .trim()
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .at(-1);
+  if (lastLine === "true" || lastLine === "false") {
+    return lastLine === "true";
   }
   return null;
 }

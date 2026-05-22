@@ -570,13 +570,18 @@ async function probeDaemon(
   if (binary === "podman") {
     // Some podman setups print a warning to stdout before the
     // template value (e.g. when XDG_RUNTIME_DIR is unset and rootless
-    // state can't be cached). Scan for the final standalone
-    // `true`/`false` token instead of demanding an exact match.
-    // Anchor to end-of-string (no /m flag) so a warning line ending
-    // in `true`/`false` cannot outrank the actual template value.
-    const match = trimmed.match(/\b(true|false)\b\s*$/);
-    if (match) {
-      rootless = match[1] === "true";
+    // state can't be cached). Take the last non-empty line and
+    // require it to be exactly `true` or `false`. Anything else
+    // (warning-only output, prose ending in the word "true", JSON,
+    // older podman that doesn't expose Host.Security.Rootless)
+    // falls through to `null`.
+    const lastLine = trimmed
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .at(-1);
+    if (lastLine === "true" || lastLine === "false") {
+      rootless = lastLine === "true";
     }
   } else {
     rootless = /name=rootless/.test(trimmed) ? true : false;
