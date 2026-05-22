@@ -286,6 +286,8 @@ services:
 
 You'll see "could not detect self container id" in the SignalK log when the cascade has failed; the override resolves it without code changes.
 
+For a full walkthrough of the in-container deployment (socket bind-mount, `DOCKER_HOST` / podman remote-mode fallback, reference quadlet, troubleshooting table) see **[doc/run-in-container.md](doc/run-in-container.md)**.
+
 ## Connecting back to a container service (`signalkAccessiblePorts`)
 
 When a managed container exposes an HTTP, TCP, or other service that the SignalK process itself needs to connect to (e.g. a video stream, a database, an inference engine), use `signalkAccessiblePorts` instead of hardcoding port bindings or writing deployment-detection logic in your plugin.
