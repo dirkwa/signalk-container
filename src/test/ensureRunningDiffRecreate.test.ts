@@ -521,4 +521,42 @@ describe("ensureRunning — buildRunArgs ownership", () => {
     assert.ok(cap.runArgs);
     assert.ok(cap.runArgs.includes("UMASK=0027"));
   });
+
+  it("emits --label flags from config.labels", async () => {
+    const cap = captureRunArgsOnMissing({
+      image: "questdb/questdb",
+      tag: "9.0.0",
+      labels: {
+        "io.signalk.role": "updater",
+        "io.signalk.persistent": "true",
+      },
+    });
+    await cap.run();
+    assert.ok(cap.runArgs);
+    const labelArgs: string[] = [];
+    for (let i = 0; i < cap.runArgs.length; i++) {
+      if (cap.runArgs[i] === "--label") labelArgs.push(cap.runArgs[i + 1]);
+    }
+    assert.ok(
+      labelArgs.includes("io.signalk.role=updater"),
+      `expected role label, got: ${labelArgs.join(", ")}`,
+    );
+    assert.ok(
+      labelArgs.includes("io.signalk.persistent=true"),
+      `expected persistent label, got: ${labelArgs.join(", ")}`,
+    );
+  });
+
+  it("emits no --label flags when config.labels is unset", async () => {
+    const cap = captureRunArgsOnMissing({
+      image: "questdb/questdb",
+      tag: "9.0.0",
+    });
+    await cap.run();
+    assert.ok(cap.runArgs);
+    assert.ok(
+      !cap.runArgs.includes("--label"),
+      `--label should not appear: ${cap.runArgs.join(" ")}`,
+    );
+  });
 });
