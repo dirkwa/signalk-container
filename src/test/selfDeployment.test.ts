@@ -892,3 +892,107 @@ describe("selfDeployment — containerStorage probe (rootless podman)", () => {
     assert.equal(result.containerStorage?.idmapHazard, true);
   });
 });
+
+describe("selfDeployment — defensive rootless-probe parsing", () => {
+  // Reported in the field: a system-scoped systemd unit running
+  // Signal K invokes `podman info` without XDG_RUNTIME_DIR set.
+  // Podman 4.x prints a warning to stdout before the template
+  // value, so a strict `stdout === "true"` check leaves rootless
+  // detection as `null` and every downstream probe (containerStorage,
+  // socket inference) goes dark. The probe now scans for the
+  // trailing token instead.
+
+  it("treats warning-prefixed stdout 'WARN[...]\\ntrue' as rootless=true", async () => {
+    const result = await selfDeployment(
+      "auto",
+      fakeExec({
+        stdout:
+          'WARN[0000] "/" is not a shared mount, this could cause issues with rootless containers\ntrue',
+        exitCode: 0,
+      }),
+      probesWith({
+        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+      }),
+    );
+    assert.equal(result.daemon.rootless, true);
+  });
+
+  it("treats warning-prefixed stdout 'WARN[...]\\nfalse' as rootless=false", async () => {
+    const result = await selfDeployment(
+      "auto",
+      fakeExec({
+        stdout:
+          "WARN[0001] rootless mode detection produced an empty result\nfalse",
+        exitCode: 0,
+      }),
+      probesWith({
+        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+      }),
+    );
+    assert.equal(result.daemon.rootless, false);
+  });
+
+  it("still returns null when no boolean token is present in stdout", async () => {
+    // Negative case so the relaxation doesn't accidentally pass
+    // garbage as `true`. `Host.Security` evaluating to nothing
+    // (older podman without the field) leaves stdout empty.
+    const result = await selfDeployment(
+      "auto",
+      fakeExec({ stdout: "", exitCode: 0 }),
+      probesWith({
+        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+      }),
+    );
+    assert.equal(result.daemon.rootless, null);
+  });
+
+  it("does not match boolean substrings inside other words", async () => {
+    // The last non-empty line must be exactly `true` or `false`;
+    // prose containing the substring doesn't qualify.
+    const result = await selfDeployment(
+      "auto",
+      fakeExec({ stdout: "value=truthful", exitCode: 0 }),
+      probesWith({
+        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+      }),
+    );
+    assert.equal(result.daemon.rootless, null);
+  });
+
+  it("rejects warning-only output whose last line ends with the word 'true'", async () => {
+    // Final correctness gate: a podman that emits only warnings (no
+    // template value at all) used to parse as `true` under the
+    // `\\b(true|false)\\b\\s*$` regex. The last-non-empty-line-is-
+    // exactly-bool rule rejects it.
+    const result = await selfDeployment(
+      "auto",
+      fakeExec({
+        stdout: "WARN[0000] configuration is not true",
+        exitCode: 0,
+      }),
+      probesWith({
+        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+      }),
+    );
+    assert.equal(result.daemon.rootless, null);
+  });
+
+  it("picks the trailing template value over a warning line ending in 'true'", async () => {
+    // A warning line that itself ends in `true` (e.g.
+    // 'WARN[0000] some config is not true') used to win against
+    // the actual template value on the next line under the `/m`
+    // flag. Anchoring to end-of-string makes the trailing token
+    // authoritative.
+    const result = await selfDeployment(
+      "auto",
+      fakeExec({
+        stdout: "WARN[0000] configuration is not true\nfalse",
+        exitCode: 0,
+      }),
+      probesWith({
+        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+      }),
+    );
+    assert.equal(result.daemon.rootless, false);
+  });
+});
