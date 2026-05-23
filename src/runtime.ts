@@ -46,14 +46,39 @@ export function cleanEnv(): NodeJS.ProcessEnv {
   // it, `podman info` falls back to ambiguous defaults: the rootless
   // probe returns null, socket inference produces no path, and the
   // ZFS storage probe never runs. Backfill from the process UID
-  // when it's missing.
+  // when it's missing — but only when the target path actually
+  // exists. Inside a container that mounts only the host docker
+  // socket (universal-installer topology), `/run/user/<uid>` is
+  // absent; podman then trips `lstat /run/user: no such file` at
+  // startup even when invoked with `--url <socket>`, which breaks
+  // the podman-remote probe used by the docker-shim promotion path.
   if (
     env.XDG_RUNTIME_DIR === undefined &&
     typeof process.getuid === "function"
   ) {
-    env.XDG_RUNTIME_DIR = `/run/user/${process.getuid()}`;
+    const candidate = `/run/user/${process.getuid()}`;
+    if (pathExists(candidate)) {
+      env.XDG_RUNTIME_DIR = candidate;
+    }
   }
   return env;
+}
+
+/**
+ * Filesystem-existence probe used by `cleanEnv`'s XDG_RUNTIME_DIR
+ * backfill. Indirected so unit tests can stub it without writing to
+ * `/run/user`; production code uses `existsSync` directly.
+ */
+let pathExists: (path: string) => boolean = existsSync;
+
+/**
+ * Test-only override for the path-existence probe. Pass `null` to
+ * restore the real `existsSync`.
+ */
+export function _setPathExistsForTesting(
+  fn: ((path: string) => boolean) | null,
+): void {
+  pathExists = fn ?? existsSync;
 }
 
 /**

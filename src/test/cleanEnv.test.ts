@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { cleanEnv } from "../runtime.js";
+import { _setPathExistsForTesting, cleanEnv } from "../runtime.js";
 
 /**
  * Mutate `process.env` (and optionally `process.getuid`) around a
@@ -12,6 +12,7 @@ function withProcessEnv<T>(
   vars: Record<string, string | undefined>,
   fn: () => T,
   uid?: number | "remove",
+  pathExistsStub?: (path: string) => boolean,
 ): T {
   const savedEnv: Record<string, string | undefined> = {};
   for (const k of Object.keys(vars)) savedEnv[k] = process.env[k];
@@ -25,6 +26,7 @@ function withProcessEnv<T>(
   } else if (typeof uid === "number") {
     (process as { getuid: () => number }).getuid = () => uid;
   }
+  if (pathExistsStub) _setPathExistsForTesting(pathExistsStub);
   try {
     return fn();
   } finally {
@@ -33,6 +35,7 @@ function withProcessEnv<T>(
       else process.env[k] = v;
     }
     (process as { getuid?: () => number }).getuid = savedGetUid;
+    if (pathExistsStub) _setPathExistsForTesting(null);
   }
 }
 
@@ -55,7 +58,7 @@ describe("cleanEnv", () => {
     );
   });
 
-  it("backfills XDG_RUNTIME_DIR from process.getuid() when missing", () => {
+  it("backfills XDG_RUNTIME_DIR from process.getuid() when missing AND /run/user/<uid> exists", () => {
     // Reproduces the Signal-K-as-system-service case: systemd starts
     // SK under `User=signalk` but does NOT propagate the user's
     // XDG_RUNTIME_DIR. Without backfill, every podman invocation
@@ -67,6 +70,27 @@ describe("cleanEnv", () => {
         assert.equal(env.XDG_RUNTIME_DIR, "/run/user/1011");
       },
       1011,
+      () => true,
+    );
+  });
+
+  it("does not backfill XDG_RUNTIME_DIR when /run/user/<uid> is absent", () => {
+    // Universal-installer in-container topology: only the host
+    // docker socket is bind-mounted; `/run/user` does not exist
+    // inside the container. A backfill that points at a missing
+    // directory breaks `podman --remote --url <socket> info` —
+    // podman lstat's XDG_RUNTIME_DIR at startup before honouring
+    // `--url`, so the docker-shim promotion path stays on the
+    // docker binary and consumer plugins emitting podman flags
+    // like `--userns=keep-id:uid=X,gid=Y` fail at the docker CLI.
+    withProcessEnv(
+      { XDG_RUNTIME_DIR: undefined },
+      () => {
+        const env = cleanEnv();
+        assert.equal(env.XDG_RUNTIME_DIR, undefined);
+      },
+      1011,
+      () => false,
     );
   });
 
@@ -81,6 +105,7 @@ describe("cleanEnv", () => {
         assert.equal(env.XDG_RUNTIME_DIR, "/custom/runtime");
       },
       1011,
+      () => false,
     );
   });
 
