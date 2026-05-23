@@ -207,7 +207,13 @@ async function tryRuntime(
     prefixArgs,
     exec,
   );
-  const isRootless = await probeRootless(realRuntime, env, prefixArgs, exec);
+  const isRootless = await probeRootless(
+    realRuntime,
+    env,
+    prefixArgs,
+    exec,
+    name,
+  );
   const hostUser = probeHostUser();
 
   return {
@@ -402,32 +408,69 @@ async function probeRootless(
   env: NodeJS.ProcessEnv,
   prefixArgs: string[] = [],
   exec: ExecFn = defaultExec,
+  binaryName: string = runtime,
 ): Promise<boolean | null> {
   if (runtime !== "podman") {
     return false;
   }
-  const result = await exec(
+  // Primary path: ask podman directly via its native template.
+  // Works for native rootless / rootful podman invocations, and also
+  // when the in-container podman binary is talking to the host via
+  // --remote --url <socket> (prefixArgs handles that).
+  const podmanResult = await exec(
     "podman",
     [...prefixArgs, "info", "--format", "{{.Host.Security.Rootless}}"],
     env,
   );
-  if (result.exitCode !== 0) {
-    return null;
+  if (podmanResult.exitCode === 0) {
+    // Some podman setups print a warning to stdout above the template
+    // value (e.g. `WARN[0000] ...\ntrue`) when rootless state can't be
+    // cached. Take the last non-empty line and require it to be exactly
+    // `true` or `false`. Anything else (warning-only output, prose
+    // ending in the word "true", JSON, older podman that doesn't expose
+    // Host.Security.Rootless) falls through to the compat-API fallback.
+    const lastLine = podmanResult.stdout
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .at(-1);
+    if (lastLine === "true" || lastLine === "false") {
+      return lastLine === "true";
+    }
   }
-  // Some podman setups print a warning to stdout above the template
-  // value (e.g. `WARN[0000] ...\ntrue`) when rootless state can't be
-  // cached. Take the last non-empty line and require it to be exactly
-  // `true` or `false`. Anything else (warning-only output, prose
-  // ending in the word "true", JSON, older podman that doesn't expose
-  // Host.Security.Rootless) falls through to `null`.
-  const lastLine = result.stdout
-    .trim()
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .at(-1);
-  if (lastLine === "true" || lastLine === "false") {
-    return lastLine === "true";
+
+  // Fallback for podman-docker-shim deployments: the in-container
+  // signalk-server has access only to a Docker-compat socket pointed
+  // at a rootless podman daemon. Running the podman CLI from inside
+  // can't reach that daemon directly (different default socket
+  // path), so the primary probe above fails or returns unparseable
+  // output. The compat API doesn't expose `Host.Security.Rootless`,
+  // but it DOES expose `SecurityOptions` (an array containing
+  // `name=rootless` on a rootless backend) — which is enough to
+  // decide whether to emit `--userns=keep-id` at container-create
+  // time. Without this fallback, isRootless stays null,
+  // userMappingFlags falls through to plain `--user 1000:1000`, and
+  // bind-mounted consumer-plugin data dirs (e.g. signalk-questdb's
+  // /var/lib/questdb) get the wrong ownership in the container's
+  // user namespace.
+  if (binaryName !== "podman") {
+    const compatResult = await exec(
+      binaryName,
+      [...prefixArgs, "info", "--format", "{{.SecurityOptions}}"],
+      env,
+    );
+    if (compatResult.exitCode === 0) {
+      // `docker info --format` returns the SecurityOptions array
+      // as a Go-style `[name=apparmor name=seccomp,profile=default
+      // name=rootless]` string. We just look for the rootless token.
+      if (/\bname=rootless\b/.test(compatResult.stdout)) {
+        return true;
+      }
+      // The probe succeeded and didn't mention rootless — that's a
+      // definitive "not rootless," not "unknown."
+      return false;
+    }
   }
   return null;
 }
