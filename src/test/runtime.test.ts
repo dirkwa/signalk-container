@@ -177,6 +177,89 @@ describe("detectRuntime — podman remote-mode fallback", () => {
   });
 });
 
+describe("detectRuntime — docker CLI talking to podman compat socket", () => {
+  it("reclassifies docker→podman when DefaultRuntime is crun", async () => {
+    // Scenario on a rootless-podman host that also installs the real
+    // docker CLI (or bind-mounts /var/run/docker.sock to the podman
+    // socket and ships docker in the image). `docker --version` says
+    // "Docker version ..."; the podman daemon answers /info with
+    // `DefaultRuntime=crun`. Without the compat-API check we would
+    // report runtime=docker and show "D" in the config panel even
+    // though the user is running podman.
+    //
+    // After reclassification, the post-detect probes (cgroup
+    // controllers, rootless, validation /info) still go through
+    // runtimeCmd which keeps invoking the binary as `docker` because
+    // isPodmanDockerShim=true — so the matchers below match the
+    // docker-binary form, not podman.
+    const exec = scriptedExec([
+      {
+        match: "docker --version",
+        result: { stdout: "Docker version 29.5.2, build 79eb04c", exitCode: 0 },
+      },
+      {
+        match: "docker info --format {{.DefaultRuntime}}",
+        result: { stdout: "crun", exitCode: 0 },
+      },
+      {
+        match: "docker info --format {{.ServerVersion}}",
+        result: { stdout: "5.4.2", exitCode: 0 },
+      },
+      // The operability probe runs `docker info` (no --format) because
+      // tryRuntime always invokes via the original `name`. The cgroup
+      // and rootless probes use hardcoded `podman info` because they
+      // always speak to a podman binary regardless of the surface name.
+      {
+        match: "podman info --format",
+        result: { stdout: "true", exitCode: 0 },
+      },
+      { match: "docker info", result: { stdout: "ok", exitCode: 0 } },
+    ]);
+    const result = await detectRuntime("docker", exec);
+    assert.ok(result);
+    assert.equal(result.runtime, "podman");
+    assert.equal(result.isPodmanDockerShim, true);
+    // Server-reported version wins over the docker CLI version so the
+    // UI shows the podman daemon version, not the docker client.
+    assert.equal(result.version, "5.4.2");
+  });
+
+  it("keeps docker classification when DefaultRuntime is runc", async () => {
+    const exec = scriptedExec([
+      {
+        match: "docker --version",
+        result: { stdout: "Docker version 28.0.0, build abc", exitCode: 0 },
+      },
+      {
+        match: "docker info --format {{.DefaultRuntime}}",
+        result: { stdout: "runc", exitCode: 0 },
+      },
+    ]);
+    const result = await detectRuntime("docker", exec);
+    assert.ok(result);
+    assert.equal(result.runtime, "docker");
+    assert.equal(result.isPodmanDockerShim, false);
+    assert.equal(result.version, "28.0.0");
+  });
+
+  it("falls back to binary name when docker info is unreachable", async () => {
+    const exec = scriptedExec([
+      {
+        match: "docker --version",
+        result: { stdout: "Docker version 28.0.0, build abc", exitCode: 0 },
+      },
+      {
+        match: "docker info --format {{.DefaultRuntime}}",
+        result: { stdout: "", exitCode: 1 },
+      },
+    ]);
+    const result = await detectRuntime("docker", exec);
+    assert.ok(result);
+    assert.equal(result.runtime, "docker");
+    assert.equal(result.isPodmanDockerShim, false);
+  });
+});
+
 describe("probeHostUser", () => {
   it("returns uid/gid from process.getuid/getgid on POSIX", () => {
     if (typeof process.getuid !== "function") {

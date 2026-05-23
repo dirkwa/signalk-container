@@ -129,12 +129,48 @@ async function tryRuntime(
   const result = await exec(name, ["--version"], env);
   if (result.exitCode !== 0) return null;
 
-  const version =
+  let version =
     result.stdout.replace(/^.*version\s*/i, "").split(/[\s,]/)[0] || "unknown";
   let isPodmanDockerShim = false;
 
   if (name === "docker") {
+    // The docker binary can be either the real Docker CLI or a thin
+    // podman shim that re-prints "podman" in its --version output.
+    // Cheap first check: the version string itself.
     isPodmanDockerShim = result.stdout.toLowerCase().includes("podman");
+
+    // Second check: a real Docker CLI talking to a podman daemon via
+    // the compat socket also reports as "docker" in --version, but the
+    // daemon answers podman-shaped /info. `DefaultRuntime` is a stable
+    // discriminator — real dockerd reports `runc`, podman reports
+    // `crun`. We use `docker info --format '{{.DefaultRuntime}}'`
+    // rather than the JSON form so the probe stays cheap and there is
+    // no JSON parsing to fail. Errors are non-fatal — if /info is
+    // unreachable we fall back to the binary-name decision.
+    if (!isPodmanDockerShim) {
+      const infoProbe = await exec(
+        name,
+        ["info", "--format", "{{.DefaultRuntime}}"],
+        env,
+      );
+      if (infoProbe.exitCode === 0) {
+        const runtimeName = infoProbe.stdout.trim().toLowerCase();
+        if (runtimeName === "crun") {
+          isPodmanDockerShim = true;
+          // While we're here, surface the server-reported version so
+          // the UI doesn't show the CLI version next to the "podman"
+          // label.
+          const versionProbe = await exec(
+            name,
+            ["info", "--format", "{{.ServerVersion}}"],
+            env,
+          );
+          if (versionProbe.exitCode === 0 && versionProbe.stdout.trim()) {
+            version = versionProbe.stdout.trim();
+          }
+        }
+      }
+    }
   }
 
   const realRuntime: RuntimeName = isPodmanDockerShim ? "podman" : name;
