@@ -1896,6 +1896,81 @@ export function readSelfContainerIdsFromCgroup(): string[] {
 }
 
 /**
+ * Pure: extract every parseable container-ID candidate from a
+ * `/proc/self/mountinfo` style payload, in source-line order,
+ * deduplicated. The runtime stamps the full container id into the
+ * mount source path for the bindfs files it injects (`/etc/hostname`,
+ * `/etc/resolv.conf`, `/run/.containerenv`):
+ *
+ *   - Podman: `…/containers/overlay-containers/<64-hex>/userdata/…`
+ *   - Docker: `/<64-hex>/…` (rooted at the storage driver's container dir)
+ *
+ * Both patterns yield the same 64-character id when matched. We
+ * require 64 hex chars (not 12+) to avoid matching arbitrary content-
+ * addressed paths like overlay layers (which use the same hex length
+ * but DIFFERENT ids).
+ *
+ * Exists separately from `readSelfContainerIdsFromMountinfo` so unit
+ * tests can drive the parser without touching `/proc/self/mountinfo`.
+ */
+export function parseSelfContainerIdsFromMountinfo(content: string): string[] {
+  const seen = new Set<string>();
+  const ids: string[] = [];
+  // Podman: …/containers/overlay-containers/<id>/userdata/…
+  const podmanRx =
+    /\/containers\/overlay-containers\/([0-9a-f]{64})\/userdata\//g;
+  // Docker: a 64-hex path component immediately followed by a known
+  // bindfs file name. Tight enough to avoid layer-hash false positives.
+  const dockerRx =
+    /\/([0-9a-f]{64})\/(?:hostname|resolv\.conf|hosts|containerenv|userdata)/g;
+  for (const line of content.split("\n")) {
+    for (const rx of [podmanRx, dockerRx]) {
+      let m: RegExpExecArray | null;
+      // Use the global regex's lastIndex by reading it from a fresh
+      // copy each line, otherwise iterating two lines could skip
+      // matches that fell behind lastIndex from the previous line.
+      rx.lastIndex = 0;
+      while ((m = rx.exec(line)) !== null) {
+        const id = m[1];
+        if (!seen.has(id)) {
+          seen.add(id);
+          ids.push(id);
+        }
+      }
+    }
+  }
+  return ids;
+}
+
+/**
+ * Read `/proc/self/mountinfo` and extract every recognisable container
+ * id. Returned in source-line order, deduplicated. Empty array when
+ * the file isn't readable or no id is present.
+ *
+ * This is the fourth detection step in `findSelfContainerId`, picking
+ * up the case where:
+ *   - SIGNALK_CONTAINER_ID is unset, AND
+ *   - HOSTNAME is empty (Quadlet doesn't set it for the container
+ *     env by default), AND
+ *   - /proc/self/cgroup is `0::/` (split-cgroups Quadlet setup), AND
+ *   - the container is running with `Network=host` (so /etc/hostname
+ *     returns the host machine name, not the container name).
+ *
+ * The mountinfo source path is the same for every container the
+ * runtime starts, so it works regardless of network mode, cgroup
+ * delegation, or whether HOSTNAME is set.
+ */
+export function readSelfContainerIdsFromMountinfo(): string[] {
+  let content: string;
+  try {
+    content = readFileSync("/proc/self/mountinfo", "utf8");
+  } catch {
+    return [];
+  }
+  return parseSelfContainerIdsFromMountinfo(content);
+}
+
+/**
  * Validate that `candidateId` is a real container by trying
  * `<runtime> inspect <candidateId>`.  Returns the same `candidateId`
  * on success, null otherwise.  Used by `findSelfContainerId` to
@@ -1941,6 +2016,16 @@ async function tryInspect(
  *   3. `/proc/self/cgroup` — robust against host-network mode and
  *      any other case where HOSTNAME is wrong.  The id we extract
  *      gets the same `inspect`-validation treatment.
+ *   4. `/proc/self/mountinfo` — the runtime stamps the full
+ *      container id into the source path of `/etc/hostname`,
+ *      `/etc/resolv.conf`, `/run/.containerenv` and friends.  This
+ *      catches the case where step 2 and step 3 both fail: under a
+ *      Podman Quadlet with `Network=host`, HOSTNAME is empty (the
+ *      Quadlet doesn't forward it into the container's environment)
+ *      AND `/proc/self/cgroup` is the rootless `0::/` placeholder.
+ *      mountinfo is set by the runtime regardless of network mode or
+ *      cgroup delegation, so this step succeeds where the others
+ *      can't.
  *
  * Returns null when none of the cascade steps yield a valid id.
  * Callers should treat this exactly like the previous "HOSTNAME
@@ -1972,6 +2057,21 @@ export async function findSelfContainerId(
   //    short-circuit detection — we keep trying until one validates.
   for (const id of readSelfContainerIdsFromCgroup()) {
     const validated = await tryInspect(runtime, id, debug, "/proc/self/cgroup");
+    if (validated) return validated;
+  }
+
+  // 4. /proc/self/mountinfo — same validation pattern as cgroup. The
+  //    parser only yields 64-char hex ids matched against known
+  //    bindfs file paths (hostname / resolv.conf / containerenv /
+  //    userdata), so `inspect` validation guards against the
+  //    unlikely false positive.
+  for (const id of readSelfContainerIdsFromMountinfo()) {
+    const validated = await tryInspect(
+      runtime,
+      id,
+      debug,
+      "/proc/self/mountinfo",
+    );
     if (validated) return validated;
   }
 

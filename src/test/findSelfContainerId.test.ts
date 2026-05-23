@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   parseSelfContainerIdFromCgroup,
   parseSelfContainerIdsFromCgroupFile,
+  parseSelfContainerIdsFromMountinfo,
 } from "../containers.js";
 
 describe("parseSelfContainerIdFromCgroup", () => {
@@ -170,5 +171,86 @@ describe("parseSelfContainerIdsFromCgroupFile", () => {
 
   it("returns [] for empty content", () => {
     assert.deepEqual(parseSelfContainerIdsFromCgroupFile(""), []);
+  });
+});
+
+describe("parseSelfContainerIdsFromMountinfo", () => {
+  // mountinfo-based detection is the 4th cascade step in
+  // findSelfContainerId. It's the one that rescues Quadlet
+  // `Network=host` rootless-Podman setups where the previous three
+  // steps (env override, HOSTNAME, /proc/self/cgroup) all fail. See
+  // the docstring on parseSelfContainerIdsFromMountinfo for context.
+
+  it("extracts the id from a real Podman Quadlet /etc/hostname bindfs entry", () => {
+    // Captured verbatim from the signalk-server running under a
+    // Quadlet with `Network=host` and split cgroups.
+    const line =
+      "476 504 0:48 /containers/overlay-containers/49f02ce44e62f776d9c528ef9a71b7bb10ddb7b02a07e4e0902b355a881c9428/userdata/.containerenv /run/.containerenv rw,nosuid,nodev,relatime - tmpfs tmpfs rw";
+    assert.deepEqual(parseSelfContainerIdsFromMountinfo(line), [
+      "49f02ce44e62f776d9c528ef9a71b7bb10ddb7b02a07e4e0902b355a881c9428",
+    ]);
+  });
+
+  it("extracts the id from a real Docker bindfs entry under /<id>/hostname", () => {
+    // Docker writes its bindfs files under /var/lib/docker/containers/<id>/...
+    // which appears in mountinfo as /<id>/hostname etc.
+    const id =
+      "3338a90a8e88c5d7b6a1f7b8b9c1234567890abcdef0123456789abcdef01234";
+    assert.equal(id.length, 64);
+    const line = `100 200 0:42 /${id}/hostname /etc/hostname rw,relatime - tmpfs tmpfs rw`;
+    assert.deepEqual(parseSelfContainerIdsFromMountinfo(line), [id]);
+  });
+
+  it("dedupes when the same id appears across hostname / resolv.conf / hosts entries", () => {
+    // A real /proc/self/mountinfo from a Podman container contains
+    // four lines under the same /containers/overlay-containers/<id>/userdata/
+    // prefix. Dedup means findSelfContainerId only validates the id
+    // once via inspect.
+    const id =
+      "49f02ce44e62f776d9c528ef9a71b7bb10ddb7b02a07e4e0902b355a881c9428";
+    const content = [
+      `476 504 0:48 /containers/overlay-containers/${id}/userdata/.containerenv /run/.containerenv rw`,
+      `479 504 0:48 /containers/overlay-containers/${id}/userdata/hostname /etc/hostname rw`,
+      `480 504 0:48 /containers/overlay-containers/${id}/userdata/resolv.conf /etc/resolv.conf rw`,
+      `498 504 0:48 /containers/overlay-containers/${id}/userdata/hosts /etc/hosts rw`,
+    ].join("\n");
+    assert.deepEqual(parseSelfContainerIdsFromMountinfo(content), [id]);
+  });
+
+  it("ignores overlay layer hashes that share the 64-hex shape", () => {
+    // The overlay /rootfs mount line embeds upperdir / lowerdir paths
+    // whose components are 64-char hex but are NOT the container id.
+    // Without the bindfs file-name anchor (hostname / resolv.conf /
+    // containerenv / userdata), these would false-positive.
+    const layerId =
+      "3db769c35ef3c90f13623fdf6b0f14b653573b6d8f65249454b1d04694ee52a0";
+    const line = `504 380 0:50 / / rw,relatime - overlay overlay rw,lowerdir=/foo,upperdir=/home/dirk/.local/share/containers/storage/overlay/${layerId}/diff,workdir=/x`;
+    assert.deepEqual(parseSelfContainerIdsFromMountinfo(line), []);
+  });
+
+  it("returns [] for bare-metal mountinfo (no container-shaped paths)", () => {
+    const content = [
+      "23 28 0:21 / /sys rw,nosuid,nodev,noexec,relatime shared:7 - sysfs sysfs rw",
+      "24 28 0:5 / /proc rw,nosuid,nodev,noexec,relatime shared:13 - proc proc rw",
+      "25 28 0:6 / /dev rw,nosuid shared:3 - devtmpfs devtmpfs rw,size=4k",
+    ].join("\n");
+    assert.deepEqual(parseSelfContainerIdsFromMountinfo(content), []);
+  });
+
+  it("returns [] for empty content", () => {
+    assert.deepEqual(parseSelfContainerIdsFromMountinfo(""), []);
+  });
+
+  it("requires exactly 64 hex chars (short ids in this path are not standard)", () => {
+    // Unlike /proc/self/cgroup, where Docker historically wrote
+    // 12-char short ids, mountinfo's bindfs paths always use the
+    // long form. Tightening the regex avoids picking up partial
+    // matches inside unrelated 12+ hex spans.
+    const shortInPodmanPath =
+      "476 504 0:48 /containers/overlay-containers/49f02ce44e62/userdata/.containerenv /run/.containerenv rw";
+    assert.deepEqual(parseSelfContainerIdsFromMountinfo(shortInPodmanPath), []);
+    const shortInDockerPath =
+      "100 200 0:42 /49f02ce44e62/hostname /etc/hostname rw";
+    assert.deepEqual(parseSelfContainerIdsFromMountinfo(shortInDockerPath), []);
   });
 });
