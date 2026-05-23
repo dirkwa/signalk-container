@@ -2,160 +2,279 @@ language: en-US
 
 reviews:
   profile: assertive
-  # dist/ is the TS+webpack build output; checked in for the App Store
-  # install path, but never authored. Exclude here so the review engine
-  # never opens it.
-  path_filters:
-    - "!dist/**"
   auto_review:
     enabled: true
+    auto_incremental_review: true
     drafts: false
+    # Skip mechanical PRs that don't benefit from review.
+    # `chore(release):` PRs are version-bump-only; the substantive
+    # change was already reviewed on its own PR. Dep-bump PRs come from
+    # automation that has its own contract with the registry. WIP and
+    # explicit skip markers are author opt-outs.
+    ignore_title_keywords:
+      - "chore(release):"
+      - "chore(deps):"
+      - "chore(deps-dev):"
+      - "[skip review]"
+      - "WIP"
+    ignore_usernames:
+      - "release-please[bot]"
+      - "renovate[bot]"
+      - "dependabot[bot]"
+      - "github-actions[bot]"
+
+  # dist/ is the TS + Vite build output; checked in for the App Store
+  # install path, but never authored. Everything under node_modules and
+  # generated lockfiles are also off-limits to review.
+  path_filters:
+    - "!dist/**"
+    - "!**/node_modules/**"
+    - "!**/package-lock.json"
+    - "!**/yarn.lock"
+    - "!**/pnpm-lock.yaml"
+    - "!**/*.min.js"
+    - "!**/*.min.css"
+
   high_level_summary_instructions: |
-    Write all summaries in present tense.
-    Describe what the code does, not what it did.
-    Example: "This PR adds feature X" instead of "This PR added feature X"
+    Write summaries in present tense. Describe what the code does, not
+    what it did. Skip filler like "This PR" — go straight to the change.
 
   path_instructions:
     - path: "**/*"
       instructions: |
-        ## Repository workflow
+        ## Scope
 
-        signalk-container ships as an npm package consumed by Signal K
-        plugins. The maintainer owns the release process — version bumps
-        happen in their own `chore(release): X.Y.Z` PR, separate from
-        feature/fix work. **Do not include `package.json` version changes
-        in feature or fix PRs.** Flag any PR that mixes a `"version"` bump
-        with non-release changes.
+        Focus on files changed since `master`. Think carefully about how
+        changes interact with existing code, tests, and documentation —
+        not just the diff in isolation.
 
-        Other workflow rules to enforce:
-        - Branch names use hyphens, not slashes (`fix-something`, not
-          `fix/something`). The Signal K server convention applies here.
-        - Angular conventional commits: `<type>(<scope>): <subject>`.
-          Subject ≤ 50 chars, imperative mood, no period.
-        - No `Co-Authored-By` lines and no "Generated with Claude Code"
-          attribution in commit messages or PR bodies.
+        signalk-container is a **Signal K server plugin** that runs
+        _inside_ signalk-server's process and exposes a cross-plugin API
+        on `globalThis.__signalk_containerManager`. Other plugins
+        (signalk-questdb, signalk-grafana, signalk-backup, mayara, …)
+        call it to spin up and lifecycle-manage their own containers
+        without each implementing their own dockerode integration. The
+        plugin also ships a React config panel via Module Federation.
 
-        ## Echo comments
+        Reviews must respect that this is **public infrastructure** for
+        a plugin ecosystem — every change to `ContainerManagerApi` in
+        `src/types.ts` is a semver-significant contract change and must
+        carry JSDoc that consumer plugins can see via TypeScript
+        intellisense (the consumer side accesses the API through
+        `(globalThis as any).__signalk_containerManager` so JSDoc is
+        the only documentation surface they get).
 
-        Flag any comment that merely restates what the code already says.
-        Examples to flag:
-        - `// Sets the age` above a function named `setAge()`
-        - `// Loop through items` above a `for` loop
-        - `// returns null on failure` next to `return null` in an error
-          branch
-        These add noise without adding meaning. Request removal or
-        replacement with a comment explaining *why*, not *what*.
+        ## ESM / TypeScript strict / Node 22+
 
-        ## Leftover crumbs from intermediate commits
+        - All new code in TypeScript. No new `.js` source files.
+        - tsconfig is strict. Avoid `any`. The one allowed `any` is
+          `(globalThis as any).__signalk_containerManager` on the
+          consumer side — see above.
+        - Reuse types from `src/types.ts` rather than redefining.
+          `ContainerConfig`, `ContainerRuntimeInfo`,
+          `ContainerResourceLimits`, `LiveContainerConfig`,
+          `PortBinding`, etc. are the public vocabulary.
 
-        Check for references to things that existed in earlier commits of
-        this PR but are no longer present — removed variables, old function
-        names, deleted files, superseded approaches. These are confusing
-        to future readers. Flag any comments, docs, or code that refer to
-        something not present in the current state of the branch.
-
-        ## Documentation drift risk
-
-        Flag any `.md` file that contains detailed implementation steps,
-        specific API call sequences, code snippets, or configuration
-        values that are likely to fall out of sync as the code evolves.
-        Documentation should describe architecture and how things work
-        conceptually — not step-by-step instructions that duplicate or
-        shadow the code itself.
-
-        Specifically for this repo: the API reference in
-        `doc/plugin-developer-guide.md` and `README.md`'s API table must
-        stay aligned with `ContainerManagerApi` in `src/types.ts`. Flag
-        any new method on the type that is missing from either doc, or
-        any doc method whose JSDoc-style signature has drifted from the
-        type.
-
-        ## Implementation status in documentation
-
-        Flag any `.md` file that describes implementation progress,
-        status, or build steps (e.g. "Step 3: implement X", "TODO: add Y",
-        "currently implemented as Z"). This belongs in PR descriptions or
-        commit messages, not in documentation. Documentation should
-        describe how things work, not how they were built or what stage
-        they are in.
-
-        Architecture decisions and design rationale are fine. Build
-        narratives are not.
-
-        ## Unchecked items in test plans
-
-        If a PR description or any `.md` file contains a checklist with
-        unchecked items, flag it. Either the work is incomplete, or the
-        checklist should be removed before merge.
-
-        ## Runtime concerns
+        ## Runtime invariants (read these before suggesting changes to
+        ## src/runtime.ts or src/containers.ts)
 
         signalk-container shells out to `podman`/`docker` via
-        `execRuntime` (`src/runtime.ts`). When reviewing changes to
-        `src/containers.ts`, `src/jobs.ts`, `src/resources.ts`, or
-        `src/updates/`:
+        `execRuntime` (`src/runtime.ts`). When reviewing changes there
+        or in `src/containers.ts`, `src/jobs.ts`, `src/resources.ts`,
+        or `src/updates/`:
+
         - Every new external command should accept an injectable `exec`
-          parameter so tests can stub it (see existing
-          `ExecFn = execRuntime` pattern). Flag new direct `execRuntime`
-          calls in exported helpers.
-        - Prefer Go-template format strings (`inspect --format '{{...}}'`)
-          for diff/state probes over JSON parsing of full inspect output —
-          they work uniformly across podman and docker. See
-          `getLiveResources` / `getLiveContainerConfig` for the canonical
-          pattern.
-        - Podman bind mounts get a `:Z` suffix for SELinux relabel;
-          named volumes (no leading `/`) must NOT receive `:Z` — podman
-          rejects it. Use `volumeArg` in `src/containers.ts` rather than
-          building bind strings inline.
+          parameter so tests can stub it (see the existing
+          `ExecFn = execRuntime` pattern). Flag new direct
+          `execRuntime` calls in exported helpers.
+        - Prefer Go-template format strings
+          (`inspect --format '{{...}}'`) for diff/state probes over
+          JSON parsing of full inspect output — they work uniformly
+          across podman and docker. See `getLiveResources` and
+          `getLiveContainerConfig` for the canonical pattern.
+        - Podman bind mounts get a `:Z` suffix for SELinux relabel.
+          Named volumes (sources without leading `/`) MUST NOT receive
+          `:Z` — podman rejects them. Use `volumeArg` in
+          `src/containers.ts`, never build `-v` strings inline.
         - Docker reports `HostConfig.NetworkMode` as `"default"` or
           `"bridge"`; podman rootless reports `"slirp4netns"` or
-          `"pasta"`. The diff path canonicalizes these. Do not introduce
-          new networkMode comparisons without going through
+          `"pasta"`. The diff path canonicalizes these. Do not
+          introduce new networkMode comparisons that don't go through
           `canonicalNetworkMode`.
+
+        ## In-container signalk-server + host-side rootless Podman
+
+        signalk-server can be deployed _as a container itself_ (this is
+        the signalk-universal-installer's default), with the host's
+        rootless podman socket bind-mounted to `/var/run/docker.sock`
+        inside. In that topology the in-container `podman` binary
+        cannot reach a daemon at its own default socket path, so every
+        detection that worked on bare-metal had to be re-derived from
+        artefacts that survive the bind-mount-only shape — env vars
+        backfilled in `cleanEnv()`, mountinfo path parsing in
+        `parseSelfContainerIdsFromMountinfo()`, the `docker info`
+        compat-API probes in `tryRuntime()` and `probeRootless()`.
+
+        When reviewing changes in `runtime.ts` or `containers.ts`:
+        - The cascade in `findSelfContainerId` (env override → HOSTNAME
+          → cgroup → mountinfo) exists because each previous step has
+          known failure modes in this deployment. Do not suggest
+          simplifying by removing fallback steps.
+        - `probeRootless` calls `podman info` first, then falls back
+          to `docker info --format {{.SecurityOptions}}` looking for
+          `name=rootless`. The fallback is gated on the binary name
+          (only fires when invoked as `docker`, not `podman`).
+        - `tryRuntime` reclassifies docker→podman when
+          `docker info --format {{.DefaultRuntime}}` returns `crun`.
+          This is the gate that flips the config panel from "D Docker"
+          to "P Podman (via docker shim)".
+
+        Each of these is load-bearing for the universal-installer
+        topology. The full story is in `AGENTS.md` under
+        "In-container signalk-server + host-side rootless Podman".
+
+        ## Auto-recreate on config drift
+
+        `ensureRunning` compares the requested `ContainerConfig`
+        against the live container's effective config on every call
+        and removes-and-recreates on drift across `image+tag`,
+        `command`, `networkMode`, `env`, `volumes`, or `ports`. The
+        list is in `diffContainerConfig`. `resources` follows the
+        existing live-update path (`podman/docker update`). Consumer
+        plugins must not maintain their own `${dataDir}.container-hash`
+        files — that's centralized here. Flag any consumer-side hash
+        cache code that creeps back in.
+
+        Note: `restart` is intentionally _not_ in `diffContainerConfig`.
+        Flipping a restart policy doesn't justify the downtime of
+        recreate. New consumers get the `unless-stopped` default;
+        existing containers keep their old policy until a separate
+        drift reason forces recreate.
+
+        ## Default restart policy
+
+        `ContainerConfig.restart` defaults to `"unless-stopped"` when
+        omitted. Consumer plugins should leave it unset for the
+        standard case (container survives host reboot). Pass `"no"`
+        explicitly only for genuinely one-shot containers.
 
         ## Tests
 
         - The test runner is `node:test`. Tests live in `src/test/*.ts`,
-          compile to `dist/test/*.js`, run via `node --test
-          "dist/test/**/*.test.js"`. The glob must be double-quoted so
-          Windows actually expands it (single quotes are passed through
-          literally by cmd).
-        - Container-integration tests (`runJobCallbacks.test.ts`) gate
-          on `hasContainerRuntime()` which returns `null` on Windows.
-          Do not add new integration tests that pull real Linux images
-          without the same guard.
-        - Unit-style tests inject `fakeExec` rather than touching the
-          real runtime. New tests should follow that pattern — see
+          compile to `dist/test/*.js`, run via
+          `node --test "dist/test/**/*.test.js"`. The glob must be
+          double-quoted so Windows cmd actually expands it.
+        - Unit tests inject `fakeExec` instead of touching the real
+          runtime. New tests should follow that pattern — see
           `src/test/getLiveResources.test.ts` and
           `src/test/diffContainerConfig.test.ts` for the canonical
           shape.
+        - Integration tests that pull real Linux images live under
+          `src/test/integration/` and gate on `hasContainerRuntime()`
+          (returns `null` on Windows). Do not add new tests that pull
+          real images without that guard, and do not add new
+          integration tests outside `integration/`.
+        - All new code requires tests. Test behavior at the function
+          boundary, not internal control flow.
 
         ## Cross-plugin API surface
 
         Consumer plugins access signalk-container via
-        `(globalThis as any).__signalk_containerManager` and then call
+        `(globalThis as any).__signalk_containerManager`, then call
         `await containers.whenReady()` before any other API call. Any
         change to `ContainerManagerApi` in `src/types.ts` is a public
-        contract change — flag missing JSDoc on new methods, removed
-        methods, or signature-breaking changes that are not called out
-        in the PR description.
+        contract change. Flag missing JSDoc on new methods, removed
+        methods, or signature-breaking changes not called out in the
+        PR description.
+
+        ## Echo comments
+
+        Flag any comment that merely restates what the code already
+        says. Examples to flag:
+        - `// Sets the age` above a function named `setAge()`
+        - `// Loop through items` above a `for` loop
+        - `// returns null on failure` next to `return null` in an
+          error branch
+
+        Replace with comments explaining _why_, not _what_. Or delete.
+
+        ## Documentation drift risk
+
+        Flag any `.md` file that contains detailed implementation
+        steps, specific API call sequences, code snippets, or
+        configuration values likely to fall out of sync as the code
+        evolves. Documentation describes architecture and how things
+        work conceptually — not step-by-step instructions that
+        duplicate or shadow the code itself.
+
+        Specifically for this repo: the API reference in
+        `doc/plugin-developer-guide.md` and `README.md`'s API table
+        must stay aligned with `ContainerManagerApi` in
+        `src/types.ts`. Flag new methods on the type that are missing
+        from either doc, or doc methods whose JSDoc-style signature
+        has drifted from the type.
+
+        ## Implementation status / development history
+
+        Flag any `.md` file that describes development history,
+        implementation progress, or build narrative (e.g. "Step 3:
+        implement X", "TODO: add Y", "previously implemented as Z",
+        "added in PR #N"). That belongs in PR descriptions and git
+        history, not in repo docs. Documentation should describe
+        current state and design rationale — not how the code got to
+        where it is.
+
+        Same rule applies to source comments.
+
+        ## Leftover crumbs from intermediate commits
+
+        Flag references in the current diff to symbols, files, or
+        approaches that no longer exist on this branch — old function
+        names in comments, stale TODOs from a superseded approach,
+        renamed variables still mentioned in docs.
+
+        ## Unchecked items in test plans / checklists
+
+        If a PR description or any `.md` file contains a checklist
+        with unchecked items, flag it. Either the work isn't done, or
+        the checklist should be removed before merge.
+
+        ## Commit / PR conventions
+
+        - Branch names use **hyphens**, not slashes (`fix-something`,
+          not `fix/something`). Signal K maintainer convention.
+        - Angular conventional commits:
+          `<type>(<scope>): <subject>`. Subject ≤ 50 chars, imperative
+          mood, no period.
+        - No `Co-Authored-By` lines. No "Generated with Claude Code"
+          attribution.
+        - **No version bumps in feature/fix PRs.** Versions live in
+          their own `chore(release): X.Y.Z` PR. (Title-based skip
+          above means we won't review those, but flag a `"version"`
+          bump that sneaks into a feat/fix PR.)
+        - One logical change per commit, one logical change per PR.
 
         ## What NOT to flag
 
-        Do not flag the following — they are intentional:
+        These are intentional:
+
         - Single-character variable names inside Go-template format
-          strings (e.g. `{{.Config.Image}}`). These are runtime syntax,
+          strings (e.g. `{{.Config.Image}}`). That's runtime syntax,
           not JS code.
         - The `_postRecreate` recursion-guard parameter on
-          `ensureRunning` — the underscore prefix is intentional, marks
-          it as an internal-use-only param.
-        - Tests skipping on `process.platform === "win32"` for
-          integration tests that pull Linux images. The Windows runner
-          has Docker Desktop in Windows-container mode; there is no
+          `ensureRunning` — the underscore prefix marks it as
+          internal-use-only and shouldn't be promoted in the API.
+        - The dual-cascade in `findSelfContainerId` (4 steps) —
+          every step exists because the previous one has a known
+          failure mode in the in-container deployment topology.
+        - The compat-API fallback in `probeRootless` and the docker→
+          podman reclassification in `tryRuntime` — they look
+          redundant alongside the native podman probes but are the
+          only working detection in the in-container topology.
+        - Integration tests skipping on `process.platform === "win32"`
+          for pulls of Linux images. GitHub's Windows runners only
+          have Docker Desktop in Windows-container mode; there's no
           easy way around it.
-
-        ## Scope
-
-        Focus on files changed since master. Think carefully about how
-        changes interact with existing code and documentation — not just
-        the diff in isolation.
+        - The `restart` field's absence from `diffContainerConfig` —
+          flipping it doesn't justify recreate; consumers get the
+          new default on next recreate-for-other-reasons.
