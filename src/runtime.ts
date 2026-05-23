@@ -184,19 +184,49 @@ async function tryRuntime(
   // <socket>` so commands route to the host daemon — the actual
   // runtime stays podman, the in-container binary just acts as a
   // client.
+  //
+  // The docker-shim case (`isPodmanDockerShim === true`) needs the
+  // SAME remote-socket switch even though `docker info` succeeded —
+  // the docker CLI client-validates podman-specific flags like
+  // `--userns=keep-id:uid=X,gid=Y` and rejects them before forwarding
+  // to the daemon (`docker: --userns: invalid USER mode`), which
+  // breaks every rootless-podman bind-mounted consumer plugin
+  // (questdb, grafana, etc.). When the in-container podman binary
+  // can reach the same socket via `podman --remote`, use that path
+  // so we keep podman flag semantics while still talking to the
+  // host daemon.
   let remoteSocketUrl: string | undefined;
   if (realRuntime === "podman") {
-    const directInfo = await exec(name, ["info"], env);
-    if (directInfo.exitCode !== 0) {
+    if (isPodmanDockerShim) {
       const socket = isContainerized() ? findRemoteSocket() : null;
-      if (socket === null) return null;
-      const remoteInfo = await exec(
-        name,
-        ["--remote", "--url", socket, "info"],
-        env,
-      );
-      if (remoteInfo.exitCode !== 0) return null;
-      remoteSocketUrl = socket;
+      if (socket !== null) {
+        const remoteInfo = await exec(
+          "podman",
+          ["--remote", "--url", socket, "info"],
+          env,
+        );
+        if (remoteInfo.exitCode === 0) {
+          remoteSocketUrl = socket;
+        }
+      }
+      // If we couldn't probe podman-remote, stay on the docker
+      // binary. The detection result is still useful (the config
+      // panel reports `Podman (via docker shim)`), but consumer
+      // plugins using podman-specific flags will hit the same
+      // CLI-validation error the docker-shim path always had.
+    } else {
+      const directInfo = await exec(name, ["info"], env);
+      if (directInfo.exitCode !== 0) {
+        const socket = isContainerized() ? findRemoteSocket() : null;
+        if (socket === null) return null;
+        const remoteInfo = await exec(
+          name,
+          ["--remote", "--url", socket, "info"],
+          env,
+        );
+        if (remoteInfo.exitCode !== 0) return null;
+        remoteSocketUrl = socket;
+      }
     }
   }
 
@@ -207,12 +237,18 @@ async function tryRuntime(
     prefixArgs,
     exec,
   );
+  // probeRootless's compat-API fallback runs against `binaryName`.
+  // When we promoted the shim to podman-remote, `binaryName` must
+  // also flip to "podman" — otherwise the fallback would call
+  // `docker --remote --url <socket> info --format {{.SecurityOptions}}`,
+  // and the docker CLI doesn't know `--remote`/`--url`.
+  const effectiveBinary: string = remoteSocketUrl ? "podman" : name;
   const isRootless = await probeRootless(
     realRuntime,
     env,
     prefixArgs,
     exec,
-    name,
+    effectiveBinary,
   );
   const hostUser = probeHostUser();
 
@@ -543,6 +579,13 @@ export async function detectRuntime(
 }
 
 export function runtimeCmd(info: ContainerRuntimeInfo): string {
+  // When we successfully probed `podman --remote --url <socket>`,
+  // we're talking the podman binary on this end — even though the
+  // CLI surface that originally got detected was `docker`. Using
+  // podman here is the only way to make podman-specific flags like
+  // `--userns=keep-id` reach the daemon, since the docker CLI
+  // rejects them at the client.
+  if (info.remoteSocketUrl) return "podman";
   return info.isPodmanDockerShim ? "docker" : info.runtime;
 }
 

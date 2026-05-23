@@ -1,6 +1,12 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { detectRuntime, probeHostUser, type ExecFn } from "../runtime.js";
+import {
+  detectRuntime,
+  probeHostUser,
+  runtimeCmd,
+  type ExecFn,
+} from "../runtime.js";
+import type { ContainerRuntimeInfo } from "../types.js";
 
 describe("detectRuntime", () => {
   it("returns a runtime info object when podman or docker is available", async () => {
@@ -260,6 +266,132 @@ describe("detectRuntime — docker CLI talking to podman compat socket", () => {
     assert.equal(result.runtime, "docker");
     assert.equal(result.isPodmanDockerShim, false);
   });
+
+  it("switches to podman-remote when shim detected AND remote socket reachable", async () => {
+    // This is the universal-installer's runtime topology: signalk-server
+    // is itself a podman container, /var/run/docker.sock is bind-mounted
+    // from the host's rootless podman socket, both `docker` and `podman`
+    // binaries are in the image. Without the switch, runtimeCmd returns
+    // 'docker' and consumer-plugin runs that emit `--userns=keep-id:...`
+    // get rejected client-side by the docker CLI before reaching the
+    // podman daemon.
+    const origContainerHost = process.env.CONTAINER_HOST;
+    const origContainer = process.env.container;
+    process.env.CONTAINER_HOST = "unix:///var/run/docker.sock";
+    process.env.container = "podman";
+    try {
+      const exec = scriptedExec([
+        {
+          match: "docker --version",
+          result: { stdout: "Docker version 29.5.2", exitCode: 0 },
+        },
+        {
+          match: "docker info --format {{.DefaultRuntime}}",
+          result: { stdout: "crun", exitCode: 0 },
+        },
+        {
+          match: "docker info --format {{.ServerVersion}}",
+          result: { stdout: "5.4.2", exitCode: 0 },
+        },
+        // Order matters: scriptedExec returns the first `includes`
+        // match, so the more-specific `--format` matcher must come
+        // before the plain `info` operability matcher. Downstream
+        // probes (rootless, cgroup) go through --remote because
+        // prefixArgs is set after we record remoteSocketUrl.
+        {
+          match:
+            "podman --remote --url unix:///var/run/docker.sock info --format",
+          result: { stdout: "true", exitCode: 0 },
+        },
+        // Operability probe via podman --remote against the bind-
+        // mounted socket. This is the gate that promotes the shim
+        // to use podman-remote.
+        {
+          match: "podman --remote --url unix:///var/run/docker.sock info",
+          result: { stdout: "ok", exitCode: 0 },
+        },
+      ]);
+      const result = await detectRuntime("docker", exec);
+      assert.ok(result);
+      assert.equal(result.runtime, "podman");
+      assert.equal(result.isPodmanDockerShim, true);
+      assert.equal(
+        result.remoteSocketUrl,
+        "unix:///var/run/docker.sock",
+        "should record the remote socket so runtimeCmd switches to podman",
+      );
+      assert.equal(
+        result.isRootless,
+        true,
+        "isRootless via podman --remote should resolve true",
+      );
+    } finally {
+      if (origContainerHost === undefined) delete process.env.CONTAINER_HOST;
+      else process.env.CONTAINER_HOST = origContainerHost;
+      if (origContainer === undefined) delete process.env.container;
+      else process.env.container = origContainer;
+    }
+  });
+
+  it("stays on the docker binary when shim detected but podman-remote fails", async () => {
+    // Symmetric to the previous test: confirms the new probe is a
+    // non-blocking opportunistic upgrade. If `podman --remote` can't
+    // reach the socket (e.g. the podman binary isn't installed in
+    // the image), we keep talking docker — consumer plugins that
+    // don't use podman-specific flags still work.
+    const origContainerHost = process.env.CONTAINER_HOST;
+    const origContainer = process.env.container;
+    process.env.CONTAINER_HOST = "unix:///var/run/docker.sock";
+    process.env.container = "podman";
+    try {
+      const exec = scriptedExec([
+        {
+          match: "docker --version",
+          result: { stdout: "Docker version 29.5.2", exitCode: 0 },
+        },
+        {
+          match: "docker info --format {{.DefaultRuntime}}",
+          result: { stdout: "crun", exitCode: 0 },
+        },
+        {
+          match: "docker info --format {{.ServerVersion}}",
+          result: { stdout: "5.4.2", exitCode: 0 },
+        },
+        // Podman-remote probe fails (no podman binary in image).
+        {
+          match: "podman --remote --url",
+          result: { stdout: "", exitCode: 127 },
+        },
+        // Downstream probes back on the docker compat path.
+        { match: "podman info --format", result: { stdout: "", exitCode: 1 } },
+        {
+          match: "docker info --format {{.SecurityOptions}}",
+          result: {
+            stdout:
+              "[name=apparmor name=seccomp,profile=default name=rootless]",
+            exitCode: 0,
+          },
+        },
+        { match: "docker info", result: { stdout: "ok", exitCode: 0 } },
+      ]);
+      const result = await detectRuntime("docker", exec);
+      assert.ok(result);
+      assert.equal(result.runtime, "podman");
+      assert.equal(result.isPodmanDockerShim, true);
+      assert.equal(
+        result.remoteSocketUrl,
+        undefined,
+        "should NOT set remoteSocketUrl when podman --remote probe failed",
+      );
+      // Compat-API SecurityOptions fallback still drives isRootless=true.
+      assert.equal(result.isRootless, true);
+    } finally {
+      if (origContainerHost === undefined) delete process.env.CONTAINER_HOST;
+      else process.env.CONTAINER_HOST = origContainerHost;
+      if (origContainer === undefined) delete process.env.container;
+      else process.env.container = origContainer;
+    }
+  });
 });
 
 describe("probeRootless — docker-compat-API SecurityOptions fallback", () => {
@@ -441,5 +573,56 @@ describe("probeHostUser", () => {
       process.getuid = origGetuid;
       process.getgid = origGetgid;
     }
+  });
+});
+
+describe("runtimeCmd", () => {
+  // runtimeCmd determines the binary every execRuntime call shells
+  // out to. The rule: prefer podman-the-binary whenever we have a
+  // way to reach podman (native or via --remote). Docker is only
+  // used when there's no podman channel at all.
+
+  it("returns 'podman' for native podman", () => {
+    const info: ContainerRuntimeInfo = {
+      runtime: "podman",
+      version: "5.4.2",
+      isPodmanDockerShim: false,
+    };
+    assert.equal(runtimeCmd(info), "podman");
+  });
+
+  it("returns 'docker' for native docker", () => {
+    const info: ContainerRuntimeInfo = {
+      runtime: "docker",
+      version: "28.0.0",
+      isPodmanDockerShim: false,
+    };
+    assert.equal(runtimeCmd(info), "docker");
+  });
+
+  it("returns 'docker' for podman-docker-shim without remote socket", () => {
+    // No podman binary reachable; downstream calls still go through
+    // the docker CLI even though we know the daemon is podman. This
+    // is the historical behaviour we keep for backwards compat.
+    const info: ContainerRuntimeInfo = {
+      runtime: "podman",
+      version: "5.4.2",
+      isPodmanDockerShim: true,
+    };
+    assert.equal(runtimeCmd(info), "docker");
+  });
+
+  it("returns 'podman' for podman-docker-shim WITH remote socket", () => {
+    // The universal-installer's topology. With a working
+    // podman-remote channel, we use podman so podman-specific flags
+    // (--userns=keep-id, etc.) actually reach the daemon instead of
+    // being client-rejected by docker CLI validation.
+    const info: ContainerRuntimeInfo = {
+      runtime: "podman",
+      version: "5.4.2",
+      isPodmanDockerShim: true,
+      remoteSocketUrl: "unix:///var/run/docker.sock",
+    };
+    assert.equal(runtimeCmd(info), "podman");
   });
 });
