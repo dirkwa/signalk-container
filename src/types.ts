@@ -226,6 +226,14 @@ export interface ContainerConfig {
    */
   signalkAccessiblePorts?: number[];
   env?: Record<string, string>;
+  /**
+   * Container-runtime restart policy. Forwarded as `--restart=<value>`
+   * to `podman/docker run`. When omitted, signalk-container defaults
+   * to `"unless-stopped"` so the container comes back after a host
+   * reboot without the consumer plugin having to remember to opt in.
+   * Pass `"no"` explicitly for one-shot containers that shouldn't
+   * restart at all.
+   */
   restart?: "no" | "unless-stopped" | "always";
   command?: string[];
   networkMode?: string;

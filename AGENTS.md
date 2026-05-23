@@ -132,6 +132,20 @@ After auto-recreate, `ensureRunning` recursively re-enters itself with `_postRec
 
 `whenReady()` (added in 1.6.0) is the canonical "wait for runtime detection to settle" call. Consumer plugins should use it instead of polling `getRuntime()` in a loop. Tests and code in this repo do not need it — they have direct access to the detection result.
 
+### Container persistence across reboots
+
+signalk-container does **not** manage systemd units. The plugin's job is to call `podman/docker run` with the right flags and let the runtime daemon handle reboot survival.
+
+The contract for consumer plugins:
+
+- `ContainerConfig.restart` is forwarded as `--restart=<value>`. Since 1.11.0 the default is `"unless-stopped"` — leave it unset for the standard case and the container will come back at boot. Set `"no"` explicitly for one-shot containers that genuinely shouldn't restart.
+- `ensureRunning()` does the right thing on signalk-server startup whether the container is `running`, `stopped`, or `missing` — but it only runs when signalk-server starts. Between reboots, container persistence depends on the runtime's restart policy, not on the plugin.
+- For **rootless Podman**, `--restart=unless-stopped` only fires at boot if the user session is up. Run `loginctl enable-linger $USER` once — the universal-installer does this automatically; bare-metal users must do it manually. Without linger, the container will come back the next time signalk-server starts (because `ensureRunning()` is called) but not before.
+- For **Docker**, `--restart=unless-stopped` fires whenever `dockerd` starts. No extra setup.
+- For the **signalk-universal-installer** deployment (where signalk-server itself is a systemd Quadlet and peer engine containers are Quadlets too), systemd is the source of truth — the universal installer's Quadlets carry `Restart=always` and crashloop-guard directives that the runtime's `--restart` flag isn't equipped to express. Plugins under that deployment register peers with `managedContainer: false` and don't touch their lifecycle.
+
+When a consumer plugin sets a restart policy explicitly, it overrides the default. Existing containers are not recreated just to flip the policy — drift detection skips `restart` because flipping it doesn't justify the downtime; the new default kicks in on the next image/env/volumes recreate or on a clean install.
+
 ## Workflow Conventions
 
 This repo is maintained by Dirk Wahrheit. Workflow is deliberate; AI tools should follow it strictly.
