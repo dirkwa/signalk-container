@@ -262,6 +262,161 @@ describe("detectRuntime — docker CLI talking to podman compat socket", () => {
   });
 });
 
+describe("probeRootless — docker-compat-API SecurityOptions fallback", () => {
+  // Scenario: signalk-server runs as a Podman container with the
+  // host's rootless podman socket bind-mounted to /var/run/docker.sock.
+  // The in-container `podman` binary cannot reach a daemon (its
+  // default socket path differs), so the native `Host.Security.Rootless`
+  // probe returns null. Without the SecurityOptions fallback,
+  // isRootless stays null and the userMappingFlags fall through to a
+  // plain `--user 1000:1000` instead of `--userns=keep-id`, which
+  // breaks bind-mounted consumer-plugin data dirs (questdb, grafana).
+
+  it("returns true when SecurityOptions contains name=rootless", async () => {
+    const exec = scriptedExec([
+      {
+        match: "docker --version",
+        result: { stdout: "Docker version 29.5.2", exitCode: 0 },
+      },
+      {
+        match: "docker info --format {{.DefaultRuntime}}",
+        result: { stdout: "crun", exitCode: 0 },
+      },
+      {
+        match: "docker info --format {{.ServerVersion}}",
+        result: { stdout: "5.4.2", exitCode: 0 },
+      },
+      // Primary podman probe fails — the in-container podman binary
+      // can't reach a daemon. The cascade should fall through to
+      // the docker compat-API SecurityOptions probe.
+      {
+        match: "podman info --format",
+        result: { stdout: "", exitCode: 125 },
+      },
+      // Docker compat API DOES expose SecurityOptions and reveals
+      // rootless via the `name=rootless` token.
+      {
+        match: "docker info --format {{.SecurityOptions}}",
+        result: {
+          stdout: "[name=apparmor name=seccomp,profile=default name=rootless]",
+          exitCode: 0,
+        },
+      },
+      { match: "docker info", result: { stdout: "ok", exitCode: 0 } },
+    ]);
+    const result = await detectRuntime("docker", exec);
+    assert.ok(result);
+    assert.equal(result.runtime, "podman");
+    assert.equal(result.isPodmanDockerShim, true);
+    assert.equal(
+      result.isRootless,
+      true,
+      "compat-API fallback should report rootless=true",
+    );
+  });
+
+  it("returns false when SecurityOptions does not contain rootless", async () => {
+    const exec = scriptedExec([
+      {
+        match: "docker --version",
+        result: { stdout: "Docker version 29.5.2", exitCode: 0 },
+      },
+      {
+        match: "docker info --format {{.DefaultRuntime}}",
+        result: { stdout: "crun", exitCode: 0 },
+      },
+      {
+        match: "docker info --format {{.ServerVersion}}",
+        result: { stdout: "5.4.2", exitCode: 0 },
+      },
+      {
+        match: "podman info --format",
+        result: { stdout: "", exitCode: 125 },
+      },
+      // Rootful podman backend — SecurityOptions doesn't mention rootless.
+      {
+        match: "docker info --format {{.SecurityOptions}}",
+        result: {
+          stdout: "[name=apparmor name=seccomp,profile=default]",
+          exitCode: 0,
+        },
+      },
+      { match: "docker info", result: { stdout: "ok", exitCode: 0 } },
+    ]);
+    const result = await detectRuntime("docker", exec);
+    assert.ok(result);
+    assert.equal(
+      result.isRootless,
+      false,
+      "compat-API fallback should report rootless=false when token absent",
+    );
+  });
+
+  it("leaves isRootless null when both probes fail", async () => {
+    const exec = scriptedExec([
+      {
+        match: "docker --version",
+        result: { stdout: "Docker version 29.5.2", exitCode: 0 },
+      },
+      {
+        match: "docker info --format {{.DefaultRuntime}}",
+        result: { stdout: "crun", exitCode: 0 },
+      },
+      {
+        match: "docker info --format {{.ServerVersion}}",
+        result: { stdout: "5.4.2", exitCode: 0 },
+      },
+      {
+        match: "podman info --format",
+        result: { stdout: "", exitCode: 125 },
+      },
+      {
+        match: "docker info --format {{.SecurityOptions}}",
+        result: { stdout: "", exitCode: 1 },
+      },
+      { match: "docker info", result: { stdout: "ok", exitCode: 0 } },
+    ]);
+    const result = await detectRuntime("docker", exec);
+    assert.ok(result);
+    assert.equal(result.isRootless, null);
+  });
+
+  it("does NOT call the compat-API probe when invoked via the podman binary", async () => {
+    // When tryRuntime started with `name='podman'` (native podman
+    // detection), the primary probe is authoritative — its empty
+    // output should leave isRootless=null and NOT fall through to a
+    // docker-compat probe that doesn't apply.
+    const calls: string[] = [];
+    const exec = scriptedExec([
+      {
+        match: "podman --version",
+        result: { stdout: "podman version 5.4.2", exitCode: 0 },
+      },
+      {
+        match: "podman info --format {{.Host.Security.Rootless}}",
+        result: { stdout: "WARN... only", exitCode: 0 },
+      },
+      {
+        match: "podman info --format {{json .Host.CgroupControllers}}",
+        result: { stdout: "null", exitCode: 0 },
+      },
+      { match: "podman info", result: { stdout: "ok", exitCode: 0 } },
+    ]);
+    const wrappedExec: typeof exec = (cmd, args, env) => {
+      calls.push([cmd, ...args].join(" "));
+      return exec(cmd, args, env);
+    };
+    const result = await detectRuntime("podman", wrappedExec);
+    assert.ok(result);
+    assert.equal(result.isPodmanDockerShim, false);
+    // The compat-API fallback must NOT have been attempted.
+    assert.ok(
+      !calls.some((c) => c.includes("info --format {{.SecurityOptions}}")),
+      "SecurityOptions probe should not run when binary is podman",
+    );
+  });
+});
+
 describe("probeHostUser", () => {
   it("returns uid/gid from process.getuid/getgid on POSIX", () => {
     if (typeof process.getuid !== "function") {
