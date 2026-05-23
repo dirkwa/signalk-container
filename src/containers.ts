@@ -1329,8 +1329,16 @@ function buildRunArgs(
   );
   const args = ["run", "-d", "--name", fullName];
 
-  if (config.restart && config.restart !== "no") {
-    args.push("--restart", config.restart);
+  // Default restart policy is `unless-stopped` so containers come back
+  // after a host reboot without the consumer plugin having to remember
+  // to opt in. The runtime daemon honours the flag at boot regardless
+  // of whether signalk-server is up yet (rootless Podman needs
+  // `loginctl enable-linger $USER`; see AGENTS.md "Container
+  // persistence across reboots"). Consumer plugins that genuinely want
+  // a one-shot container pass `restart: "no"` explicitly.
+  const restartPolicy = config.restart ?? "unless-stopped";
+  if (restartPolicy !== "no") {
+    args.push("--restart", restartPolicy);
   }
 
   if (config.networkMode) {
