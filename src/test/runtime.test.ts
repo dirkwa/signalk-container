@@ -187,11 +187,13 @@ describe("detectRuntime — docker CLI talking to podman compat socket", () => {
     // report runtime=docker and show "D" in the config panel even
     // though the user is running podman.
     //
-    // After reclassification, the post-detect probes (cgroup
-    // controllers, rootless, validation /info) still go through
-    // runtimeCmd which keeps invoking the binary as `docker` because
-    // isPodmanDockerShim=true — so the matchers below match the
-    // docker-binary form, not podman.
+    // After reclassification, the operability probe still invokes
+    // the original `name` ("docker") because tryRuntime passes
+    // `name` to the directInfo exec — see "docker info" matcher
+    // below. The cgroup-controllers and rootless probes, however,
+    // use hardcoded "podman" strings (see probeCgroupControllers /
+    // probeRootless in runtime.ts) — see "podman info --format"
+    // matcher below.
     const exec = scriptedExec([
       {
         match: "docker --version",
