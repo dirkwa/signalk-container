@@ -524,11 +524,13 @@ describe("diffContainerConfig — ownership (user)", () => {
   });
 
   it("flags drift when explicit ContainerConfig.user changes the UID:GID", () => {
-    // userMappingFlags emits hostUid:hostGid regardless of inImageUid/Gid
-    // for docker/rootful podman, so the resolved Config.User stays 1000:1000.
-    // Drift only fires when the live value diverges from that resolved form.
+    // On docker / rootful podman, declaring `user: { inImageUid, inImageGid }`
+    // emits --user with that explicit in-image UID:GID (not the host
+    // caller's UID). Drift fires when the live Config.User diverges
+    // from the resolved expected — here, requesting 1500:1500 against a
+    // live 0:0 must be flagged so the container is recreated.
     const { drifted } = diffContainerConfig(
-      reqBase({ user: { inImageUid: 0, inImageGid: 0 } }),
+      reqBase({ user: { inImageUid: 1500, inImageGid: 1500 } }),
       liveBase({ user: "0:0" }),
       docker,
     );

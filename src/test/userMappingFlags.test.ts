@@ -68,13 +68,51 @@ describe("userMappingFlags", () => {
 
   it("emits --user form for rootful Podman (keep-id would error there)", () => {
     // Rootful Podman erroring on --userns=keep-id is the whole reason
-    // this branch exists.  Verify the rootful case picks --user
-    // regardless of whether the caller declared an in-image UID.
+    // this branch exists.  Verify the rootful case picks --user — and,
+    // since the caller declared an in-image UID, the override targets
+    // that UID rather than the host caller's.  No namespace remap is
+    // available on this branch, so this is a direct process-UID set.
     assert.deepEqual(
       userMappingFlags(
         podmanRootfulRuntime,
         { inImageUid: 1001, inImageGid: 1001 },
         linuxIds,
+      ),
+      ["--user", "1001:1001"],
+    );
+  });
+
+  it("emits --user with the declared in-image UID on Docker for non-root images", () => {
+    // Docker has no user-namespace remap available via `--user`, so
+    // when the caller declares an in-image UID we honour it as a
+    // direct process-UID override. Host fixture is uid 2000 to prove
+    // we're using the declared 1000, not the host caller's UID.
+    const otherHost = (): { uid: number; gid: number } => ({
+      uid: 2000,
+      gid: 2000,
+    });
+    assert.deepEqual(
+      userMappingFlags(
+        dockerRuntime,
+        { inImageUid: 1000, inImageGid: 1000 },
+        otherHost,
+      ),
+      ["--user", "1000:1000"],
+    );
+  });
+
+  it("emits --user with the declared in-image UID on rootful Podman for non-root images", () => {
+    // Same shape as the Docker case — different runtime, same branch
+    // in userMappingFlags.
+    const otherHost = (): { uid: number; gid: number } => ({
+      uid: 2000,
+      gid: 2000,
+    });
+    assert.deepEqual(
+      userMappingFlags(
+        podmanRootfulRuntime,
+        { inImageUid: 1000, inImageGid: 1000 },
+        otherHost,
       ),
       ["--user", "1000:1000"],
     );

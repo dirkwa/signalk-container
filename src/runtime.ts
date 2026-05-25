@@ -405,16 +405,26 @@ type UserMappingIntent =
  *   - rootless Podman → `--userns=keep-id:uid=<inImageUID>,gid=<inImageGID>`.
  *     Rewrites the in-image UID back to the host caller via the user-
  *     namespace mapping; rootful Podman would error on the same flag.
- *   - everything else (Docker, rootful Podman) →
+ *   - Docker / rootful Podman, caller declared a `user` object →
+ *     `--user <inImageUID>:<inImageGID>`. Direct process-UID override
+ *     so the in-container process matches the image's USER directive.
+ *     No namespace remap is available on this branch, so bind-mounted
+ *     host files keep their host-side ownership and must be readable
+ *     by the in-image UID for the in-container process to use them.
+ *     Callers needing to deliver host-owned secrets to a non-root
+ *     in-image UID should pass them via `env` instead of bind mounts.
+ *   - Docker / rootful Podman, caller omitted `user` →
  *     `--user <hostUID>:<hostGID>`. Sets the in-container process UID
- *     directly to the host caller's UID.
+ *     to the host caller's UID so files created on bind mounts land
+ *     owned by the same identity on the host. Implicit assumption is
+ *     that the image's USER directive is root (or absent).
  *
  * `inImageUID/GID` defaults to 0 when the caller doesn't pass them —
  * matching the historical behaviour of helper images shipped before
  * this field existed (osgeo/gdal, the legacy tippecanoe image, …).
  * Images with a non-root `USER` directive (e.g. `charts-toolbox`'s
- * `USER toolbox` at UID 1001) need the caller to declare the right
- * value.
+ * `USER toolbox` at UID 1001, mayara's `USER mayara` at UID 1000) need
+ * the caller to declare the right value.
  */
 export function userMappingFlags(
   runtime: ContainerRuntimeInfo,
@@ -444,6 +454,17 @@ export function userMappingFlags(
       return [];
     }
     return ["--userns", `keep-id:uid=${inImageUid},gid=${inImageGid}`];
+  }
+  // Docker / rootful Podman: no user-namespace remap available, so
+  // `--user` is a direct process-UID override. When the caller declared
+  // an in-image UID/GID, honour it so the in-container process matches
+  // the image's USER directive — the caller is responsible for any
+  // bind-mount ownership story (e.g. deliver credentials via env vars
+  // instead of bind-mounted secret files). When the caller omitted
+  // `user`, fall back to the host caller's UID so files created on
+  // bind mounts land owned by the same identity on the host.
+  if (user !== undefined) {
+    return ["--user", `${inImageUid}:${inImageGid}`];
   }
   return ["--user", `${host.uid}:${host.gid}`];
 }
