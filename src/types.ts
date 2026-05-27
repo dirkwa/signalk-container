@@ -709,6 +709,29 @@ export interface ContainerManagerApi {
     options?: EnsureRunningOptions,
   ): Promise<void>;
   /**
+   * Force-recreate a managed container: remove the live one (if any),
+   * then create it fresh from `config`. Unlike `ensureRunning`, this
+   * never short-circuits on "already running" — the recreate always
+   * happens, briefly interrupting the container.
+   *
+   * Use this when the caller knows the desired state differs from
+   * live and wants to apply it now without depending on drift
+   * detection — for example after a consumer plugin bumps the image
+   * tag it pins to ("Update now" UX, plugin-startup self-heal when
+   * the running container's image disagrees with the just-bumped
+   * version constant).
+   *
+   * Volume policy, `signalkAccessiblePorts`, `signalkConfigRootMount`,
+   * and `signalkDataMount` are resolved identically to `ensureRunning`.
+   *
+   * Available in signalk-container 1.12.0+.
+   */
+  recreate(
+    name: string,
+    config: ContainerConfig,
+    options?: EnsureRunningOptions,
+  ): Promise<void>;
+  /**
    * Resolve the source (named volume or host path) that backs
    * `app.getDataDirPath()` in the current deployment.  The return value
    * is what signalk-container uses internally when a ContainerConfig

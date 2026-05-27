@@ -138,6 +138,8 @@ After auto-recreate, `ensureRunning` recursively re-enters itself with `_postRec
 
 `whenReady()` (added in 1.6.0) is the canonical "wait for runtime detection to settle" call. Consumer plugins should use it instead of polling `getRuntime()` in a loop. Tests and code in this repo do not need it — they have direct access to the detection result.
 
+`recreate(name, config, options?)` (added in 1.12.0) is the canonical "force-recreate now" call for consumer plugins that pin an image version and bumped it. It is `containers.remove(name)` (skipped when no live container exists) followed by `containers.ensureRunning(name, config, options)` — drift detection plays no role, so it works the same on every signalk-container version that ships it. Use this instead of an `ensureRunning`-only flow when correctness must not depend on the drift detector firing. The implementation is intentionally thin: any wrapper-level behaviour `ensureRunning` provides (volume policy, `signalkAccessiblePorts`, `signalkConfigRootMount`, `signalkDataMount`, log streaming, manifest recording) is inherited unchanged.
+
 ### Container persistence across reboots
 
 signalk-container does **not** manage systemd units. The plugin's job is to call `podman/docker run` with the right flags and let the runtime daemon handle reboot survival.

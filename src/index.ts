@@ -1115,6 +1115,24 @@ export default (app: App) => {
       }
     },
 
+    async recreate(
+      name: string,
+      config: ContainerConfig,
+      options?: EnsureRunningOptions,
+    ) {
+      if (!runtimeInfo) throw new Error("No container runtime available");
+      // Remove the live container first so the subsequent ensureRunning
+      // call lands in its `case "missing"` branch — that path pulls (if
+      // absent) and creates with the new config, no drift comparison
+      // needed. Skipping the remove when there is no live container
+      // keeps `recreate` idempotent on a clean host.
+      const state = await getContainerState(runtimeInfo, name);
+      if (state !== "missing") {
+        await api.remove(name);
+      }
+      await api.ensureRunning(name, config, options);
+    },
+
     async resolveContainerAddress(
       containerName: string,
       containerPort: number,

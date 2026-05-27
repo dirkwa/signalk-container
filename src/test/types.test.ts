@@ -63,6 +63,7 @@ describe("type contracts", () => {
       "pullImage",
       "imageExists",
       "ensureRunning",
+      "recreate",
       "stop",
       "remove",
       "getState",
@@ -73,7 +74,7 @@ describe("type contracts", () => {
       "resolveHostPath",
       "manifest",
     ];
-    assert.equal(methods.length, 13);
+    assert.equal(methods.length, 14);
   });
 
   it("ContainerConfig accepts digest and updateChannel", () => {
