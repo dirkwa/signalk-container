@@ -1672,11 +1672,28 @@ async function fixVolumePermissions(
   const mounts = inspect.stdout.trim().split(/\s+/).filter(Boolean);
   if (mounts.length === 0) return;
 
-  // Grant "others" read/write/execute on bind mounts so the host user
-  // (which is "others" relative to the container's user namespace mapped
-  // UID) can delete the files. Owner permissions stay unchanged. Falls
-  // back silently if chmod isn't available in the image (distroless etc.).
-  await exec(runtime, ["exec", fullName, "chmod", "-R", "o+rwX", ...mounts]);
+  // Grant "others" traversal+write on directories of bind mounts so the
+  // host user (which may be "others" relative to the container's
+  // user-namespace mapped UID) can descend the tree and delete child
+  // files. Deliberately NOT widening file modes: `rm /dir/file` requires
+  // write+execute on `/dir`, not on the file itself, so dir perms are
+  // sufficient for cleanup. Widening file modes blanket-widens any
+  // sensitive files the application may have written (private keys,
+  // OAuth tokens, credentials), which is unsafe. Falls back silently if
+  // `find` or `chmod` isn't available in the image (distroless etc.).
+  await exec(runtime, [
+    "exec",
+    fullName,
+    "find",
+    ...mounts,
+    "-type",
+    "d",
+    "-exec",
+    "chmod",
+    "o+rwx",
+    "{}",
+    "+",
+  ]);
 }
 
 export async function stopContainer(
