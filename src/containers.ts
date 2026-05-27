@@ -1718,7 +1718,16 @@ export async function removeContainer(
 ): Promise<void> {
   const fullName = prefixedName(name);
   await fixVolumePermissions(runtime, name, exec).catch(() => {});
-  await exec(runtime, ["stop", fullName]);
+  // `-t 0`: skip the runtime's default 10s SIGTERM grace and SIGKILL
+  // immediately. removeContainer is the destructive primitive — callers
+  // that want graceful shutdown call containers.stop() instead. Without
+  // this, a container whose PID 1 ignores SIGTERM (busybox `sleep`,
+  // `tail`, etc.) holds the stop call at ~10s, which collides with
+  // execRuntime's own 10s execFile timeout: the client gets killed
+  // mid-flight, the daemon-side stop finishes asynchronously, and the
+  // follow-up `rm -f` races against the in-flight state with empty
+  // stderr on failure. Works on both podman and docker.
+  await exec(runtime, ["stop", "-t", "0", fullName]);
   const result = await exec(runtime, ["rm", "-f", fullName]);
   if (result.exitCode !== 0) {
     throw new Error(`Failed to remove ${fullName}: ${result.stderr}`);
