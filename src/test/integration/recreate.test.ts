@@ -27,6 +27,12 @@ async function hasContainerRuntime(): Promise<ContainerRuntimeInfo | null> {
 
 const CONTAINER_NAME = "recreate-test";
 
+// trap-and-wait so the container exits promptly on SIGTERM — busybox
+// `sleep` and `tail` ignore SIGTERM and force `podman stop` into its 10s
+// SIGKILL fallback, which races against execRuntime's 10s execFile
+// timeout and the subsequent `rm -f`.
+const TRAP_AND_WAIT_CMD = ["sh", "-c", "trap exit TERM; sleep 60 & wait"];
+
 describe("recreate primitive (remove + ensureRunning)", () => {
   after(async () => {
     const runtime = await hasContainerRuntime();
@@ -57,11 +63,7 @@ describe("recreate primitive (remove + ensureRunning)", () => {
       {
         image: "docker.io/library/alpine",
         tag: "3.18",
-        // trap-and-wait so the container exits promptly on SIGTERM —
-        // busybox `sleep` and `tail` ignore SIGTERM and force `podman stop`
-        // into its 10s SIGKILL fallback, which races against execRuntime's
-        // 10s execFile timeout and the subsequent `rm -f`.
-        command: ["sh", "-c", "trap exit TERM; sleep 60 & wait"],
+        command: TRAP_AND_WAIT_CMD,
         restart: "no",
       },
       () => {},
@@ -81,11 +83,7 @@ describe("recreate primitive (remove + ensureRunning)", () => {
       {
         image: "docker.io/library/alpine",
         tag: "3.19",
-        // trap-and-wait so the container exits promptly on SIGTERM —
-        // busybox `sleep` and `tail` ignore SIGTERM and force `podman stop`
-        // into its 10s SIGKILL fallback, which races against execRuntime's
-        // 10s execFile timeout and the subsequent `rm -f`.
-        command: ["sh", "-c", "trap exit TERM; sleep 60 & wait"],
+        command: TRAP_AND_WAIT_CMD,
         restart: "no",
       },
       () => {},
@@ -125,11 +123,7 @@ describe("recreate primitive (remove + ensureRunning)", () => {
       {
         image: "docker.io/library/alpine",
         tag: "3.19",
-        // trap-and-wait so the container exits promptly on SIGTERM —
-        // busybox `sleep` and `tail` ignore SIGTERM and force `podman stop`
-        // into its 10s SIGKILL fallback, which races against execRuntime's
-        // 10s execFile timeout and the subsequent `rm -f`.
-        command: ["sh", "-c", "trap exit TERM; sleep 60 & wait"],
+        command: TRAP_AND_WAIT_CMD,
         restart: "no",
       },
       () => {},
