@@ -375,6 +375,39 @@ await containers.ensureRunning("mayara-server", {
 });
 ```
 
+### `recreate(name, config, options?): Promise<void>`
+
+_Available in signalk-container 1.12.0+._
+
+Force-recreates a managed container: removes the existing one (running or stopped) if present, then creates it fresh from `config`. Unlike `ensureRunning` — which short-circuits on "already running with matching config" — `recreate` always replaces the container, briefly interrupting it.
+
+Use this when your plugin knows the desired state differs from live and wants to apply it now without depending on drift detection. The two canonical cases:
+
+1. **Plugin startup self-heal** — your plugin pins an image version through a constant and bumped it in this release. Compare the live container's image against the desired one and call `recreate` when they differ, rather than relying on `ensureRunning`'s drift recreate (which a stale or future version of signalk-container could fail to honour).
+2. **"Update now" UX** — the user clicked an explicit update button in your plugin's UI. `recreate` is the clean primitive for "stop, pull, restart with the new tag" without re-implementing the stop / pull / remove / ensureRunning sequence yourself.
+
+Volume policy, `signalkAccessiblePorts`, `signalkConfigRootMount`, and `signalkDataMount` are resolved identically to `ensureRunning`. The same `options` shape applies — including `onVolumeIssue`, `onContainerLog`, `healthCheck`, `pluginId`, and `pluginVersion`.
+
+```typescript
+// Plugin-startup self-heal: live container's image disagrees with our pinned tag.
+const live = await containers.listContainers();
+const found = live.find((c) => c.name === `sk-${CONTAINER_NAME}`);
+const desiredImage = `${BACKUP_IMAGE}:${resolvedTag}`;
+if (found && found.image !== desiredImage) {
+  await containers.recreate(CONTAINER_NAME, buildContainerConfig(resolvedTag), {
+    onVolumeIssue,
+  });
+} else {
+  await containers.ensureRunning(
+    CONTAINER_NAME,
+    buildContainerConfig(resolvedTag),
+    { onVolumeIssue },
+  );
+}
+```
+
+`recreate` is idempotent against final state but always pays the brief downtime of a stop+create cycle. Prefer `ensureRunning` for the common "make sure my container is up with my config" path; reach for `recreate` only when you need a guaranteed fresh container.
+
 ### `start(name): Promise<void>`
 
 Starts a stopped container. Throws if container doesn't exist.

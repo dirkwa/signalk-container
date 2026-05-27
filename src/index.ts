@@ -1115,6 +1115,29 @@ export default (app: App) => {
       }
     },
 
+    async recreate(
+      name: string,
+      config: ContainerConfig,
+      options?: EnsureRunningOptions,
+    ) {
+      if (!runtimeInfo) throw new Error("No container runtime available");
+      // Always attempt remove. `removeContainer` is idempotent on truly-
+      // missing containers (stop errors are swallowed, `rm -f` returns 0),
+      // and api.remove's cache evictions / broker teardown are no-ops on
+      // a name nobody registered. No need to precondition on getState —
+      // that would only add a TOCTOU window before the actual remove.
+      // If the runtime does report a real failure, re-check state: a
+      // benign disappearance (someone else removed it concurrently) is
+      // acceptable; anything else propagates.
+      try {
+        await api.remove(name);
+      } catch (err) {
+        const now = await getContainerState(runtimeInfo, name);
+        if (now !== "missing") throw err;
+      }
+      await api.ensureRunning(name, config, options);
+    },
+
     async resolveContainerAddress(
       containerName: string,
       containerPort: number,
