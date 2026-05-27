@@ -709,10 +709,11 @@ export interface ContainerManagerApi {
     options?: EnsureRunningOptions,
   ): Promise<void>;
   /**
-   * Force-recreate a managed container: remove the live one (if any),
-   * then create it fresh from `config`. Unlike `ensureRunning`, this
-   * never short-circuits on "already running" — the recreate always
-   * happens, briefly interrupting the container.
+   * Force-recreate a managed container: remove the existing one
+   * (running or stopped) if present, then create it fresh from
+   * `config`. Unlike `ensureRunning` — which short-circuits on
+   * "already running with matching config" — `recreate` always
+   * replaces the container, briefly interrupting it.
    *
    * Use this when the caller knows the desired state differs from
    * live and wants to apply it now without depending on drift

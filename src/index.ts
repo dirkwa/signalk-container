@@ -1121,14 +1121,19 @@ export default (app: App) => {
       options?: EnsureRunningOptions,
     ) {
       if (!runtimeInfo) throw new Error("No container runtime available");
-      // Remove the live container first so the subsequent ensureRunning
-      // call lands in its `case "missing"` branch — that path pulls (if
-      // absent) and creates with the new config, no drift comparison
-      // needed. Skipping the remove when there is no live container
-      // keeps `recreate` idempotent on a clean host.
-      const state = await getContainerState(runtimeInfo, name);
-      if (state !== "missing") {
+      // Always attempt remove. `removeContainer` is idempotent on truly-
+      // missing containers (stop errors are swallowed, `rm -f` returns 0),
+      // and api.remove's cache evictions / broker teardown are no-ops on
+      // a name nobody registered. No need to precondition on getState —
+      // that would only add a TOCTOU window before the actual remove.
+      // If the runtime does report a real failure, re-check state: a
+      // benign disappearance (someone else removed it concurrently) is
+      // acceptable; anything else propagates.
+      try {
         await api.remove(name);
+      } catch (err) {
+        const now = await getContainerState(runtimeInfo, name);
+        if (now !== "missing") throw err;
       }
       await api.ensureRunning(name, config, options);
     },

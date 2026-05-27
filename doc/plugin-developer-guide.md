@@ -379,7 +379,7 @@ await containers.ensureRunning("mayara-server", {
 
 _Available in signalk-container 1.12.0+._
 
-Force-recreates a managed container: removes the live one (if any), then creates it fresh from `config`. Unlike `ensureRunning`, this never short-circuits on "already running" — the recreate always happens, briefly interrupting the container.
+Force-recreates a managed container: removes the existing one (running or stopped) if present, then creates it fresh from `config`. Unlike `ensureRunning` — which short-circuits on "already running with matching config" — `recreate` always replaces the container, briefly interrupting it.
 
 Use this when your plugin knows the desired state differs from live and wants to apply it now without depending on drift detection. The two canonical cases:
 
