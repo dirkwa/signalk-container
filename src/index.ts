@@ -37,6 +37,7 @@ import { detectRuntime, isContainerized, setDisableUserns } from "./runtime.js";
 import {
   classifyVolumeSources,
   collectRecoveredVolumes,
+  defaultHomeForConfigRoot,
   connectToNetwork,
   disconnectFromNetwork,
   ensureNetwork,
@@ -530,6 +531,7 @@ export default (app: App) => {
         }
         config = {
           ...rest,
+          env: defaultHomeForConfigRoot(rest.env, signalkConfigRootMount),
           volumes: {
             ...rest.volumes,
             [signalkConfigRootMount]: source,
