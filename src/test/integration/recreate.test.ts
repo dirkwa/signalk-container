@@ -66,7 +66,12 @@ async function bootPlugin(): Promise<{
     config: { configPath: dataDir },
   };
   const plugin = containerManagerPlugin(app);
-  await plugin.start({} as PluginConfig);
+  // disableUserNamespaceRemap: true so the test doesn't depend on
+  // host-UID idmap support — GitHub Actions' rootless Podman setup
+  // rejects --userns=keep-id with `crun: writing file gid_map:
+  // Invalid argument`, the same failure mode AGENTS.md documents for
+  // ZFS hosts. We're testing recreate, not user-namespace mapping.
+  await plugin.start({ disableUserNamespaceRemap: true } as PluginConfig);
   const api = (
     globalThis as { __signalk_containerManager?: ContainerManagerApi }
   ).__signalk_containerManager;
