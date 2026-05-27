@@ -62,6 +62,12 @@ These are non-obvious rules baked into the runtime layer. Breaking them produces
 
 Named volumes (source without leading `/`) always pass through; `ifMissing` only applies to host paths. `volumeSource()` in `containers.ts` is the single narrower from the union back to bare-string for the two call sites that consume `config.volumes` after classification (`buildRunArgs`, `diffContainerConfig`).
 
+### HOME defaulting for signalkConfigRootMount
+
+When a consumer declares `signalkConfigRootMount` and does not set `env.HOME`, the wrapper in `src/index.ts` injects `HOME=<signalkConfigRootMount>` before forwarding to `containers.ensureRunning`. CLI tools inside the container (kopia, rclone, anything that reads `~/.cache` or `~/.config`) need a writable home directory; the image's baked default (typically `/root` or `/app`) is not writable when docker/rootful-podman starts the container as the host caller's UID. Rootless podman survives an unwritable HOME because the userns remap aliases `/root` to the host caller, but defaulting HOME there too keeps the shape uniform across runtimes and means a consumer plugin doesn't have to know which runtime its user is on.
+
+The injection is in `defaultHomeForConfigRoot()` (`src/containers.ts`) and only fires when the consumer's `env.HOME` is `undefined`. A defined-but-empty `HOME=""` is left alone — that's a deliberate consumer opt-out (tools behave differently with `HOME=""` than unset). Consumers that need HOME to point somewhere _other_ than the config root mount just set it themselves.
+
 ### Container log streaming
 
 Three-layer structure (`src/runtime.ts` → `src/containers.ts` → `src/log-stream-broker.ts`):

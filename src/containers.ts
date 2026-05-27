@@ -90,6 +90,30 @@ function volumeSource(raw: string | VolumeSpec): string {
  * `probe` is the host-path existence check; defaults to `existsSync`.
  * Tests inject a stub so they don't touch the filesystem.
  */
+/**
+ * Default the in-container `HOME` to the bind-mounted config-root path
+ * when the consumer plugin didn't set HOME themselves. CLI tools inside
+ * the container (kopia, rclone, anything that reads ~/.cache or
+ * ~/.config) need a writable home directory; the image's baked default
+ * (typically /root or /app) is not writable when docker/rootful-podman
+ * starts the container as the host caller's UID. Rootless podman
+ * survives an unwritable HOME because the userns remap aliases /root to
+ * the host caller, but setting HOME there too is harmless and keeps the
+ * shape uniform across runtimes.
+ *
+ * Returns the env map the runtime should see — either the input
+ * unchanged (HOME present, or no config root mount) or a new object
+ * with HOME added. Pure and synchronous so it's testable in isolation.
+ */
+export function defaultHomeForConfigRoot(
+  env: Record<string, string> | undefined,
+  configRootMount: string | undefined,
+): Record<string, string> | undefined {
+  if (!configRootMount) return env;
+  if (env?.HOME !== undefined) return env;
+  return { ...env, HOME: configRootMount };
+}
+
 export function classifyVolumeSources(
   volumes: Record<string, string | VolumeSpec> | undefined,
   probe: (path: string) => boolean = existsSync,
