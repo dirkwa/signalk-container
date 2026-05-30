@@ -1,4 +1,4 @@
-import { describe, it } from "node:test";
+import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import {
   detectRuntime,
@@ -7,6 +7,21 @@ import {
   type ExecFn,
 } from "../runtime.js";
 import type { ContainerRuntimeInfo } from "../types.js";
+
+// Some sandboxes (notably firejail, which the dirkwa SignalK plugin
+// registry harness uses) set `container=firejail` in the test env.
+// `isContainerized()` then returns true and the shim-promotion branch
+// in tryRuntime starts probing a host podman socket — a code path that
+// tests using scriptedExec don't model and shouldn't be coupled to.
+let savedContainer: string | undefined;
+beforeEach(() => {
+  savedContainer = process.env.container;
+  delete process.env.container;
+});
+afterEach(() => {
+  if (savedContainer === undefined) delete process.env.container;
+  else process.env.container = savedContainer;
+});
 
 describe("detectRuntime", () => {
   it("returns a runtime info object when podman or docker is available", async () => {
