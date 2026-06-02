@@ -496,6 +496,77 @@ export async function getImageDigest(
 }
 
 /**
+ * A Dockerfile `HEALTHCHECK` read back from an image's config. `test` is the
+ * raw `Test` array (`["CMD-SHELL", "..."]` or `["CMD", "arg", ...]`); the
+ * duration fields are nanoseconds (the runtime-agnostic JSON form).
+ */
+export interface ImageHealthcheck {
+  test: string[];
+  intervalNs?: number;
+  timeoutNs?: number;
+  startPeriodNs?: number;
+  retries?: number;
+}
+
+interface RawHealthcheck {
+  Test?: string[];
+  Interval?: number;
+  Timeout?: number;
+  StartPeriod?: number;
+  Retries?: number;
+}
+
+/**
+ * Read an image's declared `HEALTHCHECK`, or `null` when it has none (or
+ * declares `NONE`). We re-emit this as explicit `--health-*` flags at
+ * `run` time (see `buildRunArgs`) because image-healthcheck inheritance is
+ * not reliable across runtimes and API surfaces — notably it is dropped when
+ * a container is created through Podman's Docker-compat socket, leaving the
+ * container with an empty healthcheck and a perpetual `starting` state.
+ *
+ * Reads the config as JSON so duration fields come back as nanosecond
+ * integers uniformly on podman and docker (a Go-template render diverges:
+ * podman prints `30s`, docker prints the nanosecond count).
+ */
+export async function getImageHealthcheck(
+  runtime: ContainerRuntimeInfo,
+  imageRef: string,
+  exec: ExecFn = execRuntime,
+): Promise<ImageHealthcheck | null> {
+  const result = await exec(runtime, [
+    "image",
+    "inspect",
+    "--format",
+    "{{json .Config.Healthcheck}}",
+    qualifyImage(imageRef, runtime),
+  ]);
+  if (result.exitCode !== 0) return null;
+
+  const raw = result.stdout.trim();
+  // No healthcheck renders as `null` (or empty) from the template.
+  if (!raw || raw === "null") return null;
+
+  let parsed: RawHealthcheck;
+  try {
+    parsed = JSON.parse(raw) as RawHealthcheck;
+  } catch {
+    return null;
+  }
+
+  const test = parsed.Test ?? [];
+  // A `HEALTHCHECK NONE` image renders as `["NONE"]` — treat as no check.
+  if (test.length === 0 || test[0] === "NONE") return null;
+
+  return {
+    test,
+    intervalNs: parsed.Interval,
+    timeoutNs: parsed.Timeout,
+    startPeriodNs: parsed.StartPeriod,
+    retries: parsed.Retries,
+  };
+}
+
+/**
  * Return the first RepoDigest for an image reference, as
  * `sha256:<hex>` (without the `image@` prefix). This is the
  * *manifest* digest — what consumer plugins and CI tools speak —
@@ -1339,10 +1410,16 @@ export function diffContainerConfig(
   return { drifted };
 }
 
+/** Render a nanosecond duration as a runtime-accepted string, e.g. `30s`. */
+function nsToDuration(ns: number): string {
+  return `${Math.round(ns / 1e9)}s`;
+}
+
 function buildRunArgs(
   name: string,
   config: ContainerConfig,
   runtime: ContainerRuntimeInfo,
+  healthcheck?: ImageHealthcheck | null,
 ): string[] {
   const fullName = prefixedName(name);
   const imageRef = qualifyImage(
@@ -1425,6 +1502,35 @@ function buildRunArgs(
   if (config.labels) {
     for (const [key, value] of Object.entries(config.labels)) {
       args.push("--label", `${key}=${value}`);
+    }
+  }
+
+  // Re-emit the image's HEALTHCHECK as explicit flags. Inheritance from the
+  // image config is not reliable across runtimes/API surfaces — over Podman's
+  // Docker-compat socket the container is created with no healthcheck and sits
+  // in `starting` forever — so we always pass it ourselves when the image
+  // declares one. `CMD-SHELL` carries a single shell string; `CMD` is a direct
+  // argv we join for the single-string `--health-cmd`.
+  if (healthcheck) {
+    const [kind, ...rest] = healthcheck.test;
+    const cmd = kind === "CMD-SHELL" ? rest[0] : rest.join(" ");
+    if (cmd) {
+      args.push("--health-cmd", cmd);
+      if (healthcheck.intervalNs) {
+        args.push("--health-interval", nsToDuration(healthcheck.intervalNs));
+      }
+      if (healthcheck.timeoutNs) {
+        args.push("--health-timeout", nsToDuration(healthcheck.timeoutNs));
+      }
+      if (healthcheck.startPeriodNs) {
+        args.push(
+          "--health-start-period",
+          nsToDuration(healthcheck.startPeriodNs),
+        );
+      }
+      if (healthcheck.retries) {
+        args.push("--health-retries", String(healthcheck.retries));
+      }
     }
   }
 
@@ -1618,7 +1724,11 @@ export async function ensureRunning(
       }
 
       debug(`Creating container ${fullName}`);
-      const runArgs = buildRunArgs(name, config, runtime);
+      // Re-emit the image's HEALTHCHECK as explicit run flags; relying on
+      // image inheritance leaves containers created over the Docker-compat
+      // socket stuck in `starting` with no probe.
+      const healthcheck = await getImageHealthcheck(runtime, imageRef, exec);
+      const runArgs = buildRunArgs(name, config, runtime, healthcheck);
       let runResult = await exec(runtime, runArgs);
       if (
         runResult.exitCode !== 0 &&
