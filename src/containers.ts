@@ -6,6 +6,7 @@ import {
   ContainerRuntimeInfo,
   ContainerState,
   HealthCheckOptions,
+  HealthcheckOverride,
   VolumeIssue,
   VolumeSpec,
 } from "./types.js";
@@ -1415,6 +1416,73 @@ function nsToDuration(ns: number): string {
   return `${Math.round(ns / 1e9)}s`;
 }
 
+/**
+ * Translate a healthcheck source into `--health-*` run flags.
+ *
+ * An explicit `config.healthcheck` override wins over the image's own
+ * `HEALTHCHECK`. The override carries human-readable durations the runtime
+ * accepts verbatim (`"30s"`); the image healthcheck carries nanosecond
+ * integers (from `inspect` JSON) and is rendered with `nsToDuration`. Both
+ * collapse a `CMD-SHELL` array to its single shell string and a `CMD` array
+ * to a space-joined argv for the single-string `--health-cmd`.
+ *
+ * `healthcheck === false` emits `--no-healthcheck`: Podman then reports the
+ * container with no health status instead of a perpetual `starting`, which is
+ * the right answer for an image with no probe and none wanted. Returns `[]`
+ * when there is nothing to emit (no override and no image healthcheck), in
+ * which case Podman may still park a probeless image in `starting`.
+ */
+function healthcheckArgs(
+  override: HealthcheckOverride | undefined,
+  imageHealthcheck: ImageHealthcheck | null | undefined,
+): string[] {
+  if (override === false) {
+    return ["--no-healthcheck"];
+  }
+  if (override) {
+    const [kind, ...rest] = override.test;
+    const cmd = kind === "CMD-SHELL" ? rest[0] : rest.join(" ");
+    if (!cmd) return [];
+    const args = ["--health-cmd", cmd];
+    if (override.interval) args.push("--health-interval", override.interval);
+    if (override.timeout) args.push("--health-timeout", override.timeout);
+    if (override.startPeriod) {
+      args.push("--health-start-period", override.startPeriod);
+    }
+    if (override.retries) {
+      args.push("--health-retries", String(override.retries));
+    }
+    return args;
+  }
+  // No override — fall back to the image's own HEALTHCHECK. Inheritance from
+  // the image config is not reliable across runtimes/API surfaces (over
+  // Podman's Docker-compat socket the container is created with no healthcheck
+  // and sits in `starting` forever), so we always re-emit it ourselves.
+  if (imageHealthcheck) {
+    const [kind, ...rest] = imageHealthcheck.test;
+    const cmd = kind === "CMD-SHELL" ? rest[0] : rest.join(" ");
+    if (!cmd) return [];
+    const args = ["--health-cmd", cmd];
+    if (imageHealthcheck.intervalNs) {
+      args.push("--health-interval", nsToDuration(imageHealthcheck.intervalNs));
+    }
+    if (imageHealthcheck.timeoutNs) {
+      args.push("--health-timeout", nsToDuration(imageHealthcheck.timeoutNs));
+    }
+    if (imageHealthcheck.startPeriodNs) {
+      args.push(
+        "--health-start-period",
+        nsToDuration(imageHealthcheck.startPeriodNs),
+      );
+    }
+    if (imageHealthcheck.retries) {
+      args.push("--health-retries", String(imageHealthcheck.retries));
+    }
+    return args;
+  }
+  return [];
+}
+
 function buildRunArgs(
   name: string,
   config: ContainerConfig,
@@ -1505,34 +1573,10 @@ function buildRunArgs(
     }
   }
 
-  // Re-emit the image's HEALTHCHECK as explicit flags. Inheritance from the
-  // image config is not reliable across runtimes/API surfaces — over Podman's
-  // Docker-compat socket the container is created with no healthcheck and sits
-  // in `starting` forever — so we always pass it ourselves when the image
-  // declares one. `CMD-SHELL` carries a single shell string; `CMD` is a direct
-  // argv we join for the single-string `--health-cmd`.
-  if (healthcheck) {
-    const [kind, ...rest] = healthcheck.test;
-    const cmd = kind === "CMD-SHELL" ? rest[0] : rest.join(" ");
-    if (cmd) {
-      args.push("--health-cmd", cmd);
-      if (healthcheck.intervalNs) {
-        args.push("--health-interval", nsToDuration(healthcheck.intervalNs));
-      }
-      if (healthcheck.timeoutNs) {
-        args.push("--health-timeout", nsToDuration(healthcheck.timeoutNs));
-      }
-      if (healthcheck.startPeriodNs) {
-        args.push(
-          "--health-start-period",
-          nsToDuration(healthcheck.startPeriodNs),
-        );
-      }
-      if (healthcheck.retries) {
-        args.push("--health-retries", String(healthcheck.retries));
-      }
-    }
-  }
+  // Healthcheck flags. An explicit `config.healthcheck` override wins over the
+  // image's own HEALTHCHECK; see `healthcheckArgs` for why we always emit these
+  // ourselves rather than relying on image inheritance.
+  args.push(...healthcheckArgs(config.healthcheck, healthcheck));
 
   args.push(imageRef);
 
@@ -1726,8 +1770,13 @@ export async function ensureRunning(
       debug(`Creating container ${fullName}`);
       // Re-emit the image's HEALTHCHECK as explicit run flags; relying on
       // image inheritance leaves containers created over the Docker-compat
-      // socket stuck in `starting` with no probe.
-      const healthcheck = await getImageHealthcheck(runtime, imageRef, exec);
+      // socket stuck in `starting` with no probe. An explicit
+      // `config.healthcheck` override supersedes the image's, so skip the
+      // extra image inspect when one is present.
+      const healthcheck =
+        config.healthcheck !== undefined
+          ? null
+          : await getImageHealthcheck(runtime, imageRef, exec);
       const runArgs = buildRunArgs(name, config, runtime, healthcheck);
       let runResult = await exec(runtime, runArgs);
       if (

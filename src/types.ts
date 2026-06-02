@@ -294,7 +294,68 @@ export interface ContainerConfig {
    * to hide destructive actions (Stop / Remove). See Phase 9b for that UI work.
    */
   labels?: Record<string, string>;
+  /**
+   * Explicit healthcheck override, for images that ship no `HEALTHCHECK`
+   * of their own (or whose baked one is wrong for this deployment).
+   *
+   * Why this exists: signalk-container already re-emits an image's own
+   * `HEALTHCHECK` as explicit `--health-*` run flags, because Podman
+   * otherwise leaves the container parked in a perpetual `starting`
+   * state (see `getImageHealthcheck`). But that only helps images that
+   * *declare* a healthcheck. An image with none (e.g. `questdb/questdb`)
+   * still lands in `starting` forever under Podman — `inspect` reports
+   * `Health.Status: "starting"` with a null log and no probe to ever run.
+   * Supplying an explicit healthcheck here gives the container a real
+   * probe so it can reach `healthy`.
+   *
+   * Precedence: an explicit healthcheck here wins over the image's own
+   * `HEALTHCHECK`. When omitted, the image's healthcheck (if any) is used
+   * as before.
+   *
+   * Shape:
+   *   - `false` — emit `--no-healthcheck`, forcing Podman to report the
+   *     container with no health status instead of a stuck `starting`.
+   *     Use when the image has no healthcheck and none is wanted.
+   *   - `{ test, ... }` — emit `--health-cmd` and timing flags. `test` is
+   *     the Docker `HEALTHCHECK` array form: `["CMD-SHELL", "<shell>"]` or
+   *     `["CMD", "arg0", "arg1", ...]`. Durations are human strings the
+   *     runtime accepts directly (`"30s"`, `"1m"`); they are NOT parsed.
+   *
+   * Example (QuestDB — curl is present in the image, only port 9000 is up):
+   *   `{ test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/"],
+   *      interval: "30s", timeout: "5s", startPeriod: "15s", retries: 3 }`
+   *
+   * Not part of drift detection — changing it does not recreate a running
+   * container; the new probe takes effect on the next recreate for another
+   * reason (image/env/volumes/ports change) or a clean start.
+   */
+  healthcheck?: HealthcheckOverride;
 }
+
+/**
+ * Explicit healthcheck for a managed container. `false` disables the
+ * healthcheck entirely (`--no-healthcheck`); the object form supplies a
+ * probe command plus optional timing. Durations are passed to the runtime
+ * verbatim, so use the runtime's duration syntax (`"30s"`, `"1m30s"`).
+ */
+export type HealthcheckOverride =
+  | false
+  | {
+      /**
+       * Docker `HEALTHCHECK` array form. `["CMD-SHELL", "<one shell string>"]`
+       * runs the string under a shell; `["CMD", "arg0", "arg1", ...]` execs
+       * the argv directly without a shell.
+       */
+      test: string[];
+      /** Probe interval, e.g. `"30s"`. Runtime default when omitted. */
+      interval?: string;
+      /** Per-probe timeout, e.g. `"5s"`. Runtime default when omitted. */
+      timeout?: string;
+      /** Grace period before failures count, e.g. `"15s"`. */
+      startPeriod?: string;
+      /** Consecutive failures before `unhealthy`. Runtime default when omitted. */
+      retries?: number;
+    };
 
 /**
  * Resource limits applied via podman/docker run flags. All fields

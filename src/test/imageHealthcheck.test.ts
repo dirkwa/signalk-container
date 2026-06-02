@@ -147,3 +147,112 @@ describe("ensureRunning — image healthcheck re-emitted as run flags", () => {
     assert.ok(!args!.includes("--health-cmd"), "no --health-cmd emitted");
   });
 });
+
+describe("ensureRunning — explicit healthcheck override", () => {
+  // Like captureRunArgs above, but also records whether the image-healthcheck
+  // inspect was consulted, so we can assert the override skips it.
+  function captureRunArgs(config: ContainerConfig): {
+    runArgs: () => string[] | null;
+    imageHealthcheckInspected: () => boolean;
+    run: () => Promise<void>;
+  } {
+    let captured: string[] | null = null;
+    let inspectedImageHealthcheck = false;
+    const exec = async (
+      _runtime: ContainerRuntimeInfo,
+      args: string[],
+    ): Promise<ExecResult> => {
+      const cmd = args[0];
+      if (
+        cmd === "inspect" &&
+        args.includes("{{.State.Status}}|{{.State.Running}}|{{.State.Pid}}")
+      ) {
+        return { stdout: "", stderr: "no such object", exitCode: 1 };
+      }
+      if (
+        cmd === "image" &&
+        args[1] === "inspect" &&
+        args.includes("{{json .Config.Healthcheck}}")
+      ) {
+        inspectedImageHealthcheck = true;
+        return { stdout: "null", stderr: "", exitCode: 0 };
+      }
+      if (cmd === "image" && args[1] === "inspect") {
+        return { stdout: "ok", stderr: "", exitCode: 0 };
+      }
+      if (cmd === "run") {
+        captured = args;
+        return { stdout: "id", stderr: "", exitCode: 0 };
+      }
+      throw new Error(`unexpected exec: ${args.join(" ")}`);
+    };
+    return {
+      runArgs: () => captured,
+      imageHealthcheckInspected: () => inspectedImageHealthcheck,
+      run: () =>
+        ensureRunning(docker, "demo", config, () => {}, undefined, exec),
+    };
+  }
+
+  it("emits --health-cmd from a CMD override and skips the image inspect", async () => {
+    const cap = captureRunArgs({
+      image: "questdb/questdb",
+      tag: "latest",
+      healthcheck: {
+        test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/"],
+        interval: "30s",
+        timeout: "5s",
+        startPeriod: "15s",
+        retries: 3,
+      },
+    });
+    await cap.run();
+    const args = cap.runArgs();
+    assert.ok(args, "run was invoked");
+    const i = args!.indexOf("--health-cmd");
+    assert.ok(i >= 0, "--health-cmd present");
+    assert.equal(args![i + 1], "curl -f http://127.0.0.1:9000/");
+    assert.equal(args![args!.indexOf("--health-interval") + 1], "30s");
+    assert.equal(args![args!.indexOf("--health-timeout") + 1], "5s");
+    assert.equal(args![args!.indexOf("--health-start-period") + 1], "15s");
+    assert.equal(args![args!.indexOf("--health-retries") + 1], "3");
+    assert.equal(
+      cap.imageHealthcheckInspected(),
+      false,
+      "override skips the image-healthcheck inspect",
+    );
+  });
+
+  it("wraps a CMD-SHELL override as a single shell string", async () => {
+    const cap = captureRunArgs({
+      image: "x/y",
+      tag: "t",
+      healthcheck: {
+        test: ["CMD-SHELL", "curl -f http://localhost:9000/ || exit 1"],
+      },
+    });
+    await cap.run();
+    const args = cap.runArgs();
+    const i = args!.indexOf("--health-cmd");
+    assert.ok(i >= 0, "--health-cmd present");
+    assert.equal(args![i + 1], "curl -f http://localhost:9000/ || exit 1");
+  });
+
+  it("emits --no-healthcheck when the override is false", async () => {
+    const cap = captureRunArgs({
+      image: "x/y",
+      tag: "t",
+      healthcheck: false,
+    });
+    await cap.run();
+    const args = cap.runArgs();
+    assert.ok(args, "run was invoked");
+    assert.ok(args!.includes("--no-healthcheck"), "--no-healthcheck emitted");
+    assert.ok(!args!.includes("--health-cmd"), "no --health-cmd with false");
+    assert.equal(
+      cap.imageHealthcheckInspected(),
+      false,
+      "false override skips the image-healthcheck inspect",
+    );
+  });
+});
