@@ -188,6 +188,43 @@ Data is safe because volumes live on the host filesystem, not inside the contain
 
 **Removed: hash-file pattern.** Earlier versions of this guide instructed plugins to maintain a `${dataDir}.container-hash` file and call `containers.remove()` themselves on mismatch. That pattern is no longer needed — and was easy to get wrong (each consumer plugin used a different field subset, missing fields the others included). Delete any `container-hash` reads/writes and any `state !== "missing" && hash differs` recreate logic. Restart the consumer plugin once and the central diff will reconcile any drift on the next `ensureRunning` call.
 
+### Healthcheck for images that ship none
+
+When an image declares a `HEALTHCHECK`, signalk-container makes it run reliably across runtimes — you get this automatically, no config needed.
+
+The gap is images that declare **no** healthcheck at all (`questdb/questdb` is the canonical case). Under Podman such a container is reported as `starting` even though it is fully up and serving — there is no probe to ever run, so it never transitions to `healthy`, and the reported health stays wrong indefinitely.
+
+Set `ContainerConfig.healthcheck` to supply a probe and resolve the health state:
+
+```typescript
+await containers.ensureRunning("signalk-questdb", {
+  image: "questdb/questdb",
+  tag: config.version,
+  ports: { "9000/tcp": "127.0.0.1:9000" },
+  volumes: { "/var/lib/questdb": app.getDataDirPath() },
+  restart: "unless-stopped",
+  healthcheck: {
+    // Docker HEALTHCHECK array form. ["CMD", ...] execs the argv directly;
+    // ["CMD-SHELL", "<string>"] runs it under a shell. The probe runs INSIDE
+    // the container, so target the in-container port, not the host mapping.
+    test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/ping"],
+    interval: "30s", // durations are passed to the runtime verbatim
+    timeout: "5s",
+    startPeriod: "15s", // grace before failures count
+    retries: 3,
+  },
+});
+```
+
+Two things worth knowing:
+
+- **Pick a probe that returns promptly.** The command must succeed (exit 0) while the service is healthy. QuestDB's `/ping` returns an empty `204` instantly; probing `/` instead makes `curl` hang on the web-console `301` redirect until it times out, which would drive the container _unhealthy_. Use the image's own tooling (`curl`/`wget` if present) against a lightweight liveness endpoint.
+- **`healthcheck: false`** emits `--no-healthcheck`, so Podman reports the container with no health status instead of a stuck `starting`. Use this when the image has no healthcheck and you don't want one — it removes the phantom `starting` without adding a probe.
+
+An explicit `healthcheck` wins over the image's own `HEALTHCHECK`. It is **not** part of drift detection — changing it does not recreate a running container (same as `restart` and `labels`); the new probe takes effect on the next recreate (image/env/volumes/ports change) or clean start. If your plugin has a second `ensureRunning` call site (e.g. an in-place "update now" path), set `healthcheck` there too, or an updated container regresses to `starting`.
+
+> Availability: `ContainerConfig.healthcheck` requires signalk-container ≥ 1.14.0. On older versions the field is ignored — the container still runs, it just keeps the pre-fix `starting` state.
+
 ### Optional and required volumes
 
 By default, `volumes` entries with a missing host path are auto-created as empty directories by the runtime — fine for plugin state dirs. When a volume represents a _user-managed_ or _deployment-required_ resource, use the `VolumeSpec` object form with an `ifMissing` policy:
@@ -1173,6 +1210,19 @@ interface ContainerConfig {
   // assuming the image runs as root). Set { inImageUid, inImageGid } when
   // the image declares a non-root USER. Set false to opt out entirely.
   user?: { inImageUid?: number; inImageGid?: number } | false;
+  // Explicit healthcheck, for images that ship none (1.14.0+). The object
+  // form emits --health-cmd + timing flags; durations are runtime strings
+  // ("30s"). `false` emits --no-healthcheck. Wins over the image's own
+  // HEALTHCHECK. See "Healthcheck for images that ship none".
+  healthcheck?:
+    | false
+    | {
+        test: string[]; // ["CMD", ...] or ["CMD-SHELL", "<shell string>"]
+        interval?: string;
+        timeout?: string;
+        startPeriod?: string;
+        retries?: number;
+      };
   // ...remaining fields (ports, volumes, env, networkMode, command, resources, ...)
 }
 interface ConsumerManifest {
