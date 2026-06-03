@@ -190,11 +190,11 @@ Data is safe because volumes live on the host filesystem, not inside the contain
 
 ### Healthcheck for images that ship none
 
-When an image declares a `HEALTHCHECK`, signalk-container re-emits it as explicit `--health-*` run flags so the probe runs reliably across runtimes (image-healthcheck inheritance is dropped over Podman's Docker-compat socket, which would otherwise leave the container parked in `starting`). You get this automatically — no config needed.
+When an image declares a `HEALTHCHECK`, signalk-container makes it run reliably across runtimes — you get this automatically, no config needed.
 
-The gap is images that declare **no** healthcheck at all (`questdb/questdb` is the canonical case). Under Podman such a container is still reported as `starting` — but there is no probe to ever run, so it never transitions to `healthy`. The container is fully up and serving; only the reported health is wrong, and it stays wrong forever.
+The gap is images that declare **no** healthcheck at all (`questdb/questdb` is the canonical case). Under Podman such a container is reported as `starting` even though it is fully up and serving — there is no probe to ever run, so it never transitions to `healthy`, and the reported health stays wrong indefinitely.
 
-Set `ContainerConfig.healthcheck` to give the container a real probe:
+Set `ContainerConfig.healthcheck` to supply a probe and resolve the health state:
 
 ```typescript
 await containers.ensureRunning("signalk-questdb", {
