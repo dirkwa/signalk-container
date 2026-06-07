@@ -18,6 +18,21 @@ describe("parsePortBindings", () => {
     ]);
   });
 
+  it("parses a raw dockerode Ports object (not a JSON string)", () => {
+    // Production path: NetworkSettings.Ports arrives already parsed.
+    const result = parsePortBindings({
+      "3010/tcp": [{ HostIp: "127.0.0.1", HostPort: "3010" }],
+    });
+    assert.equal(result.size, 1);
+    assert.deepEqual(result.get(3010), [
+      { hostIp: "127.0.0.1", hostPort: 3010 },
+    ]);
+  });
+
+  it("returns empty map for a null object input", () => {
+    assert.equal(parsePortBindings(null).size, 0);
+  });
+
   it("captures cache drift: actual host port differs from container port", () => {
     // Reproduces the issue #27 scenario: caller asked for container port 3010
     // but the runtime ended up binding host port 3011 (or vice versa).
@@ -66,7 +81,8 @@ describe("parsePortBindings", () => {
   it("returns empty map for null / empty / 'null' input", () => {
     assert.equal(parsePortBindings("").size, 0);
     assert.equal(parsePortBindings("null").size, 0);
-    // @ts-expect-error — proving runtime tolerance for callers that pass undefined
+    // The signature now accepts undefined directly (callers may pass the raw
+    // dockerode NetworkSettings.Ports field, which can be absent).
     assert.equal(parsePortBindings(undefined).size, 0);
   });
 

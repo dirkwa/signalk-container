@@ -472,18 +472,20 @@ describe("LogStreamBroker — auto-respawn after tail exit", () => {
     broker.close("container-removed");
   });
 
-  it("treats pid:undefined as a failed spawn — schedules respawn instead of wedging", async () => {
-    // Regression for: spawnRuntimeStreaming returns a no-op handle
-    // with pid===undefined on synchronous spawn failures (bad
-    // binary, ENOENT).  No child process exists so `onExit` never
-    // fires.  Without the guard, the broker would cache that dead
-    // handle, leaving subscribers attached but the broker silent
-    // forever.  With the guard: treat as a failed spawn and let
-    // the backoff retry — second attempt succeeds and lines flow.
+  it("treats spawnFailed as a failed spawn — schedules respawn instead of wedging", async () => {
+    // Regression for: tailContainerLogs returns a handle with
+    // `spawnFailed: true` when the dockerode logs stream can't be
+    // established (the API call rejected). dockerode handles never
+    // carry a pid, so the broker must key off `spawnFailed`, NOT
+    // `pid === undefined`. Without the guard the broker would cache a
+    // dead handle, leaving subscribers attached but silent forever.
+    // With it: treat as a failed spawn and let the backoff retry —
+    // the second attempt succeeds and lines flow.
     let attempt = 0;
     type Handle = {
       stop: () => void;
       pid: number | undefined;
+      spawnFailed?: boolean;
       onExit?: () => void;
       onLine?: (l: string) => void;
     };
@@ -492,17 +494,16 @@ describe("LogStreamBroker — auto-respawn after tail exit", () => {
       _runtime,
       _name,
       onLine,
-      options,
     ) => {
       attempt++;
       if (attempt === 1) {
-        // Simulate synchronous spawn failure path.
-        return { stop: () => {}, pid: undefined };
+        // Simulate a failed stream establishment. pid is undefined as it
+        // always is on the dockerode path; the failure signal is spawnFailed.
+        return { stop: () => {}, pid: undefined, spawnFailed: true };
       }
       const handle: Handle = {
         stop: () => {},
-        pid: 1234,
-        onExit: options?.onExit ? () => options.onExit?.(0) : undefined,
+        pid: undefined,
         onLine,
       };
       handles.push(handle);
@@ -515,12 +516,11 @@ describe("LogStreamBroker — auto-respawn after tail exit", () => {
     });
     const lines: string[] = [];
     broker.subscribe({ onLine: (l) => lines.push(l) });
-    // First spawn attempt failed (pid:undefined).  The broker
-    // should have scheduled a backoff respawn rather than caching
-    // the dead handle.
+    // First spawn attempt failed (spawnFailed). The broker should have
+    // scheduled a backoff respawn rather than caching the dead handle.
     assert.equal(attempt, 1);
     // After backoff, the second attempt succeeds.
-    await waitFor(() => attempt === 2, "broker retries after pid:undefined");
+    await waitFor(() => attempt === 2, "broker retries after spawnFailed");
     // Feed a line into the new tail and verify the subscriber gets it.
     handles[0].onLine?.("hello");
     assert.deepEqual(lines, ["hello"]);

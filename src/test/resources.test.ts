@@ -5,13 +5,14 @@ import {
   filterUnsupportedLimits,
   mergeResourceLimits,
   minimizeOverride,
-  resourceFlagsForRun,
-  resourceFlagsForUpdate,
+  parseMemoryToBytes,
+  resourcePayloadForRun,
+  resourcePayloadForUpdate,
   resourceLimitsEqual,
   tryLiveUpdate,
-  type ExecRuntimeFn,
 } from "../resources.js";
 import type { ContainerRuntimeInfo } from "../types.js";
+import { makeMockClient } from "./helpers/mockClient.js";
 
 // "Default" runtime: no probed cgroup controllers, treats all
 // fields as supported. Matches docker (where we don't probe) and
@@ -32,19 +33,31 @@ const restrictedRuntime: ContainerRuntimeInfo = {
   cgroupControllers: ["cpu", "memory", "pids"],
 };
 
-function fakeExec(
-  result: { exitCode: number; stdout?: string; stderr?: string },
-  capturedArgs?: { args: string[] },
-): ExecRuntimeFn {
-  return async (_runtime, args) => {
-    if (capturedArgs) capturedArgs.args = args;
-    return {
-      exitCode: result.exitCode,
-      stdout: result.stdout ?? "",
-      stderr: result.stderr ?? "",
-    };
-  };
-}
+describe("parseMemoryToBytes", () => {
+  it("parses binary units (m/g/k) and bare byte counts", () => {
+    assert.equal(parseMemoryToBytes("512m"), 536870912);
+    assert.equal(parseMemoryToBytes("2g"), 2147483648);
+    assert.equal(parseMemoryToBytes("1024k"), 1048576);
+    assert.equal(parseMemoryToBytes("536870912"), 536870912);
+    assert.equal(parseMemoryToBytes("536870912b"), 536870912);
+  });
+
+  it("throws on a malformed value instead of silently dropping the cap", () => {
+    // A typo must fail loudly at the boundary — omitting the field would
+    // remove the limit on create and let tryLiveUpdate report success
+    // after applying nothing.
+    assert.throws(() => parseMemoryToBytes("512mb"), /invalid memory value/);
+    assert.throws(() => parseMemoryToBytes("abc"), /invalid memory value/);
+    assert.throws(() => parseMemoryToBytes(""), /invalid memory value/);
+  });
+
+  it("rejects a malformed memory limit through resourcePayloadForRun", () => {
+    assert.throws(
+      () => resourcePayloadForRun({ memory: "512mb" }, dummyRuntime),
+      /invalid memory value/,
+    );
+  });
+});
 
 describe("mergeResourceLimits", () => {
   it("returns empty object for two undefined inputs", () => {
@@ -110,31 +123,29 @@ describe("mergeResourceLimits", () => {
   });
 });
 
-describe("resourceFlagsForRun", () => {
+describe("resourcePayloadForRun", () => {
   it("returns empty for undefined limits", () => {
-    assert.deepEqual(resourceFlagsForRun(undefined, dummyRuntime), []);
+    assert.deepEqual(resourcePayloadForRun(undefined, dummyRuntime), {});
   });
 
   it("returns empty for empty limits object", () => {
-    assert.deepEqual(resourceFlagsForRun({}, dummyRuntime), []);
+    assert.deepEqual(resourcePayloadForRun({}, dummyRuntime), {});
   });
 
-  it("translates cpus", () => {
-    assert.deepEqual(resourceFlagsForRun({ cpus: 1.5 }, dummyRuntime), [
-      "--cpus",
-      "1.5",
-    ]);
+  it("translates cpus to NanoCpus", () => {
+    assert.deepEqual(resourcePayloadForRun({ cpus: 1.5 }, dummyRuntime), {
+      NanoCpus: 1500000000,
+    });
   });
 
-  it("translates memory", () => {
-    assert.deepEqual(resourceFlagsForRun({ memory: "512m" }, dummyRuntime), [
-      "--memory",
-      "512m",
-    ]);
+  it("translates memory string to bytes", () => {
+    assert.deepEqual(resourcePayloadForRun({ memory: "512m" }, dummyRuntime), {
+      Memory: 536870912,
+    });
   });
 
   it("translates all fields together", () => {
-    const flags = resourceFlagsForRun(
+    const payload = resourcePayloadForRun(
       {
         cpus: 1.5,
         cpuShares: 512,
@@ -147,116 +158,105 @@ describe("resourceFlagsForRun", () => {
       },
       dummyRuntime,
     );
-    assert.deepEqual(flags, [
-      "--cpus",
-      "1.5",
-      "--cpu-shares",
-      "512",
-      "--cpuset-cpus",
-      "1,2",
-      "--memory",
-      "512m",
-      "--memory-swap",
-      "512m",
-      "--memory-reservation",
-      "256m",
-      "--pids-limit",
-      "200",
-      "--oom-score-adj",
-      "500",
-    ]);
+    assert.deepEqual(payload, {
+      NanoCpus: 1500000000,
+      CpuShares: 512,
+      CpusetCpus: "1,2",
+      Memory: 536870912,
+      MemorySwap: 536870912,
+      MemoryReservation: 268435456,
+      PidsLimit: 200,
+      OomScoreAdj: 500,
+    });
   });
 
   it("skips null fields (treated like unset)", () => {
     assert.deepEqual(
-      resourceFlagsForRun({ cpus: 1.25, memory: null }, dummyRuntime),
-      ["--cpus", "1.25"],
+      resourcePayloadForRun({ cpus: 1.25, memory: null }, dummyRuntime),
+      { NanoCpus: 1250000000 },
     );
   });
 
   it("skips undefined fields", () => {
     assert.deepEqual(
-      resourceFlagsForRun({ cpus: 1.25, memory: undefined }, dummyRuntime),
-      ["--cpus", "1.25"],
+      resourcePayloadForRun({ cpus: 1.25, memory: undefined }, dummyRuntime),
+      { NanoCpus: 1250000000 },
     );
   });
 
   it("drops cpusetCpus when cpuset controller is unavailable", () => {
     // Bug B regression test: on a host without cpuset delegation
-    // (like rootless podman on most systems), `cpusetCpus` must be
-    // silently dropped from the flag list rather than passed to
-    // podman where it would fail at OCI runtime time.
-    const flags = resourceFlagsForRun(
+    // (like rootless podman on most systems), `CpusetCpus` must be
+    // silently dropped from the payload rather than passed to the
+    // runtime where it would fail at OCI runtime time.
+    const payload = resourcePayloadForRun(
       { cpus: 1.5, cpusetCpus: "1,2", memory: "512m" },
       restrictedRuntime,
     );
-    assert.deepEqual(flags, ["--cpus", "1.5", "--memory", "512m"]);
+    assert.deepEqual(payload, { NanoCpus: 1500000000, Memory: 536870912 });
   });
 
   it("keeps fields whose controller IS available", () => {
-    const flags = resourceFlagsForRun(
+    const payload = resourcePayloadForRun(
       { cpus: 1.5, memory: "512m", pidsLimit: 200 },
       restrictedRuntime,
     );
-    assert.deepEqual(flags, [
-      "--cpus",
-      "1.5",
-      "--memory",
-      "512m",
-      "--pids-limit",
-      "200",
-    ]);
+    assert.deepEqual(payload, {
+      NanoCpus: 1500000000,
+      Memory: 536870912,
+      PidsLimit: 200,
+    });
   });
 
   it("oomScoreAdj is always allowed (not gated by cgroup controllers)", () => {
-    const flags = resourceFlagsForRun({ oomScoreAdj: 500 }, restrictedRuntime);
-    assert.deepEqual(flags, ["--oom-score-adj", "500"]);
+    const payload = resourcePayloadForRun(
+      { oomScoreAdj: 500 },
+      restrictedRuntime,
+    );
+    assert.deepEqual(payload, { OomScoreAdj: 500 });
   });
 });
 
-describe("resourceFlagsForUpdate", () => {
-  it("returns flags for live-updatable fields", () => {
-    const flags = resourceFlagsForUpdate({
+describe("resourcePayloadForUpdate", () => {
+  it("returns payload for live-updatable fields", () => {
+    const payload = resourcePayloadForUpdate({
       cpus: 2.5,
       memory: "1g",
       pidsLimit: 300,
     });
-    assert.deepEqual(flags, [
-      "--cpus",
-      "2.5",
-      "--memory",
-      "1g",
-      "--pids-limit",
-      "300",
-    ]);
+    assert.deepEqual(payload, {
+      NanoCpus: 2500000000,
+      Memory: 1073741824,
+      PidsLimit: 300,
+    });
   });
 
   it("returns null when limits include cpusetCpus (not live-updatable)", () => {
     assert.equal(
-      resourceFlagsForUpdate({ cpus: 2.5, cpusetCpus: "0,1" }),
+      resourcePayloadForUpdate({ cpus: 2.5, cpusetCpus: "0,1" }),
       null,
     );
   });
 
   it("returns null when limits include oomScoreAdj (set at create time only)", () => {
     assert.equal(
-      resourceFlagsForUpdate({ memory: "1g", oomScoreAdj: 100 }),
+      resourcePayloadForUpdate({ memory: "1g", oomScoreAdj: 100 }),
       null,
     );
   });
 
   it("ignores null fields when checking live-updatability", () => {
     // cpusetCpus: null means "explicit unset" — NOT a live update obstacle
-    const flags = resourceFlagsForUpdate({ cpus: 2.5, cpusetCpus: null });
-    assert.deepEqual(flags, ["--cpus", "2.5"]);
+    const payload = resourcePayloadForUpdate({ cpus: 2.5, cpusetCpus: null });
+    assert.deepEqual(payload, { NanoCpus: 2500000000 });
   });
 
-  it("returns empty array for empty limits (vacuously live-updatable)", () => {
-    assert.deepEqual(resourceFlagsForUpdate({}), []);
+  it("returns empty object for empty limits (vacuously live-updatable)", () => {
+    assert.deepEqual(resourcePayloadForUpdate({}), {});
   });
 
   it("includes only the live-updatable subset of all fields", () => {
-    const flags = resourceFlagsForUpdate({
+    const payload = resourcePayloadForUpdate({
       cpus: 1.5,
       cpuShares: 1024,
       memory: "512m",
@@ -264,106 +264,106 @@ describe("resourceFlagsForUpdate", () => {
       memoryReservation: "256m",
       pidsLimit: 100,
     });
-    assert.deepEqual(flags, [
-      "--cpus",
-      "1.5",
-      "--cpu-shares",
-      "1024",
-      "--memory",
-      "512m",
-      "--memory-swap",
-      "512m",
-      "--memory-reservation",
-      "256m",
-      "--pids-limit",
-      "100",
-    ]);
+    assert.deepEqual(payload, {
+      NanoCpus: 1500000000,
+      CpuShares: 1024,
+      Memory: 536870912,
+      MemorySwap: 536870912,
+      MemoryReservation: 268435456,
+      PidsLimit: 100,
+    });
   });
 });
 
 describe("tryLiveUpdate", () => {
-  it("returns ok=true when exec succeeds", async () => {
-    const captured = { args: [] as string[] };
-    const exec = fakeExec({ exitCode: 0 }, captured);
+  it("returns ok=true and applies the update payload when update succeeds", async () => {
+    const calls = new Map<string, unknown[]>();
+    const client = makeMockClient({
+      containers: {
+        "sk-mayara-server": { update: () => Promise.resolve() },
+      },
+      calls,
+    });
     const result = await tryLiveUpdate(
       dummyRuntime,
       "sk-mayara-server",
       { cpus: 1.5 },
-      exec,
+      client,
     );
     assert.equal(result.ok, true);
-    assert.deepEqual(captured.args, [
-      "update",
-      "--cpus",
-      "1.5",
-      "sk-mayara-server",
-    ]);
+    const update = calls.get("update") as Array<{ payload: unknown }>;
+    assert.equal(update.length, 1);
+    assert.deepEqual(update[0].payload, { NanoCpus: 1500000000 });
   });
 
-  it("returns ok=false with stderr when exec fails", async () => {
-    const exec = fakeExec({ exitCode: 1, stderr: "no such container" });
+  it("returns ok=false when update rejects", async () => {
+    const client = makeMockClient({
+      containers: {
+        "sk-nope": {
+          update: () =>
+            Promise.reject(
+              Object.assign(new Error("no such container"), {
+                statusCode: 500,
+              }),
+            ),
+        },
+      },
+    });
     const result = await tryLiveUpdate(
       dummyRuntime,
       "sk-nope",
       { cpus: 1.5 },
-      exec,
+      client,
     );
     assert.equal(result.ok, false);
-    assert.equal(result.stderr, "no such container");
   });
 
-  it("falls back to stdout when stderr is empty", async () => {
-    const exec = fakeExec({ exitCode: 1, stdout: "boom on stdout" });
-    const result = await tryLiveUpdate(
-      dummyRuntime,
-      "sk-mayara",
-      { memory: "1g" },
-      exec,
-    );
-    assert.equal(result.ok, false);
-    assert.equal(result.stderr, "boom on stdout");
-  });
-
-  it("returns ok=false WITHOUT calling exec when limits include cpusetCpus", async () => {
-    let called = false;
-    const exec: ExecRuntimeFn = async () => {
-      called = true;
-      return { exitCode: 0, stdout: "", stderr: "" };
-    };
+  it("returns ok=false WITHOUT calling update when limits include cpusetCpus", async () => {
+    const calls = new Map<string, unknown[]>();
+    // No update behaviour: payload is null, so update must never be reached.
+    const client = makeMockClient({
+      containers: { "sk-mayara": {} },
+      calls,
+    });
     const result = await tryLiveUpdate(
       dummyRuntime,
       "sk-mayara",
       { cpus: 1.5, cpusetCpus: "0,1" },
-      exec,
+      client,
     );
     assert.equal(result.ok, false);
     assert.match(result.stderr ?? "", /non-live-updatable/);
-    assert.equal(called, false, "exec must not be called for non-live limits");
+    assert.equal(
+      calls.get("update"),
+      undefined,
+      "update must not be called for non-live limits",
+    );
   });
 
-  it("for empty limits, calls exec with `inspect` to verify container exists (Bug C fix)", async () => {
-    // Old behavior was to return ok=true vacuously without any exec
+  it("for empty limits, inspects to verify container exists (Bug C fix)", async () => {
+    // Old behavior was to return ok=true vacuously without any runtime
     // call, which meant `updateResources({})` against a removed
     // container claimed success and corrupted the internal cache.
-    // The new behavior is: call `inspect` first; only return ok=true
-    // if the container actually exists.
-    const captured = { args: [] as string[] };
-    const exec: ExecRuntimeFn = async (_runtime, args) => {
-      captured.args = args;
-      return { exitCode: 0, stdout: "[{}]", stderr: "" };
-    };
-    const result = await tryLiveUpdate(dummyRuntime, "sk-x", {}, exec);
+    // The new behavior is: inspect first; only return ok=true if the
+    // container actually exists.
+    const calls = new Map<string, unknown[]>();
+    const client = makeMockClient({
+      containers: { "sk-x": { inspect: {} } },
+      calls,
+    });
+    const result = await tryLiveUpdate(dummyRuntime, "sk-x", {}, client);
     assert.equal(result.ok, true);
-    assert.deepEqual(captured.args, ["inspect", "sk-x"]);
+    assert.equal(
+      calls.get("update"),
+      undefined,
+      "update must not be called when there is nothing to apply",
+    );
   });
 
   it("for empty limits AND missing container, returns ok=false", async () => {
-    const exec: ExecRuntimeFn = async () => ({
-      exitCode: 1,
-      stdout: "",
-      stderr: "no such object: sk-x",
-    });
-    const result = await tryLiveUpdate(dummyRuntime, "sk-x", {}, exec);
+    // Container not listed → inspect throws 404 → existence check fails.
+    const client = makeMockClient({});
+    const result = await tryLiveUpdate(dummyRuntime, "sk-x", {}, client);
     assert.equal(result.ok, false);
     assert.match(result.stderr ?? "", /does not exist/);
   });
@@ -506,39 +506,45 @@ describe("filterUnsupportedLimits (Bug B)", () => {
 
 describe("tryLiveUpdate Bug C: container existence check", () => {
   it("with empty filtered limits AND missing container, returns ok=false", async () => {
-    // After filtering, no flags need to be applied. The old code
+    // After filtering, no payload needs to be applied. The old code
     // would vacuously return ok=true here, even if the container
     // doesn't exist. The new code MUST verify existence first.
-    const exec = fakeExec({ exitCode: 1, stderr: "no such object" });
+    const client = makeMockClient({});
     const result = await tryLiveUpdate(
       restrictedRuntime,
       "sk-mayara",
       // Only field is cpusetCpus, which gets filtered out → empty
       { cpusetCpus: "0,1" },
-      exec,
+      client,
     );
     assert.equal(result.ok, false);
     assert.match(result.stderr ?? "", /does not exist/);
   });
 
   it("with empty filtered limits AND existing container, returns ok=true", async () => {
-    const exec = fakeExec({ exitCode: 0, stdout: "[{}]" });
+    const client = makeMockClient({
+      containers: { "sk-mayara": { inspect: {} } },
+    });
     const result = await tryLiveUpdate(
       restrictedRuntime,
       "sk-mayara",
       { cpusetCpus: "0,1" },
-      exec,
+      client,
     );
     assert.equal(result.ok, true);
   });
 
-  it("with normal limits, no existence check is performed (delegated to update command)", async () => {
-    const exec = fakeExec({ exitCode: 0 });
+  it("with normal limits, no existence check is performed (delegated to update)", async () => {
+    // No `inspect` behaviour configured — if existence were checked it
+    // would 404. update succeeds, so ok=true.
+    const client = makeMockClient({
+      containers: { "sk-mayara": { update: () => Promise.resolve() } },
+    });
     const result = await tryLiveUpdate(
       dummyRuntime,
       "sk-mayara",
       { cpus: 1.5 },
-      exec,
+      client,
     );
     assert.equal(result.ok, true);
   });
@@ -546,17 +552,22 @@ describe("tryLiveUpdate Bug C: container existence check", () => {
   it("filters cgroup-unavailable fields BEFORE deciding live-update viability", async () => {
     // Pure regression test for the integration: cpusetCpus + cpus, on
     // a runtime with no cpuset → cpusetCpus is dropped → only cpus
-    // remains → live-updatable → exec gets called with --cpus only.
-    const captured = { args: [] as string[] };
-    const exec = fakeExec({ exitCode: 0 }, captured);
+    // remains → live-updatable → update gets the NanoCpus payload only.
+    const calls = new Map<string, unknown[]>();
+    const client = makeMockClient({
+      containers: { "sk-mayara": { update: () => Promise.resolve() } },
+      calls,
+    });
     const result = await tryLiveUpdate(
       restrictedRuntime,
       "sk-mayara",
       { cpus: 1.5, cpusetCpus: "0,1" },
-      exec,
+      client,
     );
     assert.equal(result.ok, true);
-    assert.deepEqual(captured.args, ["update", "--cpus", "1.5", "sk-mayara"]);
+    const update = calls.get("update") as Array<{ payload: unknown }>;
+    assert.equal(update.length, 1);
+    assert.deepEqual(update[0].payload, { NanoCpus: 1500000000 });
   });
 });
 

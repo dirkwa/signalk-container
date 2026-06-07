@@ -1,4 +1,6 @@
 import * as net from "node:net";
+import { PassThrough } from "node:stream";
+import type Docker from "dockerode";
 import { existsSync, readFileSync } from "node:fs";
 import {
   ContainerConfig,
@@ -12,13 +14,19 @@ import {
 } from "./types.js";
 import {
   StreamingProcessHandle,
-  execRuntime,
-  execRuntimeLong,
   isContainerized,
-  spawnRuntimeStreaming,
+  makeLineSplitter,
   userMappingFlags,
 } from "./runtime.js";
-import { resourceFlagsForRun } from "./resources.js";
+import {
+  demuxToText,
+  demuxBufferToText,
+  getClient,
+  safe,
+  safeInspect,
+  type ContainerClient,
+} from "./client.js";
+import { resourcePayloadForRun } from "./resources.js";
 import { classifyTag } from "./updates/tagClassifier.js";
 import { isOfflineError } from "./updates/offline.js";
 
@@ -273,7 +281,7 @@ export function safeInvokeContainerLog(
  * only live lines after attach.  Set to e.g. 100 for "last 100 +
  * live" semantics.  Both runtime CLIs accept `--tail` identically.
  *
- * `spawn` is exposed for tests (defaults to `spawnRuntimeStreaming`).
+ * `client` is exposed for tests (defaults to the dockerode singleton).
  */
 export function tailContainerLogs(
   runtime: ContainerRuntimeInfo,
@@ -283,24 +291,58 @@ export function tailContainerLogs(
     startTail?: number;
     onError?: (msg: string) => void;
     onExit?: (code: number | null) => void;
-    spawn?: typeof spawnRuntimeStreaming;
+    client?: ContainerClient;
   },
 ): StreamingProcessHandle {
-  const spawnFn = options?.spawn ?? spawnRuntimeStreaming;
+  const client = options?.client ?? getClient();
   const fullName = prefixedName(name);
-  const tail = String(normalizeTail(options?.startTail, 0));
-  return spawnFn(runtime, ["logs", "-f", "--tail", tail, fullName], onLine, {
-    onError: options?.onError,
-    onExit: options?.onExit,
-    // Container stderr is part of the log stream the user wants
-    // to see — `podman logs -f` forwards it on its own stderr fd,
-    // and we want it on the same `onLine` channel as stdout.
-    // Without this, Rust/Go apps that log to stderr (mayara, etc.)
-    // appear silent in the modal while spamming SK's server log
-    // as "tail error".  Matches the combined-output semantics
-    // documented for `podman logs <name>`.
-    mergeStderr: true,
-  });
+  const tail = normalizeTail(options?.startTail, 0);
+
+  let stopped = false;
+  let stream: NodeJS.ReadableStream | null = null;
+  const handle: StreamingProcessHandle = {
+    pid: undefined,
+    spawnFailed: false,
+    stop() {
+      stopped = true;
+      // dockerode log streams are plain Readables — destroy() ends them;
+      // there is no child process to signal.
+      (stream as unknown as { destroy?: () => void } | null)?.destroy?.();
+    },
+  };
+
+  // Combined stdout+stderr on a single line channel (matches
+  // `podman logs <name>` semantics). Rust/Go apps (mayara, etc.) log to
+  // stderr, so without merging they'd appear silent in the modal. The
+  // dockerode stream is multiplexed; demux both sides into one splitter.
+  const splitter = makeLineSplitter(onLine);
+  client
+    .getContainer(fullName)
+    .logs({ follow: true, stdout: true, stderr: true, tail })
+    .then((s) => {
+      if (stopped) {
+        (s as unknown as { destroy?: () => void }).destroy?.();
+        return;
+      }
+      stream = s as unknown as NodeJS.ReadableStream;
+      demuxToText(client.modem, stream, (chunk) => splitter.push(chunk));
+      stream.on("error", (err: Error) => {
+        if (!stopped) options?.onError?.(err.message);
+      });
+      const onEnd = () => {
+        splitter.flush();
+        if (!stopped) options?.onExit?.(0);
+      };
+      stream.on("end", onEnd);
+      stream.on("close", onEnd);
+    })
+    .catch((err) => {
+      handle.spawnFailed = true;
+      options?.onError?.(err instanceof Error ? err.message : String(err));
+      options?.onExit?.(null);
+    });
+
+  return handle;
 }
 
 /** Upper bound for `--tail N` accepted at the public boundary. */
@@ -363,14 +405,12 @@ export function parsePositiveIntQuery(
  * requests against very chatty containers; `since` is a unix-epoch-
  * seconds filter passed through to the runtime.
  *
- * Ordering caveat: `execFile` reads the runtime's stdout and stderr
- * into separate buffers — the OS-level chronological interleave
- * between the two is lost before we see them.  We return stdout
- * lines (in order) followed by stderr lines (in order); a stderr
- * line the container actually emitted between two stdout lines
- * will appear after the stdout chunk.  This is a known limitation
- * of one-shot capture; per-line `--timestamps` parsing would be
- * the only way to reconstruct true chronology and is out of scope.
+ * Ordering caveat: the demuxed stream gives us stdout and stderr as
+ * separate sinks; the OS-level chronological interleave between the two
+ * is collapsed when we concatenate. We return the combined text split
+ * into lines — a stderr line emitted between two stdout lines may land
+ * out of order. Reconstructing true chronology would need per-line
+ * `--timestamps` parsing and is out of scope.
  *
  * Used both by the `GET /containers/:name/logs` REST route and by
  * `ContainerManagerApi.getLogs` for in-process consumer-plugin calls.
@@ -379,34 +419,46 @@ export async function getContainerLogs(
   runtime: ContainerRuntimeInfo,
   name: string,
   options?: { tail?: number; since?: number },
-  exec: ExecFn = execRuntime,
+  client: ContainerClient = getClient(),
 ): Promise<string[]> {
   const tail = normalizeTail(options?.tail, 200);
-  const args = ["logs", "--tail", String(tail)];
+  const logOpts: Docker.ContainerLogsOptions & { follow?: false } = {
+    follow: false,
+    stdout: true,
+    stderr: true,
+    tail,
+  };
   if (
     options?.since !== undefined &&
     Number.isFinite(options.since) &&
     options.since >= 0
   ) {
-    args.push("--since", String(Math.floor(options.since)));
+    logOpts.since = Math.floor(options.since);
   }
-  args.push(prefixedName(name));
-  const result = await exec(runtime, args);
-  if (result.exitCode !== 0) {
-    throw new Error(result.stderr || `logs ${name}: exit ${result.exitCode}`);
+  const result = await safe(
+    () =>
+      client.getContainer(prefixedName(name)).logs(logOpts) as Promise<Buffer>,
+  );
+  if (!result.ok) {
+    throw new Error(`logs ${name}: ${result.error.userMessage}`);
   }
-  // Split each stream independently and concat — never `.join("\n")`
-  // them because if stdout already ended with `\n` we'd synthesize
-  // a phantom empty line between the two.  Trailing empties from
-  // each side get popped (matches real `podman logs` semantics
-  // where the runtime adds a final newline to the last line).
-  const toLines = (chunk: string): string[] => {
-    if (!chunk) return [];
-    const split = chunk.split(/\r?\n/);
-    while (split.length > 0 && split[split.length - 1] === "") split.pop();
-    return split;
-  };
-  return [...toLines(result.stdout), ...toLines(result.stderr)];
+  // One-shot logs come back as a multiplexed buffer (non-TTY containers);
+  // demux to combined text before splitting. Trailing empties are popped
+  // to match the runtime's final-newline behaviour.
+  const text = await demuxBufferToText(
+    client.modem,
+    bufferToStream(result.value),
+  );
+  const split = text.split(/\r?\n/);
+  while (split.length > 0 && split[split.length - 1] === "") split.pop();
+  return split;
+}
+
+/** Wrap a Buffer as a Readable so the demux helper can consume it. */
+function bufferToStream(buf: Buffer): NodeJS.ReadableStream {
+  const s = new PassThrough();
+  s.end(buf);
+  return s;
 }
 
 /**
@@ -449,10 +501,12 @@ export function qualifyImage(
 export async function imageExists(
   runtime: ContainerRuntimeInfo,
   image: string,
-  exec: ExecFn = execRuntime,
+  client: ContainerClient = getClient(),
 ): Promise<boolean> {
-  const result = await exec(runtime, ["image", "inspect", image]);
-  return result.exitCode === 0;
+  const info = await safeInspect(() =>
+    client.getImage(qualifyImage(image, runtime)).inspect(),
+  );
+  return info !== null;
 }
 
 /**
@@ -467,31 +521,18 @@ export async function imageExists(
 export async function getImageDigest(
   runtime: ContainerRuntimeInfo,
   imageOrContainer: string,
-  exec: ExecFn = execRuntime,
+  client: ContainerClient = getClient(),
 ): Promise<string | null> {
   // Try image inspect first; fall back to container inspect for names.
   const qualified = qualifyImage(imageOrContainer, runtime);
-  const imgResult = await exec(runtime, [
-    "image",
-    "inspect",
-    "--format",
-    "{{.Id}}",
-    qualified,
-  ]);
-  if (imgResult.exitCode === 0 && imgResult.stdout) {
-    return imgResult.stdout.trim();
-  }
+  const img = await safeInspect(() => client.getImage(qualified).inspect());
+  if (img?.Id) return img.Id;
 
   // Maybe it's a container name; .Image on a container returns the image ID.
-  const ctrResult = await exec(runtime, [
-    "inspect",
-    "--format",
-    "{{.Image}}",
-    imageOrContainer,
-  ]);
-  if (ctrResult.exitCode === 0 && ctrResult.stdout) {
-    return ctrResult.stdout.trim();
-  }
+  const ctr = await safeInspect(() =>
+    client.getContainer(imageOrContainer).inspect(),
+  );
+  if (ctr?.Image) return ctr.Image;
 
   return null;
 }
@@ -532,30 +573,19 @@ interface RawHealthcheck {
 export async function getImageHealthcheck(
   runtime: ContainerRuntimeInfo,
   imageRef: string,
-  exec: ExecFn = execRuntime,
+  client: ContainerClient = getClient(),
 ): Promise<ImageHealthcheck | null> {
-  const result = await exec(runtime, [
-    "image",
-    "inspect",
-    "--format",
-    "{{json .Config.Healthcheck}}",
-    qualifyImage(imageRef, runtime),
-  ]);
-  if (result.exitCode !== 0) return null;
-
-  const raw = result.stdout.trim();
-  // No healthcheck renders as `null` (or empty) from the template.
-  if (!raw || raw === "null") return null;
-
-  let parsed: RawHealthcheck;
-  try {
-    parsed = JSON.parse(raw) as RawHealthcheck;
-  } catch {
-    return null;
-  }
+  const img = await safeInspect(() =>
+    client.getImage(qualifyImage(imageRef, runtime)).inspect(),
+  );
+  // No image, or no healthcheck on it. dockerode returns the same
+  // nanosecond-integer shape on podman and docker (verified live), so no
+  // Go-template divergence to guard against.
+  const parsed = img?.Config?.Healthcheck as RawHealthcheck | undefined;
+  if (!parsed) return null;
 
   const test = parsed.Test ?? [];
-  // A `HEALTHCHECK NONE` image renders as `["NONE"]` — treat as no check.
+  // A `HEALTHCHECK NONE` image surfaces as `["NONE"]` — treat as no check.
   if (test.length === 0 || test[0] === "NONE") return null;
 
   return {
@@ -583,24 +613,16 @@ export async function getImageHealthcheck(
 export async function getRepoDigest(
   runtime: ContainerRuntimeInfo,
   image: string,
-  exec: ExecFn = execRuntime,
+  client: ContainerClient = getClient(),
 ): Promise<string | null> {
-  const qualified = qualifyImage(image, runtime);
-  // The {{if .RepoDigests}}{{end}} guard avoids `[<no value>]` output
-  // that some podman versions emit when RepoDigests is empty.
-  const result = await exec(runtime, [
-    "image",
-    "inspect",
-    "--format",
-    "{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}",
-    qualified,
-  ]);
-  if (result.exitCode !== 0) return null;
-  const raw = result.stdout.trim();
-  if (!raw) return null;
-  const at = raw.lastIndexOf("@");
+  const img = await safeInspect(() =>
+    client.getImage(qualifyImage(image, runtime)).inspect(),
+  );
+  const first = img?.RepoDigests?.[0];
+  if (!first) return null;
+  const at = first.lastIndexOf("@");
   if (at < 0) return null;
-  const digest = raw.slice(at + 1);
+  const digest = first.slice(at + 1);
   return /^sha256:[a-f0-9]{64}$/.test(digest) ? digest : null;
 }
 
@@ -620,69 +642,83 @@ export async function getRepoDigest(
 export async function getLiveContainerDigest(
   runtime: ContainerRuntimeInfo,
   containerName: string,
-  exec: ExecFn = execRuntime,
+  client: ContainerClient = getClient(),
 ): Promise<string | null> {
   // The caller passes the unprefixed name from `ensureRunning`; the
   // running container always carries the `sk-` prefix.
   const imageId = await getImageDigest(
     runtime,
     prefixedName(containerName),
-    exec,
+    client,
   );
   if (!imageId) return null;
-  const repoDigest = await getRepoDigest(runtime, imageId, exec);
+  const repoDigest = await getRepoDigest(runtime, imageId, client);
   if (repoDigest) return repoDigest;
   // Locally-built image with no RepoDigests — return the local id
   // under the same `local:` namespace the resolver uses.
   return `local:${imageId}`;
 }
 
+/**
+ * Pull an image, streaming progress to `onProgress`. dockerode's `pull`
+ * returns a stream of JSON progress objects that must be followed to
+ * completion via `modem.followProgress`; each event's `status`/`progress`
+ * is surfaced line-wise to mirror the old CLI progress output.
+ */
 export async function pullImage(
   runtime: ContainerRuntimeInfo,
   image: string,
   onProgress?: (msg: string) => void,
+  client: ContainerClient = getClient(),
 ): Promise<void> {
-  const { exitCode, log } = await execRuntimeLong(
-    runtime,
-    ["pull", image],
-    onProgress,
-    300000,
+  const qualified = qualifyImage(image, runtime);
+  const result = await safe(
+    () =>
+      new Promise<void>((resolve, reject) => {
+        client
+          .pull(qualified)
+          .then((stream) => {
+            client.modem.followProgress(
+              stream,
+              (err) => (err ? reject(err) : resolve()),
+              (event) => {
+                if (!onProgress) return;
+                const e = event as { status?: string; progress?: string };
+                const line = [e.status, e.progress].filter(Boolean).join(" ");
+                if (line) onProgress(line);
+              },
+            );
+          })
+          .catch(reject);
+      }),
   );
-  if (exitCode !== 0) {
-    throw new Error(`Failed to pull ${image}: ${log.slice(-5).join("\n")}`);
+  if (!result.ok) {
+    throw new Error(`Failed to pull ${image}: ${result.error.userMessage}`);
   }
 }
 
 export async function getContainerState(
   runtime: ContainerRuntimeInfo,
   name: string,
-  exec: ExecFn = execRuntime,
+  client: ContainerClient = getClient(),
 ): Promise<ContainerState> {
   const fullName = prefixedName(name);
-  // Query multiple state fields and treat the container as running if
+  // Read multiple state fields and treat the container as running if
   // ANY of them indicate running. Rationale: rootless podman on some
   // kernels briefly returns inconsistent `State.Status` values for a
   // container that's actually running (observed during heavy concurrent
   // inspect traffic from the config panel's 5-second poll). The
   // `State.Pid` field is a more authoritative signal — if there's a
   // live PID, the container process exists regardless of what Status
-  // momentarily claims. Same for `State.Running` which is a boolean
-  // that podman populates independently from Status.
-  //
-  // Order in the format string: Status | Running | Pid
-  const result = await exec(runtime, [
-    "inspect",
-    "--format",
-    "{{.State.Status}}|{{.State.Running}}|{{.State.Pid}}",
-    fullName,
-  ]);
+  // momentarily claims. Same for `State.Running`, a boolean podman
+  // populates independently from Status.
+  const info = await safeInspect(() => client.getContainer(fullName).inspect());
+  if (info === null) return "missing";
 
-  if (result.exitCode !== 0) return "missing";
-
-  const [rawStatus, rawRunning, rawPid] = result.stdout.split("|");
-  const status = (rawStatus ?? "").toLowerCase().trim();
-  const runningFlag = (rawRunning ?? "").toLowerCase().trim() === "true";
-  const pid = Number((rawPid ?? "").trim());
+  const state = info.State ?? {};
+  const status = (state.Status ?? "").toLowerCase().trim();
+  const runningFlag = state.Running === true;
+  const pid = Number(state.Pid ?? 0);
   const hasLivePid = Number.isFinite(pid) && pid > 0;
 
   // Running if ANY source says so. This is the defensive OR — we'd
@@ -694,15 +730,6 @@ export async function getContainerState(
   if (status === "running" || runningFlag || hasLivePid) return "running";
   return "stopped";
 }
-
-/**
- * Type alias matching `ExecRuntimeFn` in resources.ts; declared
- * locally so containers.ts doesn't have to depend on resources.ts.
- */
-export type ExecFn = (
-  runtime: ContainerRuntimeInfo,
-  args: string[],
-) => Promise<{ stdout: string; stderr: string; exitCode: number }>;
 
 /**
  * Read the live resource limits applied to a managed container,
@@ -729,36 +756,33 @@ export type ExecFn = (
 export async function getLiveResources(
   runtime: ContainerRuntimeInfo,
   name: string,
-  exec: ExecFn = execRuntime,
+  client: ContainerClient = getClient(),
 ): Promise<import("./types.js").ContainerResourceLimits> {
   const fullName = prefixedName(name);
-  // Use Go-template format for reliable parsing across podman/docker.
-  // Each line is one numeric or string value; empty/zero means "unset".
-  const fmt =
-    "{{.HostConfig.NanoCpus}}|" +
-    "{{.HostConfig.CpuShares}}|" +
-    "{{.HostConfig.CpusetCpus}}|" +
-    "{{.HostConfig.Memory}}|" +
-    "{{.HostConfig.MemorySwap}}|" +
-    "{{.HostConfig.MemoryReservation}}|" +
-    "{{.HostConfig.PidsLimit}}|" +
-    "{{.HostConfig.OomScoreAdj}}";
-  const result = await exec(runtime, ["inspect", "--format", fmt, fullName]);
-  if (result.exitCode !== 0) return {};
+  const info = await safeInspect(() => client.getContainer(fullName).inspect());
+  if (info === null) return {};
 
-  const parts = result.stdout.split("|");
-  if (parts.length !== 8) return {};
-
-  const [
-    nanoCpus,
-    cpuShares,
-    cpusetCpus,
-    memory,
-    memorySwap,
-    memoryReservation,
-    pidsLimit,
-    oomScoreAdj,
-  ] = parts;
+  // dockerode returns these as numbers/strings directly (verified live on
+  // podman + docker); empty/zero/-1 means "unset", mirroring the prior
+  // template-parse semantics.
+  const hc = (info.HostConfig ?? {}) as {
+    NanoCpus?: number;
+    CpuShares?: number;
+    CpusetCpus?: string;
+    Memory?: number;
+    MemorySwap?: number;
+    MemoryReservation?: number;
+    PidsLimit?: number | null;
+    OomScoreAdj?: number;
+  };
+  const nanoCpus = hc.NanoCpus ?? 0;
+  const cpuShares = hc.CpuShares ?? 0;
+  const cpusetCpus = hc.CpusetCpus ?? "";
+  const memory = hc.Memory ?? 0;
+  const memorySwap = hc.MemorySwap ?? 0;
+  const memoryReservation = hc.MemoryReservation ?? 0;
+  const pidsLimit = hc.PidsLimit ?? 0;
+  const oomScoreAdj = hc.OomScoreAdj ?? 0;
 
   const out: import("./types.js").ContainerResourceLimits = {};
 
@@ -849,15 +873,26 @@ export interface PortBinding {
  * already handle "no binding found" so a parse error degrades gracefully into
  * "leave the existing cache alone".
  */
-export function parsePortBindings(json: string): Map<number, PortBinding[]> {
+export function parsePortBindings(
+  json: string | Record<string, unknown> | null | undefined,
+): Map<number, PortBinding[]> {
   const out = new Map<number, PortBinding[]>();
-  if (!json || json === "null") return out;
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(json);
-  } catch {
+  if (json === null || json === undefined || json === "null" || json === "") {
     return out;
+  }
+
+  // Accept either the raw object dockerode returns or a JSON string (the
+  // pure-function test path). dockerode's `NetworkSettings.Ports` is
+  // already an object, so no parse is needed in production.
+  let parsed: unknown;
+  if (typeof json === "string") {
+    try {
+      parsed = JSON.parse(json);
+    } catch {
+      return out;
+    }
+  } else {
+    parsed = json;
   }
   if (!parsed || typeof parsed !== "object") return out;
 
@@ -900,17 +935,14 @@ export function parsePortBindings(json: string): Map<number, PortBinding[]> {
 export async function getActualPortBindings(
   runtime: ContainerRuntimeInfo,
   name: string,
-  exec: ExecFn = execRuntime,
+  client: ContainerClient = getClient(),
 ): Promise<Map<number, PortBinding[]>> {
   const fullName = prefixedName(name);
-  const result = await exec(runtime, [
-    "inspect",
-    "--format",
-    "{{json .NetworkSettings.Ports}}",
-    fullName,
-  ]);
-  if (result.exitCode !== 0) return new Map();
-  return parsePortBindings(result.stdout.trim());
+  const info = await safeInspect(() => client.getContainer(fullName).inspect());
+  if (info === null) return new Map();
+  return parsePortBindings(
+    info.NetworkSettings?.Ports as Record<string, unknown> | undefined,
+  );
 }
 
 /**
@@ -965,51 +997,39 @@ export interface LiveContainerConfig {
 export async function getLiveContainerConfig(
   runtime: ContainerRuntimeInfo,
   name: string,
-  exec: ExecFn = execRuntime,
+  client: ContainerClient = getClient(),
 ): Promise<LiveContainerConfig | null> {
   const fullName = prefixedName(name);
-  // Sentinel between sections — `\x1f` (ASCII unit separator) avoids any
-  // collision with shell-meta or path characters that might appear inside
-  // image refs, network mode names, or JSON payloads.
-  const SEP = "\x1f";
-  const fmt =
-    "{{.Config.Image}}" +
-    SEP +
-    "{{json .Config.Cmd}}" +
-    SEP +
-    "{{.HostConfig.NetworkMode}}" +
-    SEP +
-    "{{json .HostConfig.Binds}}" +
-    SEP +
-    "{{json .Config.Env}}" +
-    SEP +
-    "{{json .HostConfig.PortBindings}}" +
-    SEP +
-    "{{json .HostConfig.ExtraHosts}}" +
-    SEP +
-    "{{.Config.User}}";
-  const result = await exec(runtime, ["inspect", "--format", fmt, fullName]);
-  if (result.exitCode !== 0) return null;
+  const info = await safeInspect(() => client.getContainer(fullName).inspect());
+  if (info === null) return null;
 
-  const parts = result.stdout.split(SEP);
-  if (parts.length !== 8) return null;
-
-  const [
-    rawImage,
-    rawCmd,
-    rawNetworkMode,
-    rawBinds,
-    rawEnv,
-    rawPortBindings,
-    rawExtraHosts,
-    rawUser,
-  ] = parts;
+  // dockerode hands back already-parsed JSON; we read the same fields the
+  // CLI template emitted, with no per-field parse/exitcode handling.
+  const config = (info.Config ?? {}) as {
+    Image?: string;
+    Cmd?: string[] | null;
+    Env?: string[] | null;
+    User?: string;
+  };
+  const hostConfig = (info.HostConfig ?? {}) as {
+    NetworkMode?: string;
+    Binds?: string[] | null;
+    PortBindings?: Record<string, unknown> | null;
+    ExtraHosts?: string[] | null;
+  };
+  const rawCmd = config.Cmd ?? null;
+  const rawNetworkMode = hostConfig.NetworkMode;
+  const rawBinds = hostConfig.Binds ?? null;
+  const rawEnv = config.Env ?? null;
+  const rawPortBindings = hostConfig.PortBindings ?? null;
+  const rawExtraHosts = hostConfig.ExtraHosts ?? null;
+  const rawUser = config.User;
 
   // Split image into image+tag (and optional digest). Config.Image can
   // be `repo:tag`, `repo@sha256:...`, or `repo:tag@sha256:...`.
   // Registries with ports (`localhost:5000/foo:tag`) push the
   // image-vs-tag colon past the last slash.
-  const imageRef = rawImage.trim();
+  const imageRef = (config.Image ?? "").trim();
   let imageAndTag = imageRef;
   let digest: string | null = null;
   const atIdx = imageRef.indexOf("@sha256:");
@@ -1030,80 +1050,60 @@ export async function getLiveContainerConfig(
   }
 
   let command: string[] | null = null;
-  try {
-    const parsed = JSON.parse(rawCmd);
-    if (Array.isArray(parsed)) command = parsed.map((s) => String(s));
-  } catch {
-    // leave null
-  }
+  if (Array.isArray(rawCmd)) command = rawCmd.map((s) => String(s));
 
   const networkMode = (rawNetworkMode ?? "").trim();
 
   const binds: Array<{ host: string; container: string }> = [];
-  try {
-    const parsed = JSON.parse(rawBinds);
-    if (Array.isArray(parsed)) {
-      for (const entry of parsed) {
-        if (typeof entry !== "string") continue;
-        // Bind format: `host:container[:flags]`. `volumeArg` adds `:Z` for
-        // podman binds and `:ro` for read-only mounts; strip trailing flags
-        // so the diff compares semantic (host, container) tuples only.
-        // Container path always begins with `/`, so the second-to-last `:`
-        // is the host/container boundary regardless of flags.
-        const segments = entry.split(":");
-        if (segments.length < 2) continue;
-        // Walk backward: keep stripping trailing segments that look like
-        // option flags (Z, z, ro, rw, etc.) until we have exactly host:container.
-        const FLAG_RE = /^[a-zA-Z,]+$/;
-        while (
-          segments.length > 2 &&
-          FLAG_RE.test(segments[segments.length - 1])
-        ) {
-          segments.pop();
-        }
-        if (segments.length < 2) continue;
-        const container = segments.pop() as string;
-        const host = segments.join(":");
-        binds.push({ host, container });
+  if (Array.isArray(rawBinds)) {
+    for (const entry of rawBinds) {
+      if (typeof entry !== "string") continue;
+      // Bind format: `host:container[:flags]`. `volumeArg` adds `:Z` for
+      // podman binds and `:ro` for read-only mounts; strip trailing flags
+      // so the diff compares semantic (host, container) tuples only.
+      // Container path always begins with `/`, so the second-to-last `:`
+      // is the host/container boundary regardless of flags.
+      const segments = entry.split(":");
+      if (segments.length < 2) continue;
+      // Walk backward: keep stripping trailing segments that look like
+      // option flags (Z, z, ro, rw, etc.) until we have exactly host:container.
+      const FLAG_RE = /^[a-zA-Z,]+$/;
+      while (
+        segments.length > 2 &&
+        FLAG_RE.test(segments[segments.length - 1])
+      ) {
+        segments.pop();
       }
+      if (segments.length < 2) continue;
+      const container = segments.pop() as string;
+      const host = segments.join(":");
+      binds.push({ host, container });
     }
-  } catch {
-    // leave empty
   }
 
   const env = new Map<string, string>();
-  try {
-    const parsed = JSON.parse(rawEnv);
-    if (Array.isArray(parsed)) {
-      for (const entry of parsed) {
-        if (typeof entry !== "string") continue;
-        const eq = entry.indexOf("=");
-        if (eq < 0) continue;
-        env.set(entry.slice(0, eq), entry.slice(eq + 1));
-      }
+  if (Array.isArray(rawEnv)) {
+    for (const entry of rawEnv) {
+      if (typeof entry !== "string") continue;
+      const eq = entry.indexOf("=");
+      if (eq < 0) continue;
+      env.set(entry.slice(0, eq), entry.slice(eq + 1));
     }
-  } catch {
-    // leave empty
   }
 
-  const portBindings = parsePortBindingsFromJsonString(rawPortBindings);
+  const portBindings = parsePortBindingsObject(rawPortBindings);
 
   const extraHosts = new Map<string, string>();
-  try {
-    const parsed = JSON.parse(rawExtraHosts);
-    if (Array.isArray(parsed)) {
-      for (const entry of parsed) {
-        if (typeof entry !== "string") continue;
-        // ExtraHosts format: "hostname:ipaddress"
-        const colon = entry.indexOf(":");
-        if (colon < 0) continue;
-        const hostname = entry.slice(0, colon);
-        const ip = entry.slice(colon + 1);
-        extraHosts.set(hostname, ip);
-      }
+  if (Array.isArray(rawExtraHosts)) {
+    for (const entry of rawExtraHosts) {
+      if (typeof entry !== "string") continue;
+      // ExtraHosts format: "hostname:ipaddress"
+      const colon = entry.indexOf(":");
+      if (colon < 0) continue;
+      const hostname = entry.slice(0, colon);
+      const ip = entry.slice(colon + 1);
+      extraHosts.set(hostname, ip);
     }
-  } catch {
-    // leave empty
   }
 
   const user = (rawUser ?? "").trim();
@@ -1128,21 +1128,12 @@ export async function getLiveContainerConfig(
  * stripping the protocol. The diff compares full keys so a `9000/tcp` vs
  * `9000/udp` change is detected.
  */
-function parsePortBindingsFromJsonString(
-  json: string,
+function parsePortBindingsObject(
+  parsed: Record<string, unknown> | null | undefined,
 ): Map<string, PortBinding[]> {
   const out = new Map<string, PortBinding[]>();
-  if (!json || json === "null") return out;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(json);
-  } catch {
-    return out;
-  }
   if (!parsed || typeof parsed !== "object") return out;
-  for (const [key, value] of Object.entries(
-    parsed as Record<string, unknown>,
-  )) {
+  for (const [key, value] of Object.entries(parsed)) {
     if (!Array.isArray(value) || value.length === 0) continue;
     const bindings: PortBinding[] = [];
     for (const entry of value) {
@@ -1392,18 +1383,13 @@ export function diffContainerConfig(
   }
   if (extraHostsDrift) drifted.push("extraHosts");
 
-  // User/ownership drift. Compute the `--user uid:gid` form the
-  // translator would emit and compare to live `Config.User`. The
-  // `--userns=keep-id` flag (rootless Podman) doesn't surface in
-  // `Config.User`, so we only fire drift when the expected form is
-  // a `--user` flag — that is, opt-out, rootless-Podman, and
-  // unavailable-hostUser all suppress drift on this field by design.
-  const expectedUserFlags = userMappingFlags(runtime, requested.user);
-  const userIdx = expectedUserFlags.indexOf("--user");
-  const expectedUser =
-    userIdx >= 0 && userIdx + 1 < expectedUserFlags.length
-      ? expectedUserFlags[userIdx + 1]
-      : null;
+  // User/ownership drift. Compute the `User` form the translator would
+  // emit and compare to live `Config.User`. The rootless-Podman
+  // `UsernsMode: keep-id` mapping doesn't surface in `Config.User`, so
+  // we only fire drift when the expected form is a `User` value — that
+  // is, opt-out, rootless-Podman, and unavailable-hostUser all suppress
+  // drift on this field by design.
+  const expectedUser = userMappingFlags(runtime, requested.user).User ?? null;
   if (expectedUser !== null && expectedUser !== live.user) {
     drifted.push("user");
   }
@@ -1411,84 +1397,98 @@ export function diffContainerConfig(
   return { drifted };
 }
 
-/** Render a nanosecond duration as a runtime-accepted string, e.g. `30s`. */
-function nsToDuration(ns: number): string {
-  return `${Math.round(ns / 1e9)}s`;
+/**
+ * Parse a Docker duration string (`"30s"`, `"1m30s"`, `"500ms"`, `"2h"`)
+ * into nanoseconds for the Docker API's `Healthcheck` fields. The CLI
+ * accepted the human form directly; over the API we must convert.
+ * Returns 0 for unparseable/empty input (the API treats 0 as "use the
+ * image/runtime default").
+ */
+function durationToNanos(value: string | undefined): number {
+  if (!value) return 0;
+  const units: Record<string, number> = {
+    ns: 1,
+    us: 1_000,
+    ms: 1_000_000,
+    s: 1_000_000_000,
+    m: 60_000_000_000,
+    h: 3_600_000_000_000,
+  };
+  let total = 0;
+  let matched = false;
+  const re = /(\d+(?:\.\d+)?)\s*(ns|us|ms|s|m|h)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(value)) !== null) {
+    matched = true;
+    total += Number(m[1]) * units[m[2]];
+  }
+  return matched ? Math.round(total) : 0;
 }
 
 /**
- * Translate a healthcheck source into `--health-*` run flags.
+ * Build the dockerode `Healthcheck` create-payload fragment from a
+ * healthcheck source, or `undefined` when there's nothing to set.
  *
  * An explicit `config.healthcheck` override wins over the image's own
- * `HEALTHCHECK`. The override carries human-readable durations the runtime
- * accepts verbatim (`"30s"`); the image healthcheck carries nanosecond
- * integers (from `inspect` JSON) and is rendered with `nsToDuration`. Both
- * collapse a `CMD-SHELL` array to its single shell string and a `CMD` array
- * to a space-joined argv for the single-string `--health-cmd`.
+ * `HEALTHCHECK`. The override carries human-readable durations (`"30s"`)
+ * converted to nanoseconds via `durationToNanos`; the image healthcheck
+ * already carries nanosecond integers (from `inspect` JSON). Both
+ * collapse a `CMD-SHELL` array and a `CMD` array into the Docker API's
+ * `Test` form (`["CMD-SHELL", "<shell>"]` / `["CMD", "arg0", ...]`).
  *
- * `healthcheck === false` emits `--no-healthcheck`: Podman then reports the
- * container with no health status instead of a perpetual `starting`, which is
- * the right answer for an image with no probe and none wanted. Returns `[]`
- * when there is nothing to emit (no override and no image healthcheck), in
- * which case Podman may still park a probeless image in `starting`.
+ * `override === false` emits `Test: ["NONE"]`: the runtime then reports
+ * the container with no health status instead of parking a probeless
+ * image in a perpetual `starting`. Image healthcheck is always re-emitted
+ * explicitly because inheritance is unreliable over Podman's
+ * docker-compat create API (the container otherwise sits in `starting`).
  */
-function healthcheckArgs(
+function healthcheckPayload(
   override: HealthcheckOverride | undefined,
   imageHealthcheck: ImageHealthcheck | null | undefined,
-): string[] {
+): Docker.HealthConfig | undefined {
   if (override === false) {
-    return ["--no-healthcheck"];
+    return { Test: ["NONE"] };
   }
   if (override) {
     const [kind, ...rest] = override.test;
     const cmd = kind === "CMD-SHELL" ? rest[0] : rest.join(" ");
-    if (!cmd) return [];
-    const args = ["--health-cmd", cmd];
-    if (override.interval) args.push("--health-interval", override.interval);
-    if (override.timeout) args.push("--health-timeout", override.timeout);
+    if (!cmd) return undefined;
+    const hc: Docker.HealthConfig = { Test: [kind, cmd] };
+    if (override.interval) hc.Interval = durationToNanos(override.interval);
+    if (override.timeout) hc.Timeout = durationToNanos(override.timeout);
     if (override.startPeriod) {
-      args.push("--health-start-period", override.startPeriod);
+      hc.StartPeriod = durationToNanos(override.startPeriod);
     }
-    if (override.retries) {
-      args.push("--health-retries", String(override.retries));
-    }
-    return args;
+    if (override.retries) hc.Retries = override.retries;
+    return hc;
   }
-  // No override — fall back to the image's own HEALTHCHECK. Inheritance from
-  // the image config is not reliable across runtimes/API surfaces (over
-  // Podman's Docker-compat socket the container is created with no healthcheck
-  // and sits in `starting` forever), so we always re-emit it ourselves.
   if (imageHealthcheck) {
     const [kind, ...rest] = imageHealthcheck.test;
     const cmd = kind === "CMD-SHELL" ? rest[0] : rest.join(" ");
-    if (!cmd) return [];
-    const args = ["--health-cmd", cmd];
-    if (imageHealthcheck.intervalNs) {
-      args.push("--health-interval", nsToDuration(imageHealthcheck.intervalNs));
-    }
-    if (imageHealthcheck.timeoutNs) {
-      args.push("--health-timeout", nsToDuration(imageHealthcheck.timeoutNs));
-    }
+    if (!cmd) return undefined;
+    const hc: Docker.HealthConfig = { Test: [kind, cmd] };
+    if (imageHealthcheck.intervalNs) hc.Interval = imageHealthcheck.intervalNs;
+    if (imageHealthcheck.timeoutNs) hc.Timeout = imageHealthcheck.timeoutNs;
     if (imageHealthcheck.startPeriodNs) {
-      args.push(
-        "--health-start-period",
-        nsToDuration(imageHealthcheck.startPeriodNs),
-      );
+      hc.StartPeriod = imageHealthcheck.startPeriodNs;
     }
-    if (imageHealthcheck.retries) {
-      args.push("--health-retries", String(imageHealthcheck.retries));
-    }
-    return args;
+    if (imageHealthcheck.retries) hc.Retries = imageHealthcheck.retries;
+    return hc;
   }
-  return [];
+  return undefined;
 }
 
-function buildRunArgs(
+/**
+ * Build the dockerode `createContainer` options from a `ContainerConfig`.
+ * Replaces the former `buildRunArgs` flag-array builder; the same fields
+ * map onto the structured create payload (top-level vs `HostConfig`).
+ */
+function buildCreateOptions(
   name: string,
   config: ContainerConfig,
   runtime: ContainerRuntimeInfo,
   healthcheck?: ImageHealthcheck | null,
-): string[] {
+): Docker.ContainerCreateOptions {
   const fullName = prefixedName(name);
   const imageRef = qualifyImage(
     config.digest
@@ -1496,50 +1496,73 @@ function buildRunArgs(
       : `${config.image}:${config.tag}`,
     runtime,
   );
-  const args = ["run", "-d", "--name", fullName];
+
+  const hostConfig: Docker.HostConfig = {};
 
   // Default restart policy is `unless-stopped` so containers come back
-  // after a host reboot without the consumer plugin having to remember
-  // to opt in. The runtime daemon honours the flag at boot regardless
-  // of whether signalk-server is up yet (rootless Podman needs
-  // `loginctl enable-linger $USER`; see AGENTS.md "Container
-  // persistence across reboots"). Consumer plugins that genuinely want
-  // a one-shot container pass `restart: "no"` explicitly.
+  // after a host reboot without the consumer plugin having to opt in.
+  // The runtime daemon honours it at boot regardless of whether
+  // signalk-server is up yet (rootless Podman needs `loginctl
+  // enable-linger $USER`; see AGENTS.md "Container persistence across
+  // reboots"). Consumers wanting a one-shot pass `restart: "no"`.
   const restartPolicy = config.restart ?? "unless-stopped";
   if (restartPolicy !== "no") {
-    args.push("--restart", restartPolicy);
+    hostConfig.RestartPolicy = { Name: restartPolicy };
   }
 
   if (config.networkMode) {
-    args.push("--network", config.networkMode);
+    hostConfig.NetworkMode = config.networkMode;
   }
 
   // UID/GID alignment so files created inside the container on bind-
   // mounted host paths land owned by the host caller. Same decision
-  // matrix as `runJob` (see `userMappingFlags`). `config.user === false`
-  // opts out; the in-image UID/GID defaults to 0 when not declared.
-  args.push(...userMappingFlags(runtime, config.user));
+  // matrix as `runJob` (see `userMappingFlags`). The payload carries
+  // either `{ User }` (docker/rootful podman) or
+  // `{ HostConfig: { UsernsMode } }` (rootless podman keep-id), or `{}`.
+  const userMapping = userMappingFlags(runtime, config.user);
+  if (userMapping.HostConfig?.UsernsMode) {
+    hostConfig.UsernsMode = userMapping.HostConfig.UsernsMode;
+  }
 
+  const exposedPorts: Record<string, Record<string, never>> = {};
   if (config.ports) {
+    hostConfig.PortBindings = {};
     for (const [containerPort, hostBind] of Object.entries(config.ports)) {
-      const port = containerPort.replace(/\/tcp$/, "");
-      args.push("-p", `${hostBind}:${port}`);
+      // Keys already carrying a protocol (e.g. `53/udp`) pass through;
+      // a bare port defaults to tcp. Blindly appending `/tcp` would turn
+      // `53/udp` into the invalid `53/udp/tcp` and guarantee drift against
+      // the live PortBindings reader, which keeps the original key.
+      const key = containerPort.includes("/")
+        ? containerPort
+        : `${containerPort}/tcp`;
+      const binding = parseRequestedHostBinding(hostBind);
+      hostConfig.PortBindings[key] = [
+        {
+          HostIp: binding?.hostIp ?? "",
+          HostPort: String(binding?.hostPort ?? hostBind),
+        },
+      ];
+      exposedPorts[key] = {};
     }
   }
 
   if (config.volumes) {
+    hostConfig.Binds = [];
     for (const [containerPath, raw] of Object.entries(config.volumes)) {
-      args.push("-v", volumeArg(volumeSource(raw), containerPath, runtime));
+      hostConfig.Binds.push(
+        volumeArg(volumeSource(raw), containerPath, runtime),
+      );
     }
   }
 
+  const env: string[] = [];
   if (config.env) {
     for (const [key, value] of Object.entries(config.env)) {
-      args.push("-e", `${key}=${value}`);
+      env.push(`${key}=${value}`);
     }
   }
 
-  // Add extra hosts: user-provided + (for Docker) the
+  // Extra hosts: user-provided + (for Docker) the
   // host.containers.internal:host-gateway mapping Podman provides
   // natively. Skip the Docker injection if the user already supplied
   // their own value for the same key to avoid duplicate /etc/hosts
@@ -1550,48 +1573,56 @@ function buildRunArgs(
       config.extraHosts,
       "host.containers.internal",
     );
+  const extraHosts: string[] = [];
   if (config.extraHosts) {
     for (const [hostname, ip] of Object.entries(config.extraHosts)) {
-      args.push("--add-host", `${hostname}:${ip}`);
+      extraHosts.push(`${hostname}:${ip}`);
     }
   }
   if (runtime.runtime === "docker" && !userHasInternalOverride) {
-    args.push("--add-host", "host.containers.internal:host-gateway");
+    extraHosts.push("host.containers.internal:host-gateway");
   }
+  if (extraHosts.length > 0) hostConfig.ExtraHosts = extraHosts;
 
-  // Resource limits (--cpus, --memory, --pids-limit, etc.)
-  // Fields whose backing cgroup controller is unavailable on this
-  // runtime are silently dropped.
-  args.push(...resourceFlagsForRun(config.resources, runtime));
+  // Resource limits → HostConfig fields. Fields whose backing cgroup
+  // controller is unavailable on this runtime are silently dropped.
+  Object.assign(hostConfig, resourcePayloadForRun(config.resources, runtime));
+
+  const options: Docker.ContainerCreateOptions = {
+    name: fullName,
+    Image: imageRef,
+    HostConfig: hostConfig,
+  };
+
+  // `--user uid:gid` (docker / rootful podman) maps to the top-level
+  // `User`; rootless-podman keep-id was applied to HostConfig.UsernsMode
+  // above. Exactly one of the two is ever set.
+  if (userMapping.User) options.User = userMapping.User;
+
+  if (env.length > 0) options.Env = env;
+  if (Object.keys(exposedPorts).length > 0) options.ExposedPorts = exposedPorts;
 
   // Container labels. Informational only — not part of drift detection.
-  // Use the `io.signalk.*` namespace for cross-plugin metadata (see the
-  // `ContainerConfig.labels` docstring).
-  if (config.labels) {
-    for (const [key, value] of Object.entries(config.labels)) {
-      args.push("--label", `${key}=${value}`);
-    }
-  }
+  // dockerode takes Labels as a native object; values are NOT
+  // percent-encoded (unlike the old CLI --label path).
+  if (config.labels) options.Labels = { ...config.labels };
 
-  // Healthcheck flags. An explicit `config.healthcheck` override wins over the
-  // image's own HEALTHCHECK; see `healthcheckArgs` for why we always emit these
-  // ourselves rather than relying on image inheritance.
-  args.push(...healthcheckArgs(config.healthcheck, healthcheck));
+  // Healthcheck. An explicit override wins over the image's own
+  // HEALTHCHECK; we always emit it ourselves rather than relying on
+  // image inheritance (unreliable over the docker-compat create API).
+  const hc = healthcheckPayload(config.healthcheck, healthcheck);
+  if (hc) options.Healthcheck = hc;
 
-  args.push(imageRef);
+  if (config.command) options.Cmd = [...config.command];
 
-  if (config.command) {
-    args.push(...config.command);
-  }
-
-  return args;
+  return options;
 }
 
 /**
  * Pull function injected into `ensureRunning` for testability. Production
- * uses the module-level `pullImage` (which shells out via `execRuntimeLong`,
- * not the injectable `ExecFn`). Tests pass a stub to assert call counts
- * and simulate offline failures without touching the network.
+ * uses the module-level `pullImage` (which pulls via the dockerode client).
+ * Tests pass a stub to assert call counts and simulate offline failures
+ * without touching the network.
  */
 type PullFn = (
   runtime: ContainerRuntimeInfo,
@@ -1606,7 +1637,7 @@ export async function ensureRunning(
   debug: (msg: string) => void,
 
   options?: HealthCheckOptions,
-  exec: ExecFn = execRuntime,
+  client: ContainerClient = getClient(),
   /**
    * Prior `ContainerConfig` from the previous `ensureRunning` call within
    * this signalk-container lifetime, if any. Used to detect "unset" drift
@@ -1619,7 +1650,7 @@ export async function ensureRunning(
   _postRecreate: boolean = false,
   _pull: PullFn = pullImage,
 ): Promise<void> {
-  const state = await getContainerState(runtime, name, exec);
+  const state = await getContainerState(runtime, name, client);
   const fullName = prefixedName(name);
   const imageRef = qualifyImage(
     config.digest
@@ -1634,7 +1665,7 @@ export async function ensureRunning(
   const checkAndRecreateOnDrift = async (
     contextLabel: string,
   ): Promise<boolean> => {
-    const live = await getLiveContainerConfig(runtime, name, exec);
+    const live = await getLiveContainerConfig(runtime, name, client);
     if (!live) {
       debug(
         `Container ${fullName} ${contextLabel} (could not inspect for drift)`,
@@ -1646,14 +1677,14 @@ export async function ensureRunning(
     debug(
       `Container ${fullName} config drift detected (${drifted.join(", ")}); recreating`,
     );
-    await removeContainer(runtime, name, exec);
+    await removeContainer(runtime, name, client);
     await ensureRunning(
       runtime,
       name,
       config,
       debug,
       options,
-      exec,
+      client,
       prior,
       true,
       _pull,
@@ -1696,9 +1727,9 @@ export async function ensureRunning(
     const remoteId = await getImageDigest(
       runtime,
       qualifyImage(fullImage, runtime),
-      exec,
+      client,
     );
-    const liveId = await getImageDigest(runtime, prefixedName(name), exec);
+    const liveId = await getImageDigest(runtime, prefixedName(name), client);
     if (!remoteId || !liveId || remoteId === liveId) {
       return false;
     }
@@ -1706,14 +1737,14 @@ export async function ensureRunning(
     debug(
       `Container ${fullName} floating-tag digest drift detected (${liveId.slice(0, 19)}… → ${remoteId.slice(0, 19)}…); recreating`,
     );
-    await removeContainer(runtime, name, exec);
+    await removeContainer(runtime, name, client);
     await ensureRunning(
       runtime,
       name,
       config,
       debug,
       options,
-      exec,
+      client,
       prior,
       true,
       _pull,
@@ -1744,45 +1775,36 @@ export async function ensureRunning(
         debug(
           `Container ${fullName} unexpectedly stopped after recreate; starting without diff`,
         );
-        const startResult = await exec(runtime, ["start", fullName]);
-        if (startResult.exitCode !== 0) {
-          throw new Error(`Failed to start ${fullName}: ${startResult.stderr}`);
-        }
+        await startByFullName(client, fullName);
         return;
       }
       if (await checkAndRecreateOnDrift("stopped")) return;
       if (await checkAndRecreateOnDigestDrift()) return;
       debug(`Starting stopped container ${fullName}`);
-      const startResult = await exec(runtime, ["start", fullName]);
-      if (startResult.exitCode !== 0) {
-        throw new Error(`Failed to start ${fullName}: ${startResult.stderr}`);
-      }
+      await startByFullName(client, fullName);
       return;
     }
 
     case "missing": {
-      const hasImage = await imageExists(runtime, imageRef, exec);
+      const hasImage = await imageExists(runtime, imageRef, client);
       if (!hasImage) {
         debug(`Pulling ${imageRef}...`);
-        await pullImage(runtime, imageRef, debug);
+        await pullImage(runtime, imageRef, debug, client);
       }
 
       debug(`Creating container ${fullName}`);
-      // Re-emit the image's HEALTHCHECK as explicit run flags; relying on
-      // image inheritance leaves containers created over the Docker-compat
-      // socket stuck in `starting` with no probe. An explicit
-      // `config.healthcheck` override supersedes the image's, so skip the
-      // extra image inspect when one is present.
+      // Re-emit the image's HEALTHCHECK explicitly; relying on image
+      // inheritance leaves containers created over the docker-compat API
+      // stuck in `starting` with no probe. An explicit `config.healthcheck`
+      // override supersedes the image's, so skip the extra image inspect
+      // when one is present.
       const healthcheck =
         config.healthcheck !== undefined
           ? null
-          : await getImageHealthcheck(runtime, imageRef, exec);
-      const runArgs = buildRunArgs(name, config, runtime, healthcheck);
-      let runResult = await exec(runtime, runArgs);
-      if (
-        runResult.exitCode !== 0 &&
-        runResult.stderr.includes("already in use")
-      ) {
+          : await getImageHealthcheck(runtime, imageRef, client);
+      const createOpts = buildCreateOptions(name, config, runtime, healthcheck);
+      const created = await createAndStart(client, createOpts);
+      if (!created.ok && created.conflict) {
         // getContainerState reported "missing" because `inspect` failed,
         // but a container with this name still exists in a state inspect
         // cannot read (e.g. a corrupt storage layer after an unclean
@@ -1790,45 +1812,89 @@ export async function ensureRunning(
         debug(
           `Container ${fullName} name conflict despite "missing" state; removing stale container and retrying`,
         );
-        await removeContainer(runtime, name, exec);
-        runResult = await exec(runtime, runArgs);
+        await removeContainer(runtime, name, client);
+        const retry = await createAndStart(client, createOpts);
+        if (!retry.ok) {
+          throw new Error(`Failed to create ${fullName}: ${retry.error}`);
+        }
+        return;
       }
-      if (runResult.exitCode !== 0) {
-        throw new Error(`Failed to create ${fullName}: ${runResult.stderr}`);
+      if (!created.ok) {
+        throw new Error(`Failed to create ${fullName}: ${created.error}`);
       }
       return;
     }
   }
 }
 
+/** Start an existing container by its prefixed name, tolerating 304 (already running). */
+async function startByFullName(
+  client: ContainerClient,
+  fullName: string,
+): Promise<void> {
+  const result = await safe(() => client.getContainer(fullName).start());
+  // 304 Not Modified = already running; not an error.
+  if (
+    !result.ok &&
+    result.error.raw &&
+    /304|already started/i.test(result.error.raw)
+  ) {
+    return;
+  }
+  if (!result.ok) {
+    throw new Error(`Failed to start ${fullName}: ${result.error.userMessage}`);
+  }
+}
+
+/**
+ * Create + start a container from a create payload. Returns a discriminated
+ * result so the caller can detect the name-conflict (409) case and retry
+ * after removing the stale container.
+ */
+async function createAndStart(
+  client: ContainerClient,
+  opts: Docker.ContainerCreateOptions,
+): Promise<{ ok: true } | { ok: false; conflict: boolean; error: string }> {
+  const createResult = await safe(() => client.createContainer(opts));
+  if (!createResult.ok) {
+    const conflict =
+      createResult.error.kind === "not-found"
+        ? false
+        : /already in use|conflict|409/i.test(createResult.error.raw);
+    return { ok: false, conflict, error: createResult.error.userMessage };
+  }
+  const startResult = await safe(() => createResult.value.start());
+  if (!startResult.ok) {
+    return { ok: false, conflict: false, error: startResult.error.userMessage };
+  }
+  return { ok: true };
+}
+
 export async function startContainer(
   runtime: ContainerRuntimeInfo,
   name: string,
+  client: ContainerClient = getClient(),
 ): Promise<void> {
-  const fullName = prefixedName(name);
-  const result = await execRuntime(runtime, ["start", fullName]);
-  if (result.exitCode !== 0) {
-    throw new Error(`Failed to start ${fullName}: ${result.stderr}`);
-  }
+  await startByFullName(client, prefixedName(name));
 }
 
 async function fixVolumePermissions(
   runtime: ContainerRuntimeInfo,
   name: string,
-  exec: ExecFn = execRuntime,
+  client: ContainerClient = getClient(),
 ): Promise<void> {
   const fullName = prefixedName(name);
-  const state = await getContainerState(runtime, name, exec);
+  const state = await getContainerState(runtime, name, client);
   if (state !== "running") return;
 
-  // Get bind-mounted volume destinations inside the container
-  const inspect = await exec(runtime, [
-    "inspect",
-    "--format",
-    '{{range .Mounts}}{{if eq .Type "bind"}}{{.Destination}} {{end}}{{end}}',
-    fullName,
-  ]);
-  const mounts = inspect.stdout.trim().split(/\s+/).filter(Boolean);
+  // Get bind-mounted volume destinations inside the container.
+  const info = await safeInspect(() => client.getContainer(fullName).inspect());
+  if (info === null) return;
+  const mounts = (
+    (info.Mounts ?? []) as Array<{ Type?: string; Destination?: string }>
+  )
+    .filter((m) => m.Type === "bind" && typeof m.Destination === "string")
+    .map((m) => m.Destination as string);
   if (mounts.length === 0) return;
 
   // Grant "others" traversal+write on directories of bind mounts so the
@@ -1840,9 +1906,7 @@ async function fixVolumePermissions(
   // sensitive files the application may have written (private keys,
   // OAuth tokens, credentials), which is unsafe. Falls back silently if
   // `find` or `chmod` isn't available in the image (distroless etc.).
-  await exec(runtime, [
-    "exec",
-    fullName,
+  await runExec(client, fullName, [
     "find",
     ...mounts,
     "-type",
@@ -1858,14 +1922,17 @@ async function fixVolumePermissions(
 export async function stopContainer(
   runtime: ContainerRuntimeInfo,
   name: string,
+  client: ContainerClient = getClient(),
 ): Promise<void> {
   const fullName = prefixedName(name);
-  await fixVolumePermissions(runtime, name).catch(() => {});
-  const result = await execRuntime(runtime, ["stop", fullName]);
-  if (result.exitCode !== 0) {
-    const state = await getContainerState(runtime, name);
+  await fixVolumePermissions(runtime, name, client).catch(() => {});
+  const result = await safe(() => client.getContainer(fullName).stop());
+  if (!result.ok) {
+    const state = await getContainerState(runtime, name, client);
     if (state !== "stopped" && state !== "missing") {
-      throw new Error(`Failed to stop ${fullName}: ${result.stderr}`);
+      throw new Error(
+        `Failed to stop ${fullName}: ${result.error.userMessage}`,
+      );
     }
   }
 }
@@ -1873,72 +1940,118 @@ export async function stopContainer(
 export async function removeContainer(
   runtime: ContainerRuntimeInfo,
   name: string,
-  exec: ExecFn = execRuntime,
+  client: ContainerClient = getClient(),
 ): Promise<void> {
   const fullName = prefixedName(name);
-  await fixVolumePermissions(runtime, name, exec).catch(() => {});
-  // `-t 0`: skip the runtime's default 10s SIGTERM grace and SIGKILL
+  await fixVolumePermissions(runtime, name, client).catch(() => {});
+  // `t: 0`: skip the runtime's default 10s SIGTERM grace and SIGKILL
   // immediately. removeContainer is the destructive primitive — callers
-  // that want graceful shutdown call containers.stop() instead. Without
-  // this, a container whose PID 1 ignores SIGTERM (busybox `sleep`,
-  // `tail`, etc.) holds the stop call at ~10s, which collides with
-  // execRuntime's own 10s execFile timeout: the client gets killed
-  // mid-flight, the daemon-side stop finishes asynchronously, and the
-  // follow-up `rm -f` races against the in-flight state with empty
-  // stderr on failure. Works on both podman and docker.
-  await exec(runtime, ["stop", "-t", "0", fullName]);
-  const result = await exec(runtime, ["rm", "-f", fullName]);
-  if (result.exitCode !== 0) {
-    throw new Error(`Failed to remove ${fullName}: ${result.stderr}`);
+  // that want graceful shutdown call containers.stop() instead. A
+  // container whose PID 1 ignores SIGTERM (busybox `sleep`, `tail`, …)
+  // would otherwise hold the stop for ~10s. We tolerate stop failures
+  // (already stopped / 304 / not running) and rely on `remove({force})`
+  // as the authoritative step. Works on both podman and docker.
+  await safe(() => client.getContainer(fullName).stop({ t: 0 }));
+  const result = await safe(() =>
+    client.getContainer(fullName).remove({ force: true }),
+  );
+  // 404 = already gone; that's success for a remove.
+  if (!result.ok && result.error.kind !== "not-found") {
+    throw new Error(
+      `Failed to remove ${fullName}: ${result.error.userMessage}`,
+    );
   }
 }
 
 export async function listContainers(
   runtime: ContainerRuntimeInfo,
+  client: ContainerClient = getClient(),
 ): Promise<ContainerInfo[]> {
-  const result = await execRuntime(runtime, [
-    "ps",
-    "-a",
-    "--filter",
-    `name=${CONTAINER_PREFIX}`,
-    "--format",
-    "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.CreatedAt}}\t{{.Ports}}",
-  ]);
+  const result = await safe(() =>
+    client.listContainers({
+      all: true,
+      filters: { name: [CONTAINER_PREFIX] },
+    }),
+  );
+  if (!result.ok) return [];
 
-  if (result.exitCode !== 0 || !result.stdout) return [];
-
-  return result.stdout
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => {
-      const [name, image, status, created, ports] = line.split("\t");
-      const state: ContainerState = status.toLowerCase().startsWith("up")
-        ? "running"
-        : "stopped";
-      return {
-        name,
-        image,
-        state,
-        created: created || "",
-        ports: ports ? ports.split(",").map((p) => p.trim()) : [],
-        managedBy: "",
-      };
-    });
+  return result.value.map((c) => {
+    // dockerode `Names` carries a leading slash; strip it to match the
+    // bare names the rest of the plugin uses.
+    const name = (c.Names?.[0] ?? "").replace(/^\//, "");
+    const state: ContainerState = c.State === "running" ? "running" : "stopped";
+    const ports = (c.Ports ?? [])
+      .map((p) =>
+        p.PublicPort
+          ? `${p.IP ?? "0.0.0.0"}:${p.PublicPort}->${p.PrivatePort}/${p.Type}`
+          : `${p.PrivatePort}/${p.Type}`,
+      )
+      .filter(Boolean);
+    return {
+      name,
+      image: c.Image ?? "",
+      state,
+      created: c.Created ? String(c.Created) : "",
+      ports,
+      managedBy: "",
+    };
+  });
 }
 
 export async function pruneImages(
   runtime: ContainerRuntimeInfo,
+  client: ContainerClient = getClient(),
 ): Promise<{ imagesRemoved: number; spaceReclaimed: string }> {
-  const result = await execRuntime(runtime, ["image", "prune", "-f"]);
-  if (result.exitCode !== 0) {
-    throw new Error(`Prune failed: ${result.stderr}`);
+  const result = await safe(() => client.pruneImages());
+  if (!result.ok) {
+    throw new Error(`Prune failed: ${result.error.userMessage}`);
   }
-
-  const lines = result.stdout.split("\n").filter(Boolean);
-  const reclaimedMatch = result.stdout.match(/reclaimed\s+([\d.]+\s*\w+)/i);
+  const deleted = result.value.ImagesDeleted ?? [];
+  // ImagesDeleted lists one entry per Untagged + Deleted action; count
+  // distinct Deleted ids to match the prior "images removed" semantics.
+  const removed = deleted.filter(
+    (d) => (d as { Deleted?: string }).Deleted,
+  ).length;
   return {
-    imagesRemoved: lines.filter((l) => l.match(/^[a-f0-9]{12,}/i)).length,
-    spaceReclaimed: reclaimedMatch?.[1] ?? "0 B",
+    imagesRemoved: removed,
+    spaceReclaimed: bytesToString(result.value.SpaceReclaimed ?? 0),
+  };
+}
+
+/**
+ * Run a command inside a container via the Docker exec API and collect its
+ * combined output + exit code. dockerode's exec stream is multiplexed
+ * (8-byte frame headers); we demux it to plain text. Replaces the
+ * `podman/docker exec` CLI path.
+ */
+async function runExec(
+  client: ContainerClient,
+  fullName: string,
+  command: string[],
+): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  const container = client.getContainer(fullName);
+  const exec = await container.exec({
+    Cmd: command,
+    AttachStdout: true,
+    AttachStderr: true,
+  });
+  const stream = await exec.start({});
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  let outText = "";
+  let errText = "";
+  stdout.on("data", (c: Buffer) => (outText += c.toString("utf8")));
+  stderr.on("data", (c: Buffer) => (errText += c.toString("utf8")));
+  client.modem.demuxStream(stream, stdout, stderr);
+  await new Promise<void>((resolve) => {
+    stream.on("end", resolve);
+    stream.on("close", resolve);
+  });
+  const inspect = await exec.inspect();
+  return {
+    exitCode: inspect.ExitCode ?? 0,
+    stdout: outText,
+    stderr: errText,
   };
 }
 
@@ -1946,31 +2059,40 @@ export async function execInContainer(
   runtime: ContainerRuntimeInfo,
   name: string,
   command: string[],
+  client: ContainerClient = getClient(),
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  const fullName = prefixedName(name);
-  return execRuntime(runtime, ["exec", fullName, ...command]);
+  return runExec(client, prefixedName(name), command);
 }
 
 export async function ensureNetwork(
   runtime: ContainerRuntimeInfo,
   name: string,
+  client: ContainerClient = getClient(),
 ): Promise<void> {
-  const inspect = await execRuntime(runtime, ["network", "inspect", name]);
-  if (inspect.exitCode !== 0) {
-    const create = await execRuntime(runtime, ["network", "create", name]);
-    if (create.exitCode !== 0 && !create.stderr.includes("already exists")) {
-      throw new Error(`Failed to create network ${name}: ${create.stderr}`);
-    }
+  const existing = await safeInspect(() => client.getNetwork(name).inspect());
+  if (existing !== null) return;
+  const create = await safe(() => client.createNetwork({ Name: name }));
+  if (!create.ok && !/already exists/i.test(create.error.raw)) {
+    throw new Error(
+      `Failed to create network ${name}: ${create.error.userMessage}`,
+    );
   }
 }
 
 export async function removeNetwork(
   runtime: ContainerRuntimeInfo,
   name: string,
+  client: ContainerClient = getClient(),
 ): Promise<void> {
-  const result = await execRuntime(runtime, ["network", "rm", name]);
-  if (result.exitCode !== 0 && !result.stderr.includes("not found")) {
-    throw new Error(`Failed to remove network ${name}: ${result.stderr}`);
+  const result = await safe(() => client.getNetwork(name).remove());
+  if (
+    !result.ok &&
+    result.error.kind !== "not-found" &&
+    !/not found/i.test(result.error.raw)
+  ) {
+    throw new Error(
+      `Failed to remove network ${name}: ${result.error.userMessage}`,
+    );
   }
 }
 
@@ -1978,23 +2100,21 @@ export async function connectToNetwork(
   runtime: ContainerRuntimeInfo,
   containerName: string,
   networkName: string,
+  client: ContainerClient = getClient(),
 ): Promise<void> {
   const fullName = prefixedName(containerName);
-  const result = await execRuntime(runtime, [
-    "network",
-    "connect",
-    networkName,
-    fullName,
-  ]);
+  const result = await safe(() =>
+    client.getNetwork(networkName).connect({ Container: fullName }),
+  );
   if (
-    result.exitCode !== 0 &&
+    !result.ok &&
     // Podman: "is already connected to network"
-    !result.stderr.includes("already connected") &&
+    !/already connected/i.test(result.error.raw) &&
     // Docker: "endpoint with name ... already exists in network"
-    !result.stderr.includes("already exists in network")
+    !/already exists in network/i.test(result.error.raw)
   ) {
     throw new Error(
-      `Failed to connect ${fullName} to ${networkName}: ${result.stderr}`,
+      `Failed to connect ${fullName} to ${networkName}: ${result.error.userMessage}`,
     );
   }
 }
@@ -2003,17 +2123,15 @@ export async function disconnectFromNetwork(
   runtime: ContainerRuntimeInfo,
   containerName: string,
   networkName: string,
+  client: ContainerClient = getClient(),
 ): Promise<void> {
   const fullName = prefixedName(containerName);
-  const result = await execRuntime(runtime, [
-    "network",
-    "disconnect",
-    networkName,
-    fullName,
-  ]);
-  if (result.exitCode !== 0 && !result.stderr.includes("not connected")) {
+  const result = await safe(() =>
+    client.getNetwork(networkName).disconnect({ Container: fullName }),
+  );
+  if (!result.ok && !/not connected/i.test(result.error.raw)) {
     throw new Error(
-      `Failed to disconnect ${fullName} from ${networkName}: ${result.stderr}`,
+      `Failed to disconnect ${fullName} from ${networkName}: ${result.error.userMessage}`,
     );
   }
 }
@@ -2192,19 +2310,17 @@ async function tryInspect(
   candidateId: string,
   debug: (msg: string) => void,
   source: string,
+  client: ContainerClient = getClient(),
 ): Promise<string | null> {
   if (!candidateId) return null;
-  const result = await execRuntime(runtime, [
-    "inspect",
-    "--format",
-    "{{.Id}}",
-    candidateId,
-  ]);
-  if (result.exitCode === 0 && result.stdout.trim()) {
+  const info = await safeInspect(() =>
+    client.getContainer(candidateId).inspect(),
+  );
+  if (info?.Id) {
     return candidateId;
   }
   debug(
-    `findSelfContainerId(${source}): inspect '${candidateId}' failed (exit=${result.exitCode}): ${result.stderr.trim()}`,
+    `findSelfContainerId(${source}): inspect '${candidateId}' failed (not found)`,
   );
   return null;
 }
@@ -2244,6 +2360,7 @@ async function tryInspect(
 export async function findSelfContainerId(
   runtime: ContainerRuntimeInfo,
   debug: (msg: string) => void = () => {},
+  client: ContainerClient = getClient(),
 ): Promise<string | null> {
   // 1. Explicit override — no `inspect` validation needed since the
   //    operator chose this deliberately.  An invalid value here
@@ -2256,7 +2373,13 @@ export async function findSelfContainerId(
 
   // 2. HOSTNAME, validated by `inspect`.
   const hostname = process.env.HOSTNAME ?? "";
-  const fromHostname = await tryInspect(runtime, hostname, debug, "HOSTNAME");
+  const fromHostname = await tryInspect(
+    runtime,
+    hostname,
+    debug,
+    "HOSTNAME",
+    client,
+  );
   if (fromHostname) return fromHostname;
 
   // 3. /proc/self/cgroup, also validated by `inspect`.  Walk every
@@ -2265,7 +2388,13 @@ export async function findSelfContainerId(
   //    that doesn't actually correspond to our container can't
   //    short-circuit detection — we keep trying until one validates.
   for (const id of readSelfContainerIdsFromCgroup()) {
-    const validated = await tryInspect(runtime, id, debug, "/proc/self/cgroup");
+    const validated = await tryInspect(
+      runtime,
+      id,
+      debug,
+      "/proc/self/cgroup",
+      client,
+    );
     if (validated) return validated;
   }
 
@@ -2280,11 +2409,33 @@ export async function findSelfContainerId(
       id,
       debug,
       "/proc/self/mountinfo",
+      client,
     );
     if (validated) return validated;
   }
 
   return null;
+}
+
+/**
+ * Extract `InspectedMount[]` from a dockerode container inspect. dockerode
+ * returns `Mounts` as structured objects (`{Type, Name, Source,
+ * Destination}`), replacing the `{{range .Mounts}}...` template parse.
+ */
+function mountsFromInspect(info: {
+  Mounts?: Array<{
+    Type?: string;
+    Name?: string;
+    Source?: string;
+    Destination?: string;
+  }>;
+}): InspectedMount[] {
+  return (info.Mounts ?? []).map((m) => ({
+    type: m.Type ?? "",
+    name: m.Name ?? "",
+    source: m.Source ?? "",
+    dest: m.Destination ?? "",
+  }));
 }
 
 /**
@@ -2307,6 +2458,7 @@ export async function resolveSignalkDataSource(
   dataDir: string,
   runtime: ContainerRuntimeInfo,
   debug: (msg: string) => void = () => {},
+  client: ContainerClient = getClient(),
 ): Promise<string> {
   if (!isContainerized()) {
     // Running bare-metal: dataDir is already a host filesystem path.
@@ -2317,7 +2469,7 @@ export async function resolveSignalkDataSource(
   // SIGNALK_CONTAINER_ID -> HOSTNAME -> /proc/self/cgroup so that
   // network_mode: host deployments (where HOSTNAME is the host
   // machine name, not a container id) still resolve correctly.
-  const selfId = await findSelfContainerId(runtime, debug);
+  const selfId = await findSelfContainerId(runtime, debug, client);
   if (!selfId) {
     debug(
       `resolveSignalkDataSource: could not detect self container id; falling back to dataDir=${dataDir}`,
@@ -2325,35 +2477,19 @@ export async function resolveSignalkDataSource(
     return dataDir;
   }
 
-  const result = await execRuntime(runtime, [
-    "inspect",
-    "--format",
-    "{{range .Mounts}}{{.Type}}|{{.Name}}|{{.Source}}|{{.Destination}}\n{{end}}",
-    selfId,
-  ]);
-  if (result.exitCode !== 0) {
+  const info = await safeInspect(() => client.getContainer(selfId).inspect());
+  if (info === null) {
     debug(
-      `resolveSignalkDataSource: inspect ${selfId} failed (exit=${result.exitCode}): ${result.stderr.trim()}; falling back to dataDir=${dataDir}`,
+      `resolveSignalkDataSource: inspect ${selfId} failed; falling back to dataDir=${dataDir}`,
     );
     return dataDir;
   }
 
-  const mounts = result.stdout
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => {
-      const [type, name, source, dest] = line.split("|");
-      return { type, name, source, dest };
-    });
+  const mounts = mountsFromInspect(info);
 
   // Find the mount whose Destination is the longest prefix of dataDir
   // (handles both exact matches and parent-directory bind mounts).
-  let best: {
-    type: string;
-    name: string;
-    source: string;
-    dest: string;
-  } | null = null;
+  let best: InspectedMount | null = null;
   for (const m of mounts) {
     if (dataDir === m.dest || dataDir.startsWith(m.dest + "/")) {
       if (!best || m.dest.length > best.dest.length) {
@@ -2490,6 +2626,7 @@ export async function resolveHostPath(
   absPath: string,
   runtime: ContainerRuntimeInfo,
   debug: (msg: string) => void = () => {},
+  client: ContainerClient = getClient(),
 ): Promise<ContainerMountResolution | null> {
   if (!isContainerized()) {
     // Bare-metal: the absolute path IS the host path.  No subpath needed.
@@ -2499,7 +2636,7 @@ export async function resolveHostPath(
   // Cascade SIGNALK_CONTAINER_ID -> HOSTNAME -> /proc/self/cgroup
   // so `network_mode: host` deployments (where HOSTNAME is the host
   // machine name, not a container id) still resolve correctly.
-  const selfId = await findSelfContainerId(runtime, debug);
+  const selfId = await findSelfContainerId(runtime, debug, client);
   if (!selfId) {
     debug(
       `resolveHostPath: could not detect self container id; cannot resolve ${absPath}`,
@@ -2507,26 +2644,13 @@ export async function resolveHostPath(
     return null;
   }
 
-  const result = await execRuntime(runtime, [
-    "inspect",
-    "--format",
-    "{{range .Mounts}}{{.Type}}|{{.Name}}|{{.Source}}|{{.Destination}}\n{{end}}",
-    selfId,
-  ]);
-  if (result.exitCode !== 0) {
-    debug(
-      `resolveHostPath: inspect ${selfId} failed (exit=${result.exitCode}): ${result.stderr.trim()}`,
-    );
+  const info = await safeInspect(() => client.getContainer(selfId).inspect());
+  if (info === null) {
+    debug(`resolveHostPath: inspect ${selfId} failed`);
     return null;
   }
 
-  const mounts: InspectedMount[] = result.stdout
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => {
-      const [type, name, source, dest] = line.split("|");
-      return { type, name, source, dest };
-    });
+  const mounts = mountsFromInspect(info);
 
   const resolved = resolveHostPathFromMounts(absPath, mounts);
   if (!resolved) {
@@ -2621,13 +2745,14 @@ export async function findAvailablePort(preferred: number): Promise<number> {
 export async function resolveSignalkNetworks(
   runtime: ContainerRuntimeInfo,
   debug: (msg: string) => void = () => {},
+  client: ContainerClient = getClient(),
 ): Promise<string[] | null> {
   if (!isContainerized()) return null;
 
   // Cascade detection — see `findSelfContainerId`.  Critically this fixes
   // `network_mode: host` deployments where HOSTNAME is the host machine
   // name (e.g. "halos") rather than the container id.
-  const selfId = await findSelfContainerId(runtime, debug);
+  const selfId = await findSelfContainerId(runtime, debug, client);
   if (!selfId) {
     debug(
       "resolveSignalkNetworks: could not detect self container id, returning null",
@@ -2635,21 +2760,15 @@ export async function resolveSignalkNetworks(
     return null;
   }
 
-  const result = await execRuntime(runtime, [
-    "inspect",
-    "--format",
-    "{{range $k,$v := .NetworkSettings.Networks}}{{$k}}\n{{end}}",
-    selfId,
-  ]);
-
-  if (result.exitCode !== 0) {
+  const info = await safeInspect(() => client.getContainer(selfId).inspect());
+  if (info === null) {
     debug(
-      `resolveSignalkNetworks: inspect ${selfId} failed (exit=${result.exitCode}): ${result.stderr.trim()} — treating as bare-metal`,
+      `resolveSignalkNetworks: inspect ${selfId} failed — treating as bare-metal`,
     );
     return null;
   }
 
-  const all = result.stdout.split("\n").filter(Boolean);
+  const all = Object.keys(info.NetworkSettings?.Networks ?? {});
   // The default bridge network does not support container-name DNS
   // resolution, so exclude it along with the virtual modes.
   const userDefined = all.filter(

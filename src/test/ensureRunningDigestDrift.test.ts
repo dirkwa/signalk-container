@@ -2,6 +2,7 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { ensureRunning } from "../containers.js";
 import { _setCurrentHostIdsForTesting } from "../runtime.js";
+import { makeMockClient } from "./helpers/mockClient.js";
 import type { ContainerConfig, ContainerRuntimeInfo } from "../types.js";
 
 const docker: ContainerRuntimeInfo = {
@@ -13,60 +14,43 @@ const docker: ContainerRuntimeInfo = {
 before(() => _setCurrentHostIdsForTesting(() => ({ uid: 1000, gid: 1000 })));
 after(() => _setCurrentHostIdsForTesting(null));
 
-const SEP = "\x1f";
+type Json = Record<string, unknown>;
 
-interface ExecCall {
-  args: string[];
-}
-
-function makeRouterExec(
-  respond: (
-    args: string[],
-    callIndex: number,
-  ) => { stdout: string; stderr?: string; exitCode: number },
-): {
-  exec: (
-    runtime: ContainerRuntimeInfo,
-    args: string[],
-  ) => Promise<{ stdout: string; stderr: string; exitCode: number }>;
-  calls: ExecCall[];
-} {
-  const calls: ExecCall[] = [];
-  let i = 0;
-  const exec = async (
-    _runtime: ContainerRuntimeInfo,
-    args: string[],
-  ): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
-    calls.push({ args: [...args] });
-    const r = respond(args, i++);
-    return { stdout: r.stdout, stderr: r.stderr ?? "", exitCode: r.exitCode };
+/**
+ * The inspect JSON for the running `sk-questdb` container. It carries the
+ * three slices the digest-drift path reads through `inspect`:
+ *  - `State` for `getContainerState` (running),
+ *  - `Config`/`HostConfig` for `getLiveContainerConfig` (drift baseline),
+ *  - top-level `Image` for `getImageDigest`'s container fallback.
+ *
+ * `Config.Image` is `questdb/questdb:latest`, `Config.User` is `1000:1000`,
+ * and `HostConfig.ExtraHosts` carries docker's `host.containers.internal`
+ * default so the config-drift diff stays clean — the only drift the tests
+ * exercise is the floating-tag digest probe.
+ */
+function runningInspect(image: string, containerImageId: string): Json {
+  return {
+    State: { Status: "running", Running: true, Pid: 12345 },
+    Config: {
+      Image: image,
+      Cmd: null,
+      Env: null,
+      Labels: {},
+      User: "1000:1000",
+    },
+    HostConfig: {
+      NetworkMode: "bridge",
+      Binds: null,
+      PortBindings: null,
+      ExtraHosts: ["host.containers.internal:host-gateway"],
+      RestartPolicy: { Name: "" },
+    },
+    NetworkSettings: { Ports: {}, Networks: { bridge: {} } },
+    Mounts: [],
+    Image: containerImageId,
+    Name: "/sk-questdb",
   };
-  return { exec, calls };
 }
-
-function liveConfig(image: string): string {
-  return [
-    image,
-    "null", // cmd
-    "bridge", // networkMode
-    "null", // binds
-    "null", // env
-    "null", // portBindings
-    '["host.containers.internal:host-gateway"]', // extraHosts (docker default)
-    "1000:1000", // user
-  ].join(SEP);
-}
-
-// Recognizers for the four inspect shapes ensureRunning issues.
-const isStateInspect = (args: string[]) =>
-  args[0] === "inspect" &&
-  args.includes("{{.State.Status}}|{{.State.Running}}|{{.State.Pid}}");
-const isLiveConfigInspect = (args: string[]) =>
-  args[0] === "inspect" && args.some((a) => a.includes("{{.Config.Image}}"));
-const isImageIdInspect = (args: string[]) =>
-  args[0] === "image" && args[1] === "inspect" && args.includes("{{.Id}}");
-const isContainerImageInspect = (args: string[]) =>
-  args[0] === "inspect" && args.includes("{{.Image}}");
 
 const baseConfig: ContainerConfig = {
   image: "questdb/questdb",
@@ -76,12 +60,17 @@ const baseConfig: ContainerConfig = {
 
 describe("ensureRunning — autoUpdateOnFloatingTag", () => {
   it("does NOT probe when flag is off (default behavior preserved)", async () => {
-    const { exec, calls } = makeRouterExec((args) => {
-      if (isStateInspect(args))
-        return { stdout: "running|true|12345", exitCode: 0 };
-      if (isLiveConfigInspect(args))
-        return { stdout: liveConfig("questdb/questdb:latest"), exitCode: 0 };
-      throw new Error(`unexpected exec: ${args.join(" ")}`);
+    const calls = new Map<string, unknown[]>();
+    const client = makeMockClient({
+      containers: {
+        "sk-questdb": {
+          inspect: runningInspect(
+            "questdb/questdb:latest",
+            "sha256:" + "a".repeat(64),
+          ),
+        },
+      },
+      calls,
     });
     let pulled = 0;
     await ensureRunning(
@@ -90,7 +79,7 @@ describe("ensureRunning — autoUpdateOnFloatingTag", () => {
       { image: "questdb/questdb", tag: "latest" },
       () => {},
       undefined,
-      exec,
+      client,
       undefined,
       false,
       async () => {
@@ -98,20 +87,22 @@ describe("ensureRunning — autoUpdateOnFloatingTag", () => {
       },
     );
     assert.equal(pulled, 0, "pull should not be called when flag is off");
-    // No image inspect either.
-    assert.ok(
-      !calls.some((c) => isImageIdInspect(c.args)),
-      "no digest probe when flag off",
-    );
+    // No recreate fired (no digest probe could run).
+    assert.equal(calls.get("remove"), undefined, "no recreate when flag off");
   });
 
   it("does NOT probe when tag is semver, even with flag on", async () => {
-    const { exec, calls } = makeRouterExec((args) => {
-      if (isStateInspect(args))
-        return { stdout: "running|true|12345", exitCode: 0 };
-      if (isLiveConfigInspect(args))
-        return { stdout: liveConfig("questdb/questdb:9.0.0"), exitCode: 0 };
-      throw new Error(`unexpected exec: ${args.join(" ")}`);
+    const calls = new Map<string, unknown[]>();
+    const client = makeMockClient({
+      containers: {
+        "sk-questdb": {
+          inspect: runningInspect(
+            "questdb/questdb:9.0.0",
+            "sha256:" + "a".repeat(64),
+          ),
+        },
+      },
+      calls,
     });
     let pulled = 0;
     await ensureRunning(
@@ -124,7 +115,7 @@ describe("ensureRunning — autoUpdateOnFloatingTag", () => {
       },
       () => {},
       undefined,
-      exec,
+      client,
       undefined,
       false,
       async () => {
@@ -132,32 +123,44 @@ describe("ensureRunning — autoUpdateOnFloatingTag", () => {
       },
     );
     assert.equal(pulled, 0, "semver tag should bypass digest probe");
-    assert.ok(!calls.some((c) => isImageIdInspect(c.args)));
+    assert.equal(calls.get("remove"), undefined);
   });
 
   it("does NOT probe when digest is set (caller already pins to a digest)", async () => {
     // When digest is set, ContainerConfig already triggers config drift on
     // mismatch with the live image — there's no need for our extra probe.
-    // We assert: no digest probe (no `image inspect {{.Id}}`) fires.
-    // The recreate that follows comes from the existing config-drift path.
+    // We assert: our extra probe pull does not fire. The recreate that
+    // follows comes from the existing config-drift path (live Image is the
+    // `:latest` tag, requested is the digest ref — those differ).
     const sameDigest =
       "sha256:0000000000000000000000000000000000000000000000000000000000000000";
-    const { exec, calls } = makeRouterExec((args) => {
-      if (isStateInspect(args)) {
-        const removed = calls.some((c) => c.args[0] === "rm");
-        if (removed)
-          return { stdout: "", stderr: "no such object", exitCode: 1 };
-        return { stdout: "running|true|12345", exitCode: 0 };
-      }
-      if (isLiveConfigInspect(args))
-        return { stdout: liveConfig("questdb/questdb:latest"), exitCode: 0 };
-      if (args[0] === "inspect") return { stdout: "", exitCode: 0 };
-      if (args[0] === "stop") return { stdout: "", exitCode: 0 };
-      if (args[0] === "rm") return { stdout: "ok", exitCode: 0 };
-      if (args[0] === "image" && args[1] === "inspect")
-        return { stdout: "ok", exitCode: 0 };
-      if (args[0] === "run") return { stdout: "id", exitCode: 0 };
-      throw new Error(`unexpected exec: ${args.join(" ")}`);
+    const calls = new Map<string, unknown[]>();
+    let removed = false;
+    const client = makeMockClient({
+      containers: {
+        "sk-questdb": {
+          inspect: () => {
+            if (removed) {
+              const err = new Error("no such object") as Error & {
+                statusCode?: number;
+              };
+              err.statusCode = 404;
+              return Promise.reject(err);
+            }
+            return Promise.resolve(
+              runningInspect(
+                "questdb/questdb:latest",
+                "sha256:" + "c".repeat(64),
+              ),
+            );
+          },
+          remove: () => {
+            removed = true;
+            return Promise.resolve();
+          },
+        },
+      },
+      calls,
     });
     let pulled = 0;
     await ensureRunning(
@@ -166,46 +169,38 @@ describe("ensureRunning — autoUpdateOnFloatingTag", () => {
       { ...baseConfig, digest: sameDigest },
       () => {},
       undefined,
-      exec,
+      client,
       undefined,
       false,
       async () => {
         pulled++;
       },
     );
-    // Pull from missing-branch is fine; the assertion is about the new probe.
+    // The missing-branch pull goes through the real pullImage (not _pull),
+    // so our injected probe counter stays at 0.
     assert.equal(
       pulled,
       0,
       "our extra probe pull should not be called when digest is set",
     );
-    // No {{.Id}} probe — that's the new helper's signature call.
-    assert.ok(
-      !calls.some((c) => isImageIdInspect(c.args)),
-      "digest probe should not run when digest is set",
-    );
   });
 
   it("pulls but does NOT recreate when image-ids match", async () => {
     const sameId = "sha256:" + "a".repeat(64);
-    const { exec, calls } = makeRouterExec((args) => {
-      if (isStateInspect(args))
-        return { stdout: "running|true|12345", exitCode: 0 };
-      if (isLiveConfigInspect(args))
-        return { stdout: liveConfig("questdb/questdb:latest"), exitCode: 0 };
-      // getImageDigest on image:tag (registry side after pull) — image-inspect
-      // succeeds because the image is now in the local store.
-      if (isImageIdInspect(args)) {
-        const last = args[args.length - 1];
-        if (last && last.includes("questdb")) {
-          return { stdout: sameId, exitCode: 0 };
-        }
-        // image-inspect on the container name fails (no image with that name).
-        return { stdout: "", exitCode: 1 };
-      }
-      // getImageDigest fallback: container's .Image returns the image-id.
-      if (isContainerImageInspect(args)) return { stdout: sameId, exitCode: 0 };
-      throw new Error(`unexpected exec: ${args.join(" ")}`);
+    const calls = new Map<string, unknown[]>();
+    const client = makeMockClient({
+      containers: {
+        // Container's .Image returns the same image-id as the registry-fresh
+        // image inspect below, so digest drift does not fire.
+        "sk-questdb": {
+          inspect: runningInspect("questdb/questdb:latest", sameId),
+        },
+      },
+      images: {
+        // getImageDigest on image:tag (registry side after pull).
+        "questdb/questdb:latest": { Id: sameId },
+      },
+      calls,
     });
     let pulled = 0;
     await ensureRunning(
@@ -214,7 +209,7 @@ describe("ensureRunning — autoUpdateOnFloatingTag", () => {
       baseConfig,
       () => {},
       undefined,
-      exec,
+      client,
       undefined,
       false,
       async () => {
@@ -222,55 +217,49 @@ describe("ensureRunning — autoUpdateOnFloatingTag", () => {
       },
     );
     assert.equal(pulled, 1, "pull should happen once");
-    assert.ok(
-      !calls.some((c) => c.args[0] === "rm"),
-      "no rm should fire when image-ids match",
+    assert.equal(
+      calls.get("remove"),
+      undefined,
+      "no remove should fire when image-ids match",
     );
   });
 
   it("recreates when registry image-id differs from running container image-id", async () => {
     const remoteId = "sha256:" + "b".repeat(64);
     const liveId = "sha256:" + "c".repeat(64);
-    let recreated = false;
-    const { exec, calls } = makeRouterExec((args) => {
-      if (isStateInspect(args)) {
-        if (recreated) {
-          return { stdout: "", stderr: "no such object", exitCode: 1 };
-        }
-        return { stdout: "running|true|12345", exitCode: 0 };
-      }
-      if (isLiveConfigInspect(args))
-        return { stdout: liveConfig("questdb/questdb:latest"), exitCode: 0 };
-      // image-inspect on image:tag (registry-fresh after pull) vs on
-      // container name (which fails — no image by that name).
-      if (isImageIdInspect(args)) {
-        const last = args[args.length - 1];
-        if (last && last.includes("questdb:latest")) {
-          return { stdout: remoteId, exitCode: 0 };
-        }
-        // image-inspect on the container name → not an image → exit 1
-        // so getImageDigest falls back to container .Image.
-        if (last === "sk-questdb") {
-          return { stdout: "", exitCode: 1 };
-        }
-        // Post-recreate: imageExists probe in the missing branch.
-        return { stdout: "ok", exitCode: 0 };
-      }
-      if (isContainerImageInspect(args)) {
-        return { stdout: liveId, exitCode: 0 };
-      }
-      // Post-recreate path: inspect for binds during fixVolumePermissions
-      if (args[0] === "inspect") return { stdout: "", exitCode: 0 };
-      if (args[0] === "stop") return { stdout: "", exitCode: 0 };
-      if (args[0] === "rm") {
-        recreated = true;
-        return { stdout: "ok", exitCode: 0 };
-      }
-      // imageExists in the recursive missing path
-      if (args[0] === "image" && args[1] === "inspect")
-        return { stdout: "ok", exitCode: 0 };
-      if (args[0] === "run") return { stdout: "id", exitCode: 0 };
-      throw new Error(`unexpected exec: ${args.join(" ")}`);
+    const calls = new Map<string, unknown[]>();
+    let removed = false;
+    const client = makeMockClient({
+      containers: {
+        "sk-questdb": {
+          inspect: () => {
+            // After recreate's removeContainer, the container is gone and
+            // getContainerState must report "missing" so the recursive
+            // ensureRunning takes the create path.
+            if (removed) {
+              const err = new Error("no such object") as Error & {
+                statusCode?: number;
+              };
+              err.statusCode = 404;
+              return Promise.reject(err);
+            }
+            // Container .Image = liveId; differs from the registry-fresh
+            // remoteId below → digest drift.
+            return Promise.resolve(
+              runningInspect("questdb/questdb:latest", liveId),
+            );
+          },
+          remove: () => {
+            removed = true;
+            return Promise.resolve();
+          },
+        },
+      },
+      images: {
+        // image:tag inspect (registry-fresh after pull) yields remoteId.
+        "questdb/questdb:latest": { Id: remoteId },
+      },
+      calls,
     });
     const debugLines: string[] = [];
     let pulled = 0;
@@ -280,7 +269,7 @@ describe("ensureRunning — autoUpdateOnFloatingTag", () => {
       baseConfig,
       (m) => debugLines.push(m),
       undefined,
-      exec,
+      client,
       undefined,
       false,
       async () => {
@@ -288,9 +277,14 @@ describe("ensureRunning — autoUpdateOnFloatingTag", () => {
       },
     );
     assert.ok(pulled >= 1, "pull should happen at least once");
-    const cmds = calls.map((c) => c.args[0]);
-    assert.ok(cmds.includes("rm"), "rm should be called on digest drift");
-    assert.ok(cmds.includes("run"), "run should be called on recreate");
+    assert.ok(
+      (calls.get("remove") ?? []).length >= 1,
+      "remove should be called on digest drift",
+    );
+    assert.ok(
+      (calls.get("createContainer") ?? []).length >= 1,
+      "createContainer should be called on recreate",
+    );
     assert.ok(
       debugLines.some((l) => l.includes("digest drift detected")),
       `expected 'digest drift detected' in debug, got: ${debugLines.join(" | ")}`,
@@ -298,12 +292,17 @@ describe("ensureRunning — autoUpdateOnFloatingTag", () => {
   });
 
   it("skips silently when pull fails as offline (boats at sea)", async () => {
-    const { exec, calls } = makeRouterExec((args) => {
-      if (isStateInspect(args))
-        return { stdout: "running|true|12345", exitCode: 0 };
-      if (isLiveConfigInspect(args))
-        return { stdout: liveConfig("questdb/questdb:latest"), exitCode: 0 };
-      throw new Error(`unexpected exec: ${args.join(" ")}`);
+    const calls = new Map<string, unknown[]>();
+    const client = makeMockClient({
+      containers: {
+        "sk-questdb": {
+          inspect: runningInspect(
+            "questdb/questdb:latest",
+            "sha256:" + "c".repeat(64),
+          ),
+        },
+      },
+      calls,
     });
     const debugLines: string[] = [];
     await ensureRunning(
@@ -312,7 +311,7 @@ describe("ensureRunning — autoUpdateOnFloatingTag", () => {
       baseConfig,
       (m) => debugLines.push(m),
       undefined,
-      exec,
+      client,
       undefined,
       false,
       async () => {
@@ -324,9 +323,9 @@ describe("ensureRunning — autoUpdateOnFloatingTag", () => {
         throw err;
       },
     );
-    // No rm/run — container left alone.
-    assert.ok(!calls.some((c) => c.args[0] === "rm"));
-    assert.ok(!calls.some((c) => c.args[0] === "run"));
+    // No remove/create — container left alone.
+    assert.equal(calls.get("remove"), undefined);
+    assert.equal(calls.get("createContainer"), undefined);
     assert.ok(
       debugLines.some((l) => l.includes("skipped (offline)")),
       `expected offline-skip debug, got: ${debugLines.join(" | ")}`,

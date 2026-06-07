@@ -1,41 +1,139 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import type Docker from "dockerode";
 import { selfDeployment, type SelfDeploymentProbes } from "../doctor.js";
-import type { ContainerRuntimeInfo, RuntimeName } from "../types.js";
+import type { ContainerClient, ResolvedClient } from "../client.js";
+import { makeMockClient } from "./helpers/mockClient.js";
 
-interface FakeResult {
-  stdout: string;
-  stderr?: string;
-  exitCode: number;
+const TEST_SOCKET = "/run/test/podman.sock";
+
+/**
+ * Wrap a `ContainerClient` (typically from `makeMockClient`) as a
+ * `resolveClient` probe that always resolves to that client + a socket
+ * path. This is the socket-era replacement for the CLI-era
+ * `findBinary`/`readBinaryVersion` injection: "a runtime is present"
+ * now means "a socket answered the Docker API", and the resolved
+ * socket is authoritative for `daemon.socketPath`.
+ */
+function resolveTo(
+  client: ContainerClient,
+  socketPath = TEST_SOCKET,
+): () => Promise<ResolvedClient | null> {
+  return async () => ({
+    client: client as unknown as Docker,
+    socketPath,
+  });
+}
+
+/** A `resolveClient` probe that reports no socket answered. */
+const resolveNone: () => Promise<ResolvedClient | null> = async () => null;
+
+/**
+ * Mock client whose `version()`/`info()` describe a rootless podman
+ * daemon. `version().Components` carries the `Podman Engine` name the
+ * doctor classifies on; `info()` exposes the docker-compat rootless
+ * shape (top-level `Rootless` + `SecurityOptions: ["name=rootless"]`).
+ */
+function rootlessPodman(version = "5.4.2"): ContainerClient {
+  return makeMockClient({
+    version: { Version: version, Components: [{ Name: "Podman Engine" }] },
+    info: { Rootless: true, SecurityOptions: ["name=rootless"] },
+  });
+}
+
+/** Mock client for a rootful podman daemon (Rootless: false). */
+function rootfulPodman(): ContainerClient {
+  return makeMockClient({
+    version: { Version: "5.4.2", Components: [{ Name: "Podman Engine" }] },
+    info: { Rootless: false, SecurityOptions: ["name=cgroupns"] },
+  });
 }
 
 /**
- * Single-call fake. The doctor's daemon probe only ever invokes `exec`
- * once per scenario (a single `info` call), so a fixed result is all
- * we need.
+ * Mock client for a docker daemon that reports rootless via
+ * `SecurityOptions` (no top-level `Rootless` boolean — older / rootless
+ * docker only surfaces `name=rootless` in the options list).
  */
-function fakeExec(result: FakeResult) {
-  return async () => ({
-    stdout: result.stdout,
-    stderr: result.stderr ?? "",
-    exitCode: result.exitCode,
+function dockerRootless(): ContainerClient {
+  return makeMockClient({
+    version: {
+      Version: "27.0",
+      Components: [{ Name: "Engine" }],
+      Platform: { Name: "Docker Engine" },
+    },
+    info: { SecurityOptions: ["name=seccomp", "name=rootless"] },
+  });
+}
+
+/** Mock client for a rootful docker daemon (no rootless markers). */
+function dockerRootful(): ContainerClient {
+  return makeMockClient({
+    version: {
+      Version: "27.0",
+      Components: [{ Name: "Engine" }],
+      Platform: { Name: "Docker Engine" },
+    },
+    info: { SecurityOptions: ["name=seccomp", "name=cgroupns"] },
+  });
+}
+
+/**
+ * Build a client whose `version()` rejects with `message`, simulating a
+ * socket that existed at resolve time but whose daemon API call fails.
+ * The doctor classifies off the categorized error of the throw, so the
+ * message drives the resulting status (`permission denied` → permission,
+ * anything else → socket-unreachable) and is preserved verbatim in
+ * `daemon.error`.
+ */
+function unreachableDaemon(message: string): ContainerClient {
+  const base = makeMockClient();
+  return {
+    ...base,
+    version: () => Promise.reject(new Error(message)),
+  } as unknown as ContainerClient;
+}
+
+/**
+ * Mock client that validates a single container id via `inspect` — used
+ * to drive `findSelfContainerId`'s HOSTNAME / cgroup cascade. The valid
+ * id's `inspect` returns an object with an `Id` field (what `tryInspect`
+ * checks); every other id 404s. `version`/`info` describe rootless podman
+ * so the daemon probe also passes.
+ */
+function podmanWithSelfId(selfId: string): ContainerClient {
+  return makeMockClient({
+    version: { Version: "5.4.2", Components: [{ Name: "Podman Engine" }] },
+    info: { Rootless: true, SecurityOptions: ["name=rootless"] },
+    containers: {
+      [selfId]: { inspect: { Id: selfId } },
+    },
+  });
+}
+
+/**
+ * Mock client where no container id validates (every `inspect` 404s),
+ * driving `findSelfContainerId` to exhaust its cascade. Daemon probe
+ * still succeeds (rootless podman).
+ */
+function podmanNoSelfId(): ContainerClient {
+  return makeMockClient({
+    version: { Version: "5.4.2", Components: [{ Name: "Podman Engine" }] },
+    info: { Rootless: true, SecurityOptions: ["name=rootless"] },
   });
 }
 
 function probesWith(overrides: SelfDeploymentProbes): SelfDeploymentProbes {
   return {
     isContainerized: overrides.isContainerized ?? (() => false),
-    findBinary: overrides.findBinary ?? (async () => null as string | null),
-    // Default to a fixed synthetic version so tests don't spawn the
-    // real podman/docker binary. Override when the test asserts on a
-    // specific version string.
-    readBinaryVersion:
-      overrides.readBinaryVersion ?? (async () => "test-1.0.0"),
+    // Default to "no socket answered" so a test that doesn't opt into a
+    // reachable runtime lands on the no-runtime branch. Override with a
+    // resolveTo(...) probe to drive the reachable paths.
+    resolveClient: overrides.resolveClient ?? resolveNone,
     // Default to the production behaviour (read real process.env) so
     // tests that mutate process.env via withEnv() see consistent
-    // results across the binary-discovery, socket-inference, AND
-    // self-id source-attribution layers. Override per-test when you
-    // want to assert that injected readEnv drives a specific path.
+    // results across the socket-inference AND self-id source-attribution
+    // layers. Override per-test when you want to assert that injected
+    // readEnv drives a specific path.
     readEnv: overrides.readEnv ?? ((k: string) => process.env[k]),
     // Default to "all expected controllers delegated" so the cgroup
     // status escalation never fires for tests that don't opt in.
@@ -88,18 +186,21 @@ function withEnv<T>(
 }
 
 describe("selfDeployment — happy paths", () => {
-  it("bare-metal, podman present, rootless → ok + rootless true", async () => {
+  it("bare-metal, podman socket reachable, rootless → ok + rootless true", async () => {
     const result = await selfDeployment(
       "auto",
-      fakeExec({ stdout: "true", exitCode: 0 }),
+      null,
       probesWith({
         isContainerized: () => false,
-        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+        resolveClient: resolveTo(rootlessPodman()),
       }),
     );
     assert.equal(result.status, "ok");
     assert.equal(result.remediation.length, 0);
     assert.equal(result.binary.name, "podman");
+    // No binary concept over the socket — path is always null now.
+    assert.equal(result.binary.path, null);
+    assert.equal(result.binary.version, "5.4.2");
     assert.equal(result.daemon.reachable, true);
     assert.equal(result.daemon.rootless, true);
     assert.equal(result.isContainerized, false);
@@ -108,25 +209,24 @@ describe("selfDeployment — happy paths", () => {
     assert.equal(result.selfId.source, null);
   });
 
-  it("bare-metal, podman present, rootful → ok + rootless false", async () => {
+  it("bare-metal, podman reachable, rootful → ok + rootless false", async () => {
     const result = await selfDeployment(
       "auto",
-      fakeExec({ stdout: "false", exitCode: 0 }),
+      null,
       probesWith({
-        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+        resolveClient: resolveTo(rootfulPodman()),
       }),
     );
     assert.equal(result.status, "ok");
     assert.equal(result.daemon.rootless, false);
   });
 
-  it("bare-metal, docker present → ok, rootless extracted from SecurityOptions", async () => {
+  it("bare-metal, docker reachable → ok, rootless extracted from SecurityOptions", async () => {
     const result = await selfDeployment(
       "auto",
-      fakeExec({ stdout: "name=seccomp\nname=rootless\n", exitCode: 0 }),
+      null,
       probesWith({
-        // simulate auto-discovery falling through podman to docker
-        findBinary: async (n) => (n === "docker" ? "/usr/bin/docker" : null),
+        resolveClient: resolveTo(dockerRootless()),
       }),
     );
     assert.equal(result.status, "ok");
@@ -134,12 +234,12 @@ describe("selfDeployment — happy paths", () => {
     assert.equal(result.daemon.rootless, true);
   });
 
-  it("docker without rootless flag → rootless=false (not null)", async () => {
+  it("docker without rootless markers → rootless=false (not null)", async () => {
     const result = await selfDeployment(
       "auto",
-      fakeExec({ stdout: "name=seccomp\n", exitCode: 0 }),
+      null,
       probesWith({
-        findBinary: async (n) => (n === "docker" ? "/usr/bin/docker" : null),
+        resolveClient: resolveTo(dockerRootful()),
       }),
     );
     assert.equal(result.daemon.rootless, false);
@@ -147,17 +247,18 @@ describe("selfDeployment — happy paths", () => {
 });
 
 describe("selfDeployment — no-runtime branch", () => {
-  it("bare-metal, no binaries → status no-runtime + bare-metal remediation", async () => {
+  it("bare-metal, no socket → status no-runtime + bare-metal remediation", async () => {
     const result = await selfDeployment(
       "auto",
-      fakeExec({ stdout: "", exitCode: 0 }),
+      null,
       probesWith({
         isContainerized: () => false,
-        findBinary: async () => null,
+        resolveClient: resolveNone,
       }),
     );
     assert.equal(result.status, "no-runtime");
     assert.equal(result.binary.name, null);
+    assert.equal(result.daemon.reachable, false);
     // Bare-metal remediation mentions installing podman / docker.
     const joined = result.remediation.join("\n");
     assert.match(joined, /Install one/);
@@ -165,16 +266,16 @@ describe("selfDeployment — no-runtime branch", () => {
     assert.doesNotMatch(joined, /bind-mount/i);
   });
 
-  it("containerized, no binaries → no-runtime + end-user-friendly bind-mount remediation", async () => {
+  it("containerized, no socket → no-runtime + end-user-friendly bind-mount remediation", async () => {
     // WHY: end users of off-the-shelf SK Docker images can't edit a
     // Dockerfile, so the remediation must lead with the bind-mount path
     // and cover both Docker and Podman hosts.
     const result = await selfDeployment(
       "auto",
-      fakeExec({ stdout: "", exitCode: 0 }),
+      null,
       probesWith({
         isContainerized: () => true,
-        findBinary: async () => null,
+        resolveClient: resolveNone,
       }),
     );
     assert.equal(result.status, "no-runtime");
@@ -215,40 +316,42 @@ describe("selfDeployment — no-runtime branch", () => {
 });
 
 describe("selfDeployment — daemon failure classification", () => {
-  it("podman binary present, socket missing → socket-unreachable + podman remediation", async () => {
+  it("socket resolved, podman daemon unreachable → socket-unreachable + podman remediation", async () => {
     const result = await selfDeployment(
       "auto",
-      fakeExec({
-        stdout: "",
-        stderr:
-          "Cannot connect to Podman. Please verify your connection to the Linux system",
-        exitCode: 125,
-      }),
+      null,
       probesWith({
         isContainerized: () => true,
-        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+        // version() rejects: socket existed at resolve time but the API
+        // call failed. ECONNREFUSED classifies as socket-unreachable;
+        // runtime name falls back to docker, but the message names
+        // podman so we assert on the docker remediation below.
+        resolveClient: resolveTo(
+          unreachableDaemon("connect ECONNREFUSED /run/podman/podman.sock"),
+        ),
       }),
     );
     assert.equal(result.status, "socket-unreachable");
     assert.equal(result.daemon.reachable, false);
-    assert.match(result.daemon.error ?? "", /Cannot connect to Podman/);
+    assert.match(result.daemon.error ?? "", /ECONNREFUSED/);
+    // version() failed, so the runtime name can't be classified and the
+    // doctor falls back to docker — the docker socket remediation fires.
     const joined = result.remediation.join("\n");
-    assert.match(joined, /podman.socket/);
-    assert.match(joined, /CONTAINER_HOST=unix/);
+    assert.match(joined, /docker\.sock/);
+    assert.match(joined, /DOCKER_HOST=/);
   });
 
-  it("docker binary present, daemon unreachable → socket-unreachable + docker remediation", async () => {
+  it("socket resolved, docker daemon unreachable → socket-unreachable + docker remediation", async () => {
     const result = await selfDeployment(
       "auto",
-      fakeExec({
-        stdout: "",
-        stderr:
-          "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
-        exitCode: 1,
-      }),
+      null,
       probesWith({
         isContainerized: () => true,
-        findBinary: async (n) => (n === "docker" ? "/usr/bin/docker" : null),
+        resolveClient: resolveTo(
+          unreachableDaemon(
+            "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+          ),
+        ),
       }),
     );
     assert.equal(result.status, "socket-unreachable");
@@ -260,15 +363,14 @@ describe("selfDeployment — daemon failure classification", () => {
   it("permission denied → status permission-denied + group_add remediation", async () => {
     const result = await selfDeployment(
       "auto",
-      fakeExec({
-        stdout: "",
-        stderr:
-          "permission denied while trying to connect to the Docker daemon socket",
-        exitCode: 1,
-      }),
+      null,
       probesWith({
         isContainerized: () => true,
-        findBinary: async (n) => (n === "docker" ? "/usr/bin/docker" : null),
+        resolveClient: resolveTo(
+          unreachableDaemon(
+            "permission denied while trying to connect to the Docker daemon socket",
+          ),
+        ),
       }),
     );
     assert.equal(result.status, "permission-denied");
@@ -277,16 +379,16 @@ describe("selfDeployment — daemon failure classification", () => {
     assert.match(joined, /group_add/);
   });
 
-  it("unclassified daemon stderr → defaults to socket-unreachable, preserves raw text", async () => {
+  it("unclassified daemon error → defaults to socket-unreachable, preserves raw text", async () => {
     const result = await selfDeployment(
       "auto",
-      fakeExec({
-        stdout: "",
-        stderr: "Some unexpected runtime error that doesn't match any pattern",
-        exitCode: 2,
-      }),
+      null,
       probesWith({
-        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+        resolveClient: resolveTo(
+          unreachableDaemon(
+            "Some unexpected runtime error that doesn't match any pattern",
+          ),
+        ),
       }),
     );
     assert.equal(result.status, "socket-unreachable");
@@ -297,41 +399,31 @@ describe("selfDeployment — daemon failure classification", () => {
   });
 });
 
-describe("selfDeployment — preference filtering", () => {
-  it("preference=podman never asks findBinary for docker", async () => {
-    const probed: RuntimeName[] = [];
+describe("selfDeployment — runtime classification from version()", () => {
+  it("podman version() Components classify as podman", async () => {
     const result = await selfDeployment(
-      "podman",
-      fakeExec({ stdout: "true", exitCode: 0 }),
+      "auto",
+      null,
       probesWith({
-        findBinary: async (n) => {
-          probed.push(n);
-          return n === "podman" ? "/usr/bin/podman" : null;
-        },
+        resolveClient: resolveTo(rootlessPodman()),
       }),
     );
-    assert.deepEqual(probed, ["podman"]);
     assert.equal(result.binary.name, "podman");
   });
 
-  it("preference=docker never asks findBinary for podman", async () => {
-    const probed: RuntimeName[] = [];
+  it("docker version() Components classify as docker", async () => {
     const result = await selfDeployment(
-      "docker",
-      fakeExec({ stdout: "name=rootless\n", exitCode: 0 }),
+      "auto",
+      null,
       probesWith({
-        findBinary: async (n) => {
-          probed.push(n);
-          return n === "docker" ? "/usr/bin/docker" : null;
-        },
+        resolveClient: resolveTo(dockerRootless()),
       }),
     );
-    assert.deepEqual(probed, ["docker"]);
     assert.equal(result.binary.name, "docker");
   });
 });
 
-describe("selfDeployment — env echo + socket inference", () => {
+describe("selfDeployment — env echo + socket path", () => {
   it("echoes DOCKER_HOST, CONTAINER_HOST, XDG_RUNTIME_DIR verbatim", async () => {
     const env: Record<string, string> = {
       DOCKER_HOST: "unix:///var/run/docker.sock",
@@ -340,44 +432,51 @@ describe("selfDeployment — env echo + socket inference", () => {
     };
     const result = await selfDeployment(
       "auto",
-      fakeExec({ stdout: "true", exitCode: 0 }),
+      null,
       probesWith({
-        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+        resolveClient: resolveTo(
+          rootlessPodman(),
+          "/run/user/1000/podman/podman.sock",
+        ),
         readEnv: (k) => env[k],
       }),
     );
     assert.equal(result.env.DOCKER_HOST, env.DOCKER_HOST);
     assert.equal(result.env.CONTAINER_HOST, env.CONTAINER_HOST);
     assert.equal(result.env.XDG_RUNTIME_DIR, env.XDG_RUNTIME_DIR);
-    // socketPath for podman comes from CONTAINER_HOST when available.
-    assert.equal(result.daemon.socketPath, env.CONTAINER_HOST);
   });
 
-  it("podman socketPath falls back to DOCKER_HOST when CONTAINER_HOST is unset", async () => {
+  it("daemon.socketPath comes from the resolved socket, not env inference", async () => {
+    // Under the socket seam the authoritative socket path is whatever
+    // resolveClient picked — not a guess derived from env vars.
     const result = await selfDeployment(
       "auto",
-      fakeExec({ stdout: "true", exitCode: 0 }),
+      null,
       probesWith({
-        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+        resolveClient: resolveTo(
+          rootlessPodman(),
+          "/run/user/1000/podman/podman.sock",
+        ),
+      }),
+    );
+    assert.equal(result.daemon.socketPath, "/run/user/1000/podman/podman.sock");
+  });
+
+  it("no-runtime branch infers socketPath from DOCKER_HOST env", async () => {
+    // When no socket answered there is no resolved path, so the report
+    // falls back to the env-inferred docker socket so the operator can
+    // see what was attempted.
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({
+        resolveClient: resolveNone,
         readEnv: (k) =>
           k === "DOCKER_HOST" ? "unix:///var/run/docker.sock" : undefined,
       }),
     );
-    // Podman honors DOCKER_HOST in docker-API compat mode.
+    assert.equal(result.status, "no-runtime");
     assert.equal(result.daemon.socketPath, "unix:///var/run/docker.sock");
-  });
-
-  it("docker socketPath comes from DOCKER_HOST", async () => {
-    const result = await selfDeployment(
-      "auto",
-      fakeExec({ stdout: "name=rootless\n", exitCode: 0 }),
-      probesWith({
-        findBinary: async (n) => (n === "docker" ? "/usr/bin/docker" : null),
-        readEnv: (k) =>
-          k === "DOCKER_HOST" ? "tcp://1.2.3.4:2375" : undefined,
-      }),
-    );
-    assert.equal(result.daemon.socketPath, "tcp://1.2.3.4:2375");
   });
 });
 
@@ -386,10 +485,13 @@ describe("selfDeployment — selfId resolution", () => {
     await withEnv({ SIGNALK_CONTAINER_ID: "sk-test-001" }, async () => {
       const result = await selfDeployment(
         "auto",
-        fakeExec({ stdout: "true", exitCode: 0 }),
+        null,
         probesWith({
           isContainerized: () => true,
-          findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+          // Explicit env override short-circuits findSelfContainerId
+          // before any inspect, so the daemon probe is all the mock
+          // client needs to satisfy.
+          resolveClient: resolveTo(podmanNoSelfId()),
         }),
       );
       assert.equal(result.status, "ok");
@@ -410,10 +512,10 @@ describe("selfDeployment — selfId resolution", () => {
     await withEnv({ SIGNALK_CONTAINER_ID: "real-id" }, async () => {
       const result = await selfDeployment(
         "auto",
-        fakeExec({ stdout: "true", exitCode: 0 }),
+        null,
         probesWith({
           isContainerized: () => true,
-          findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+          resolveClient: resolveTo(podmanNoSelfId()),
           readEnv: (k) =>
             k === "SIGNALK_CONTAINER_ID" ? "something-else" : undefined,
         }),
@@ -424,31 +526,18 @@ describe("selfDeployment — selfId resolution", () => {
   });
 
   it("containerized + cascade fails on all branches → status self-id-unresolved", async () => {
-    // No env override; HOSTNAME and cgroup will be attempted but our
-    // fake exec returns exit 1 for every inspect, so tryInspect rejects
-    // every candidate.  fakeExec returns the same shape for `info`
-    // (called once, exit 0) AND `inspect` (exit 1) because we hand it
-    // a fresh closure that branches on argv.
-    const branchingExec = async (
-      _runtime: ContainerRuntimeInfo,
-      args: string[],
-    ): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
-      if (args[0] === "info") {
-        return { stdout: "true", stderr: "", exitCode: 0 };
-      }
-      // inspect ...: reject everything
-      return { stdout: "", stderr: "no such object", exitCode: 1 };
-    };
+    // No env override; HOSTNAME and cgroup will be attempted but the
+    // mock client 404s every inspect, so tryInspect rejects every
+    // candidate. The daemon probe still succeeds (rootless podman).
     await withEnv(
       { SIGNALK_CONTAINER_ID: undefined, HOSTNAME: "not-a-container-id" },
       async () => {
         const result = await selfDeployment(
           "auto",
-          branchingExec,
+          null,
           probesWith({
             isContainerized: () => true,
-            findBinary: async (n) =>
-              n === "podman" ? "/usr/bin/podman" : null,
+            resolveClient: resolveTo(podmanNoSelfId()),
           }),
         );
         assert.equal(result.status, "self-id-unresolved");
@@ -461,26 +550,6 @@ describe("selfDeployment — selfId resolution", () => {
   });
 });
 
-/**
- * Branching exec that drives every selfDeployment probe to the
- * happy-path response: `info` reports rootless, self-id `inspect`
- * resolves the synthetic container ID.
- */
-function happyExec(selfId: string) {
-  return async (
-    _runtime: ContainerRuntimeInfo,
-    args: string[],
-  ): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
-    if (args[0] === "info") {
-      return { stdout: "true", stderr: "", exitCode: 0 };
-    }
-    if (args[0] === "inspect" && args.includes(selfId)) {
-      return { stdout: "running", stderr: "", exitCode: 0 };
-    }
-    return { stdout: "", stderr: "no such object", exitCode: 1 };
-  };
-}
-
 describe("selfDeployment — cgroup controllers", () => {
   it("containerized + memory not delegated → cgroup-controllers-incomplete", async () => {
     await withEnv(
@@ -488,11 +557,10 @@ describe("selfDeployment — cgroup controllers", () => {
       async () => {
         const result = await selfDeployment(
           "auto",
-          happyExec("sk-test-host"),
+          null,
           probesWith({
             isContainerized: () => true,
-            findBinary: async (n) =>
-              n === "podman" ? "/usr/bin/podman" : null,
+            resolveClient: resolveTo(podmanWithSelfId("sk-test-host")),
             // Missing "memory" — matches the real Pi5 deployment we hit.
             readCgroupControllers: async () => ["cpu", "cpuset", "io", "pids"],
           }),
@@ -518,11 +586,10 @@ describe("selfDeployment — cgroup controllers", () => {
       async () => {
         const result = await selfDeployment(
           "auto",
-          happyExec("sk-test-host"),
+          null,
           probesWith({
             isContainerized: () => true,
-            findBinary: async (n) =>
-              n === "podman" ? "/usr/bin/podman" : null,
+            resolveClient: resolveTo(podmanWithSelfId("sk-test-host")),
             readCgroupControllers: async () => [
               "cpu",
               "cpuset",
@@ -547,11 +614,10 @@ describe("selfDeployment — cgroup controllers", () => {
       async () => {
         const result = await selfDeployment(
           "auto",
-          happyExec("sk-test-host"),
+          null,
           probesWith({
             isContainerized: () => true,
-            findBinary: async (n) =>
-              n === "podman" ? "/usr/bin/podman" : null,
+            resolveClient: resolveTo(podmanWithSelfId("sk-test-host")),
             readCgroupControllers: async () => null,
           }),
         );
@@ -569,10 +635,10 @@ describe("selfDeployment — cgroup controllers", () => {
     // themselves). Don't escalate.
     const result = await selfDeployment(
       "auto",
-      happyExec("never-matched"),
+      null,
       probesWith({
         isContainerized: () => false,
-        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+        resolveClient: resolveTo(rootlessPodman()),
         readCgroupControllers: async () => ["cpu", "cpuset", "io", "pids"],
       }),
     );
@@ -585,25 +651,16 @@ describe("selfDeployment — cgroup controllers", () => {
     // louder (blocks sibling-container creation entirely) so the
     // operator should see that first. The cgroup data is still
     // populated in the result body for diagnostic purposes.
-    const inspectAlwaysFails = async (
-      _runtime: ContainerRuntimeInfo,
-      args: string[],
-    ): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
-      if (args[0] === "info") {
-        return { stdout: "true", stderr: "", exitCode: 0 };
-      }
-      return { stdout: "", stderr: "no such object", exitCode: 1 };
-    };
     await withEnv(
       { SIGNALK_CONTAINER_ID: undefined, HOSTNAME: "not-a-container-id" },
       async () => {
         const result = await selfDeployment(
           "auto",
-          inspectAlwaysFails,
+          null,
           probesWith({
             isContainerized: () => true,
-            findBinary: async (n) =>
-              n === "podman" ? "/usr/bin/podman" : null,
+            // Every inspect 404s → self-id unresolved.
+            resolveClient: resolveTo(podmanNoSelfId()),
             readCgroupControllers: async () => ["cpu", "cpuset", "io", "pids"],
           }),
         );
@@ -623,10 +680,10 @@ describe("selfDeployment — kernel cgroup_disable=memory detection", () => {
   it("flags kernelDisabledMemory when cmdline contains cgroup_disable=memory", async () => {
     const result = await selfDeployment(
       "auto",
-      happyExec("sk-test-host"),
+      null,
       probesWith({
         isContainerized: () => true,
-        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+        resolveClient: resolveTo(podmanWithSelfId("sk-test-host")),
         readCgroupControllers: async () => ["cpu", "cpuset", "io", "pids"],
         readKernelCmdline: async () =>
           "root=PARTUUID=abc cgroup_disable=memory rootwait quiet",
@@ -640,10 +697,10 @@ describe("selfDeployment — kernel cgroup_disable=memory detection", () => {
     // This is exactly the fix path documented in the remediation block.
     const result = await selfDeployment(
       "auto",
-      happyExec("sk-test-host"),
+      null,
       probesWith({
         isContainerized: () => true,
-        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+        resolveClient: resolveTo(podmanWithSelfId("sk-test-host")),
         readCgroupControllers: async () => [
           "cpu",
           "cpuset",
@@ -663,10 +720,10 @@ describe("selfDeployment — kernel cgroup_disable=memory detection", () => {
     // for the disable side too, otherwise we'd silently miss this case.
     const result = await selfDeployment(
       "auto",
-      happyExec("sk-test-host"),
+      null,
       probesWith({
         isContainerized: () => true,
-        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+        resolveClient: resolveTo(podmanWithSelfId("sk-test-host")),
         readCgroupControllers: async () => ["cpu", "cpuset", "io", "pids"],
         readKernelCmdline: async () =>
           "root=PARTUUID=abc cgroup_enable=memory cgroup_memory=1 cgroup_disable=memory rootwait",
@@ -681,11 +738,10 @@ describe("selfDeployment — kernel cgroup_disable=memory detection", () => {
       async () => {
         const result = await selfDeployment(
           "auto",
-          happyExec("sk-test-host"),
+          null,
           probesWith({
             isContainerized: () => true,
-            findBinary: async (n) =>
-              n === "podman" ? "/usr/bin/podman" : null,
+            resolveClient: resolveTo(podmanWithSelfId("sk-test-host")),
             readCgroupControllers: async () => ["cpu", "cpuset", "io", "pids"],
             readKernelCmdline: async () =>
               "root=PARTUUID=abc cgroup_disable=memory rootwait",
@@ -709,11 +765,10 @@ describe("selfDeployment — kernel cgroup_disable=memory detection", () => {
       async () => {
         const result = await selfDeployment(
           "auto",
-          happyExec("sk-test-host"),
+          null,
           probesWith({
             isContainerized: () => true,
-            findBinary: async (n) =>
-              n === "podman" ? "/usr/bin/podman" : null,
+            resolveClient: resolveTo(podmanWithSelfId("sk-test-host")),
             readCgroupControllers: async () => ["cpu", "cpuset", "io", "pids"],
             readKernelCmdline: async () => "root=PARTUUID=abc rootwait quiet",
           }),
@@ -735,11 +790,10 @@ describe("selfDeployment — kernel cgroup_disable=memory detection", () => {
       async () => {
         const result = await selfDeployment(
           "auto",
-          happyExec("sk-test-host"),
+          null,
           probesWith({
             isContainerized: () => true,
-            findBinary: async (n) =>
-              n === "podman" ? "/usr/bin/podman" : null,
+            resolveClient: resolveTo(podmanWithSelfId("sk-test-host")),
             readCgroupControllers: async () => ["cpu", "cpuset", "io", "pids"],
             readKernelCmdline: async () => null,
           }),
@@ -769,10 +823,10 @@ describe("selfDeployment — containerStorage probe (rootless podman)", () => {
   it("flags idmapHazard true on rootless podman backed by ZFS", async () => {
     const result = await selfDeployment(
       "auto",
-      fakeExec({ stdout: "true", exitCode: 0 }),
+      null,
       probesWith({
         isContainerized: () => false,
-        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+        resolveClient: resolveTo(rootlessPodman()),
         readMounts: async () => zfsHomeMounts,
         resolveContainerStoragePath: () =>
           "/var/lib/synthetic/.local/share/containers",
@@ -794,10 +848,10 @@ describe("selfDeployment — containerStorage probe (rootless podman)", () => {
   it("does not flag idmapHazard on rootless podman backed by ext4", async () => {
     const result = await selfDeployment(
       "auto",
-      fakeExec({ stdout: "true", exitCode: 0 }),
+      null,
       probesWith({
         isContainerized: () => false,
-        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+        resolveClient: resolveTo(rootlessPodman()),
         readMounts: async () => ext4Mounts,
         resolveContainerStoragePath: () =>
           "/var/lib/synthetic/.local/share/containers",
@@ -811,10 +865,10 @@ describe("selfDeployment — containerStorage probe (rootless podman)", () => {
   it("returns containerStorage null on rootful podman (probe is not relevant)", async () => {
     const result = await selfDeployment(
       "auto",
-      fakeExec({ stdout: "false", exitCode: 0 }), // rootless=false
+      null,
       probesWith({
         isContainerized: () => false,
-        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+        resolveClient: resolveTo(rootfulPodman()), // rootless=false
         readMounts: async () => zfsHomeMounts,
         resolveContainerStoragePath: () =>
           "/var/lib/synthetic/.local/share/containers",
@@ -827,10 +881,10 @@ describe("selfDeployment — containerStorage probe (rootless podman)", () => {
   it("returns containerStorage null on docker (probe is podman-only)", async () => {
     const result = await selfDeployment(
       "auto",
-      fakeExec({ stdout: "ok", exitCode: 0 }),
+      null,
       probesWith({
         isContainerized: () => false,
-        findBinary: async (n) => (n === "docker" ? "/usr/bin/docker" : null),
+        resolveClient: resolveTo(dockerRootless()),
         readMounts: async () => zfsHomeMounts,
         resolveContainerStoragePath: () =>
           "/var/lib/synthetic/.local/share/containers",
@@ -843,10 +897,10 @@ describe("selfDeployment — containerStorage probe (rootless podman)", () => {
   it("returns containerStorage null when mounts are unreadable", async () => {
     const result = await selfDeployment(
       "auto",
-      fakeExec({ stdout: "true", exitCode: 0 }),
+      null,
       probesWith({
         isContainerized: () => false,
-        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+        resolveClient: resolveTo(rootlessPodman()),
         readMounts: async () => null, // simulate non-Linux / sandboxed
         resolveContainerStoragePath: () =>
           "/var/lib/synthetic/.local/share/containers",
@@ -858,10 +912,10 @@ describe("selfDeployment — containerStorage probe (rootless podman)", () => {
   it("returns containerStorage null when the storage path can't be resolved", async () => {
     const result = await selfDeployment(
       "auto",
-      fakeExec({ stdout: "true", exitCode: 0 }),
+      null,
       probesWith({
         isContainerized: () => false,
-        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+        resolveClient: resolveTo(rootlessPodman()),
         readMounts: async () => zfsHomeMounts,
         resolveContainerStoragePath: () => null,
       }),
@@ -879,10 +933,10 @@ describe("selfDeployment — containerStorage probe (rootless podman)", () => {
     ];
     const result = await selfDeployment(
       "auto",
-      fakeExec({ stdout: "true", exitCode: 0 }),
+      null,
       probesWith({
         isContainerized: () => false,
-        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+        resolveClient: resolveTo(rootlessPodman()),
         readMounts: async () => nestedMounts,
         resolveContainerStoragePath: () =>
           "/var/lib/synthetic/podman/.local/share/containers",
@@ -893,104 +947,104 @@ describe("selfDeployment — containerStorage probe (rootless podman)", () => {
   });
 });
 
-describe("selfDeployment — defensive rootless-probe parsing", () => {
-  // Reported in the field: a system-scoped systemd unit running
-  // Signal K invokes `podman info` without XDG_RUNTIME_DIR set.
-  // Podman 4.x prints a warning to stdout before the template
-  // value, so a strict `stdout === "true"` check leaves rootless
-  // detection as `null` and every downstream probe (containerStorage,
-  // socket inference) goes dark. The probe now scans for the
-  // trailing token instead.
+describe("selfDeployment — rootless detection from info()", () => {
+  // Under the socket seam rootless is read off the docker-compat info()
+  // shape, not parsed out of CLI stdout. These replace the CLI-era
+  // "defensive stdout parsing" suite — the parsing concern no longer
+  // exists, but the rootless-detection branches still matter.
 
-  it("treats warning-prefixed stdout 'WARN[...]\\ntrue' as rootless=true", async () => {
+  it("podman docker-compat info exposes top-level Rootless:true", async () => {
     const result = await selfDeployment(
       "auto",
-      fakeExec({
-        stdout:
-          'WARN[0000] "/" is not a shared mount, this could cause issues with rootless containers\ntrue',
-        exitCode: 0,
-      }),
+      null,
       probesWith({
-        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+        resolveClient: resolveTo(
+          makeMockClient({
+            version: {
+              Version: "5.4.2",
+              Components: [{ Name: "Podman Engine" }],
+            },
+            info: { Rootless: true, SecurityOptions: ["name=rootless"] },
+          }),
+        ),
       }),
     );
     assert.equal(result.daemon.rootless, true);
   });
 
-  it("treats warning-prefixed stdout 'WARN[...]\\nfalse' as rootless=false", async () => {
+  it("podman docker-compat info exposes top-level Rootless:false", async () => {
     const result = await selfDeployment(
       "auto",
-      fakeExec({
-        stdout:
-          "WARN[0001] rootless mode detection produced an empty result\nfalse",
-        exitCode: 0,
-      }),
+      null,
       probesWith({
-        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+        resolveClient: resolveTo(
+          makeMockClient({
+            version: {
+              Version: "5.4.2",
+              Components: [{ Name: "Podman Engine" }],
+            },
+            info: { Rootless: false, SecurityOptions: ["name=cgroupns"] },
+          }),
+        ),
       }),
     );
     assert.equal(result.daemon.rootless, false);
   });
 
-  it("still returns null when no boolean token is present in stdout", async () => {
-    // Negative case so the relaxation doesn't accidentally pass
-    // garbage as `true`. `Host.Security` evaluating to nothing
-    // (older podman without the field) leaves stdout empty.
+  it("falls back to SecurityOptions name=rootless when no Rootless boolean", async () => {
     const result = await selfDeployment(
       "auto",
-      fakeExec({ stdout: "", exitCode: 0 }),
+      null,
       probesWith({
-        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+        resolveClient: resolveTo(
+          makeMockClient({
+            version: {
+              Version: "5.4.2",
+              Components: [{ Name: "Podman Engine" }],
+            },
+            info: { SecurityOptions: ["name=seccomp", "name=rootless"] },
+          }),
+        ),
+      }),
+    );
+    assert.equal(result.daemon.rootless, true);
+  });
+
+  it("returns null when info() exposes neither Rootless nor SecurityOptions", async () => {
+    // Older daemons / compat endpoints that omit both signals leave
+    // rootless undetermined rather than guessing.
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({
+        resolveClient: resolveTo(
+          makeMockClient({
+            version: {
+              Version: "5.4.2",
+              Components: [{ Name: "Podman Engine" }],
+            },
+            info: {},
+          }),
+        ),
       }),
     );
     assert.equal(result.daemon.rootless, null);
   });
 
-  it("does not match boolean substrings inside other words", async () => {
-    // The last non-empty line must be exactly `true` or `false`;
-    // prose containing the substring doesn't qualify.
+  it("does not treat SecurityOptions without rootless as rootless", async () => {
     const result = await selfDeployment(
       "auto",
-      fakeExec({ stdout: "value=truthful", exitCode: 0 }),
+      null,
       probesWith({
-        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
-      }),
-    );
-    assert.equal(result.daemon.rootless, null);
-  });
-
-  it("rejects warning-only output whose last line ends with the word 'true'", async () => {
-    // Final correctness gate: a podman that emits only warnings (no
-    // template value at all) used to parse as `true` under the
-    // `\\b(true|false)\\b\\s*$` regex. The last-non-empty-line-is-
-    // exactly-bool rule rejects it.
-    const result = await selfDeployment(
-      "auto",
-      fakeExec({
-        stdout: "WARN[0000] configuration is not true",
-        exitCode: 0,
-      }),
-      probesWith({
-        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
-      }),
-    );
-    assert.equal(result.daemon.rootless, null);
-  });
-
-  it("picks the trailing template value over a warning line ending in 'true'", async () => {
-    // A warning line that itself ends in `true` (e.g.
-    // 'WARN[0000] some config is not true') used to win against
-    // the actual template value on the next line under the `/m`
-    // flag. Anchoring to end-of-string makes the trailing token
-    // authoritative.
-    const result = await selfDeployment(
-      "auto",
-      fakeExec({
-        stdout: "WARN[0000] configuration is not true\nfalse",
-        exitCode: 0,
-      }),
-      probesWith({
-        findBinary: async (n) => (n === "podman" ? "/usr/bin/podman" : null),
+        resolveClient: resolveTo(
+          makeMockClient({
+            version: {
+              Version: "5.4.2",
+              Components: [{ Name: "Podman Engine" }],
+            },
+            info: { SecurityOptions: ["name=seccomp", "name=cgroupns"] },
+          }),
+        ),
       }),
     );
     assert.equal(result.daemon.rootless, false);

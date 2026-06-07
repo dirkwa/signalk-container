@@ -1,40 +1,28 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { runJob } from "../../jobs.js";
+import { detectRuntime } from "../../runtime.js";
 import type { ContainerRuntimeInfo } from "../../types.js";
-
-const execFileP = promisify(execFile);
 
 /**
  * Integration test for runJob's per-stream callbacks.  Skipped when no
- * container runtime is available (CI without podman/docker, etc.) — the
- * splitter unit tests in ../makeLineSplitter.test.ts cover the line-
+ * container runtime socket is reachable (CI without podman/docker, etc.) —
+ * the splitter unit tests in ../makeLineSplitter.test.ts cover the line-
  * buffering logic without needing a runtime.
  *
  * Also skipped on Windows: GitHub-hosted Windows runners ship Docker
- * Desktop in Windows-container mode, where `docker --version` succeeds
- * but `docker pull alpine:3.19` fails with "no matching manifest for
- * windows/amd64" — alpine has no Windows variant.  These tests need a
- * Linux container daemon; no easy way to provide one on the Windows
- * runner image.
+ * Desktop in Windows-container mode, where the daemon answers but
+ * `pull alpine:3.19` fails with "no matching manifest for windows/amd64"
+ * — alpine has no Windows variant. These tests need a Linux container
+ * daemon; no easy way to provide one on the Windows runner image.
+ *
+ * `detectRuntime()` resolves AND caches the dockerode client singleton, so
+ * a non-null result also means `getClient()` works for the bare `runJob`
+ * calls below — the same path production takes.
  */
 async function hasContainerRuntime(): Promise<ContainerRuntimeInfo | null> {
   if (process.platform === "win32") return null;
-  for (const rt of ["podman", "docker"] as const) {
-    try {
-      await execFileP(rt, ["--version"], { timeout: 5000 });
-      return {
-        runtime: rt,
-        version: "test",
-        isPodmanDockerShim: false,
-      };
-    } catch {
-      // try next
-    }
-  }
-  return null;
+  return detectRuntime("auto");
 }
 
 describe("runJob per-stream callbacks", () => {

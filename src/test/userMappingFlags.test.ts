@@ -37,10 +37,9 @@ const noIds = () => null;
 
 describe("userMappingFlags", () => {
   it("emits --user host:host on Docker by default (assumes in-image root)", () => {
-    assert.deepEqual(userMappingFlags(dockerRuntime, undefined, linuxIds), [
-      "--user",
-      "1000:1000",
-    ]);
+    assert.deepEqual(userMappingFlags(dockerRuntime, undefined, linuxIds), {
+      User: "1000:1000",
+    });
   });
 
   it("emits --userns=keep-id with in-image UID 0 on rootless Podman by default", () => {
@@ -49,7 +48,7 @@ describe("userMappingFlags", () => {
     // that 0 back to the host caller's UID via the user-namespace.
     assert.deepEqual(
       userMappingFlags(podmanRootlessRuntime, undefined, linuxIds),
-      ["--userns", "keep-id:uid=0,gid=0"],
+      { HostConfig: { UsernsMode: "keep-id:uid=0,gid=0" } },
     );
   });
 
@@ -62,7 +61,7 @@ describe("userMappingFlags", () => {
         { inImageUid: 1001, inImageGid: 1001 },
         linuxIds,
       ),
-      ["--userns", "keep-id:uid=1001,gid=1001"],
+      { HostConfig: { UsernsMode: "keep-id:uid=1001,gid=1001" } },
     );
   });
 
@@ -78,7 +77,7 @@ describe("userMappingFlags", () => {
         { inImageUid: 1001, inImageGid: 1001 },
         linuxIds,
       ),
-      ["--user", "1001:1001"],
+      { User: "1001:1001" },
     );
   });
 
@@ -97,7 +96,7 @@ describe("userMappingFlags", () => {
         { inImageUid: 1000, inImageGid: 1000 },
         otherHost,
       ),
-      ["--user", "1000:1000"],
+      { User: "1000:1000" },
     );
   });
 
@@ -114,7 +113,7 @@ describe("userMappingFlags", () => {
         { inImageUid: 1000, inImageGid: 1000 },
         otherHost,
       ),
-      ["--user", "1000:1000"],
+      { User: "1000:1000" },
     );
   });
 
@@ -125,17 +124,17 @@ describe("userMappingFlags", () => {
     // hard error.
     assert.deepEqual(
       userMappingFlags(podmanUnknownRuntime, undefined, linuxIds),
-      ["--user", "1000:1000"],
+      { User: "1000:1000" },
     );
   });
 
   it("emits no flags when host UID resolver returns null (Windows)", () => {
     // process.getuid is undefined on Windows.  Docker Desktop handles
     // UID translation internally; we don't try to compete.
-    assert.deepEqual(userMappingFlags(dockerRuntime, undefined, noIds), []);
+    assert.deepEqual(userMappingFlags(dockerRuntime, undefined, noIds), {});
     assert.deepEqual(
       userMappingFlags(podmanRootlessRuntime, undefined, noIds),
-      [],
+      {},
     );
   });
 
@@ -143,10 +142,10 @@ describe("userMappingFlags", () => {
     // Debug / test-only path — disables UID alignment entirely.  The
     // in-container process runs as whatever the image's USER says,
     // and bind-mount writes land owned by whatever that maps to.
-    assert.deepEqual(userMappingFlags(dockerRuntime, false, linuxIds), []);
+    assert.deepEqual(userMappingFlags(dockerRuntime, false, linuxIds), {});
     assert.deepEqual(
       userMappingFlags(podmanRootlessRuntime, false, linuxIds),
-      [],
+      {},
     );
   });
 
@@ -156,16 +155,15 @@ describe("userMappingFlags", () => {
     // Podman; GID defaults to 0.
     assert.deepEqual(
       userMappingFlags(podmanRootlessRuntime, { inImageUid: 1001 }, linuxIds),
-      ["--userns", "keep-id:uid=1001,gid=0"],
+      { HostConfig: { UsernsMode: "keep-id:uid=1001,gid=0" } },
     );
   });
 
   it("respects the host UID resolver — different UIDs produce different flags", () => {
     const root = () => ({ uid: 0, gid: 0 });
-    assert.deepEqual(userMappingFlags(dockerRuntime, undefined, root), [
-      "--user",
-      "0:0",
-    ]);
+    assert.deepEqual(userMappingFlags(dockerRuntime, undefined, root), {
+      User: "0:0",
+    });
   });
 
   describe("input validation", () => {
@@ -243,7 +241,7 @@ describe("userMappingFlags", () => {
       try {
         assert.deepEqual(
           userMappingFlags(podmanRootlessRuntime, undefined, linuxIds),
-          [],
+          {},
         );
       } finally {
         setDisableUserns(false);
@@ -263,7 +261,7 @@ describe("userMappingFlags", () => {
             { inImageUid: 1001, inImageGid: 1001 },
             linuxIds,
           ),
-          [],
+          {},
         );
       } finally {
         setDisableUserns(false);
@@ -277,7 +275,7 @@ describe("userMappingFlags", () => {
       try {
         assert.deepEqual(
           userMappingFlags(podmanRootfulRuntime, undefined, linuxIds),
-          ["--user", "1000:1000"],
+          { User: "1000:1000" },
         );
       } finally {
         setDisableUserns(false);
@@ -288,10 +286,9 @@ describe("userMappingFlags", () => {
       // Docker is unaffected regardless of the toggle.
       setDisableUserns(true);
       try {
-        assert.deepEqual(userMappingFlags(dockerRuntime, undefined, linuxIds), [
-          "--user",
-          "1000:1000",
-        ]);
+        assert.deepEqual(userMappingFlags(dockerRuntime, undefined, linuxIds), {
+          User: "1000:1000",
+        });
       } finally {
         setDisableUserns(false);
       }
@@ -302,7 +299,7 @@ describe("userMappingFlags", () => {
       try {
         assert.deepEqual(
           userMappingFlags(podmanRootlessRuntime, false, linuxIds),
-          [],
+          {},
         );
       } finally {
         setDisableUserns(false);
@@ -319,7 +316,7 @@ describe("userMappingFlags", () => {
         setDisableUserns(false);
         assert.deepEqual(
           userMappingFlags(podmanRootlessRuntime, undefined, linuxIds),
-          ["--userns", "keep-id:uid=0,gid=0"],
+          { HostConfig: { UsernsMode: "keep-id:uid=0,gid=0" } },
         );
       } finally {
         setDisableUserns(false);
@@ -340,7 +337,7 @@ describe("userMappingFlags", () => {
         assert.equal(isDisableUserns(), true);
         assert.deepEqual(
           userMappingFlags(podmanRootlessRuntime, undefined, linuxIds),
-          [],
+          {},
           "rootless podman emits no userns flag while toggle is on",
         );
 
@@ -352,7 +349,7 @@ describe("userMappingFlags", () => {
         // default). Must NOT inherit the previous run's "true".
         assert.deepEqual(
           userMappingFlags(podmanRootlessRuntime, undefined, linuxIds),
-          ["--userns", "keep-id:uid=0,gid=0"],
+          { HostConfig: { UsernsMode: "keep-id:uid=0,gid=0" } },
           "second start with default config restores keep-id",
         );
       } finally {

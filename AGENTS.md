@@ -5,10 +5,11 @@ Shared container runtime management (Podman/Docker) for Signal K plugins. This p
 Key components:
 
 - **`src/index.ts`** — Signal K plugin entrypoint. Wires the runtime probe, exposes the `ContainerManagerApi` on `globalThis`, owns the REST endpoints (`/plugins/signalk-container/api/...`) and the React config panel mount.
-- **`src/containers.ts`** — Thin runtime layer. Pure functions over `execRuntime` for lifecycle (`ensureRunning`, `removeContainer`, `getContainerState`), config-drift detection (`getLiveContainerConfig`, `diffContainerConfig`), and live-state probes (`getLiveResources`, `getActualPortBindings`).
+- **`src/client.ts`** — The dockerode socket client. Owns socket selection (`resolveClient`), the shared `Docker` singleton (`getClient`), the `ContainerClient` injection interface, the `safe()`/`safeInspect()` error-normalizing wrappers, and the log-stream demux helpers. Every runtime call in the plugin goes through here.
+- **`src/containers.ts`** — Thin runtime layer over the dockerode `ContainerClient` for lifecycle (`ensureRunning`, `removeContainer`, `getContainerState`), config-drift detection (`getLiveContainerConfig`, `diffContainerConfig`), and live-state probes (`getLiveResources`, `getActualPortBindings`).
 - **`src/jobs.ts`** — One-shot helper containers via `runJob`. Used by chart-provider and similar plugins that need short-lived workers (GDAL, tippecanoe, etc.).
 - **`src/resources.ts`** — cgroup-limit flag emission + live-update path via `podman/docker update`. The "Bug D" precedent for diff-on-already-running lives here.
-- **`src/runtime.ts`** — Runtime detection (`podman` vs `docker`), version probing, `execRuntime`/`execRuntimeLong` dispatch, `isContainerized()` self-detection.
+- **`src/runtime.ts`** — Runtime detection over the socket (`detectRuntime` resolves a socket via `client.ts`, classifies `podman` vs `docker` from `version()`, reads `isRootless`/`cgroupControllers`), the `userMappingFlags` UID-mapping decision matrix, and `isContainerized()` self-detection.
 - **`src/updates/`** — Centralized image-update detection (digest drift for floating tags, version comparison for semver). Used by all consumer plugins via `containers.updates.register(...)`.
 - **`src/configpanel/`** — React config panel source. Built with Vite + `@module-federation/vite` (see `vite.config.ts`); build artifacts land in `public/`, served via Module Federation into the Signal K Admin UI.
 
@@ -42,7 +43,7 @@ Do not add error handling, fallbacks, or validation for scenarios that cannot ha
   - `npm run test:integration` — integration only (`dist/test/integration/*.test.js`). Requires podman or docker; tests still self-skip on Windows and when no runtime is found.
   - `npm run test:all` — both. The pre-PR full sweep on a dev box.
 - All new code requires tests. Test behavior at the function boundary, not internal control flow.
-- Inject `exec: ExecFn = execRuntime` rather than calling the runtime directly. Tests stub via `fakeExec`. See `src/test/getLiveResources.test.ts` for the canonical pattern: synthetic `{stdout, stderr, exitCode}`, no real podman invocations.
+- Inject `client: ContainerClient = getClient()` rather than calling dockerode directly. Tests stub via `makeMockClient(spec)` from `src/test/helpers/mockClient.ts`. See `src/test/getLiveResources.test.ts` for the canonical pattern: a mock whose `getContainer().inspect()` returns the JSON object under test, no real podman/docker invocations.
 - Container-integration tests (those that actually pull `alpine:3.19`) live under `src/test/integration/` and gate on `hasContainerRuntime()` which returns `null` on Windows. Do not add new tests that pull real Linux images without putting them under `src/test/integration/` AND gating on the helper.
 - All tests must pass on every commit. Run `npm run build:all:integration` (= `build && test:all`) locally before opening a PR; CI's `npm test` covers the unit half and you cover the integration half.
 
@@ -70,11 +71,10 @@ The injection is in `defaultHomeForConfigRoot()` (`src/containers.ts`) and only 
 
 ### Container log streaming
 
-Three-layer structure (`src/runtime.ts` → `src/containers.ts` → `src/log-stream-broker.ts`):
+Two-layer structure (`src/containers.ts` → `src/log-stream-broker.ts`):
 
-1. `spawnRuntimeStreaming` (`src/runtime.ts`) — primitive that wraps `child_process.spawn(podman/docker, args)` with a `stop()` handle and a `makeLineSplitter`-fed `onLine` callback. Used for any long-running runtime command that needs streaming output; `tailContainerLogs` is its only current caller. Returns synchronously with a stop-handle — unlike `execRuntimeLong` which awaits process exit.
-2. `tailContainerLogs` (`src/containers.ts`) — thin helper that composes `["logs", "-f", "--tail", N, prefixedName(name)]` and delegates to `spawnRuntimeStreaming`. `getContainerLogs` is the one-shot sibling (no `-f`, returns a `string[]`).
-3. `LogStreamBroker` (`src/log-stream-broker.ts`) — per-container fan-out. First subscribe spawns the tail; last unsubscribe stops it. On tail exit with subscribers still attached the broker auto-respawns with exponential backoff (constants `RESPAWN_DELAY_MS` / `MAX_RESPAWN_DELAY_MS`); a delivered line resets the counter. This is what lets SSE-only consumers recover from auto-recreate or daemon glitches without waiting for a fresh subscribe call. Brokers are keyed by container name on the wrapper and auto-recreate cancels the prior subscription before installing a new one.
+1. `tailContainerLogs` (`src/containers.ts`) — calls `getContainer(name).logs({ follow: true, stdout: true, stderr: true, tail: N })` and pipes the stream through `client.modem.demuxStream` into a `makeLineSplitter`-fed `onLine` callback. Containers run without a TTY (the default), so the log stream is **multiplexed** — every stdout/stderr chunk carries an 8-byte frame header; reading raw bytes leaks that header as binary garbage into rendered lines, so demuxing is mandatory. Returns a `StreamingProcessHandle` whose `stop()` calls `stream.destroy()`. The handle's `pid` is always `undefined` (a socket stream has no process); the broker checks `spawnFailed` instead. `getContainerLogs` is the one-shot sibling (`follow: false`) — it ALSO demuxes (the API returns a multiplexed Buffer; the CLI used to pre-demux for us).
+2. `LogStreamBroker` (`src/log-stream-broker.ts`) — per-container fan-out. First subscribe opens the tail; last unsubscribe destroys it. On stream end/error with subscribers still attached the broker auto-respawns with exponential backoff (constants `RESPAWN_DELAY_MS` / `MAX_RESPAWN_DELAY_MS`); a delivered line resets the counter. A synchronously-failed tail is detected via `handle.spawnFailed` (NOT `pid === undefined` — dockerode handles never carry a pid). This is what lets SSE-only consumers recover from auto-recreate or daemon glitches without waiting for a fresh subscribe call. Brokers are keyed by container name on the wrapper and auto-recreate cancels the prior subscription before installing a new one.
 
 Consumer surfaces:
 
@@ -88,21 +88,15 @@ Lifecycle:
 - `safeInvokeContainerLog` mirrors `safeInvokeVolumeIssue` — sync throws and async rejections from plugin handlers route to `app.error` and never propagate.
 - Combined stdout+stderr (matches `podman logs <name>` semantics). Per-stream separation is out of scope for v1.
 
-See `src/runtime.ts`, `src/containers.ts`, `src/log-stream-broker.ts`, and the tests in `src/test/` for exact timing and lifecycle mechanics.
+See `src/client.ts`, `src/containers.ts`, `src/log-stream-broker.ts`, and the tests in `src/test/` for exact timing and lifecycle mechanics.
 
 ### Podman image qualification
 
-`qualifyImage("foo/bar:tag", podmanRuntime)` prefixes `docker.io/` when needed (podman requires fully qualified names unless `unqualified-search-registries` is set). Docker passes through. Use this everywhere we feed an image string to a runtime command.
+`qualifyImage("foo/bar:tag", podmanRuntime)` prefixes `docker.io/` when needed (podman requires fully qualified names unless `unqualified-search-registries` is set; this holds over the API too). Docker passes through. Use this everywhere we feed an image string to a dockerode call.
 
 ### Inspect-format diff pattern
 
-When we need to read live container state, we use a single `inspect --format` call with a pipe-delimited Go-template format string:
-
-```gotemplate
-{{.HostConfig.NanoCpus}}|{{.HostConfig.Memory}}|...
-```
-
-This works uniformly across podman and docker, parses cheaply, and avoids the JSON-shape divergence between the two runtimes. `getLiveResources` and `getLiveContainerConfig` are the canonical examples. Do not introduce new live-state probes that parse full `inspect` JSON output.
+When we need to read live container state, call `getContainer(name).inspect()` once (through `safeInspect`, which returns `null` on a 404 instead of throwing) and read the JSON fields directly. dockerode returns the same field shapes on podman and docker (verified live: `HostConfig.NanoCpus`, `HostConfig.Memory`, `NetworkSettings.Ports`, `Mounts[].{Type,Source,Destination}`, `Config.{Image,Cmd,Env,Healthcheck}`, etc.), so there's no Go-template parsing and no podman-vs-docker text divergence to guard against. `getLiveResources` and `getLiveContainerConfig` are the canonical examples. `diffContainerConfig` is a pure function over those inspect-derived values — keep new live-state probes reading inspect JSON directly so the diff stays uniform across runtimes.
 
 ### networkMode canonicalization
 
@@ -110,13 +104,13 @@ Docker reports `HostConfig.NetworkMode` as `"default"` or `"bridge"` when no `--
 
 ### `disableUserNamespaceRemap` (rootless-Podman + idmap-incompatible storage)
 
-Some filesystems (ZFS is the canonical case) cannot be id-mapped by the kernel. `--userns=keep-id` either fails outright on container create or triggers Podman's `storage-chown-by-maps` sweep, which is catastrophically slow on CoW metadata. The README's user-facing section documents the host-side primary fix (storage driver swap to `fuse-overlayfs`); the plugin-side escape hatch below covers the case where the operator cannot or will not change storage drivers.
+Some filesystems (ZFS is the canonical case) cannot be id-mapped by the kernel. `HostConfig.UsernsMode: "keep-id"` either fails outright on container create or triggers Podman's `storage-chown-by-maps` sweep, which is catastrophically slow on CoW metadata. The README's user-facing section documents the host-side primary fix (storage driver swap to `fuse-overlayfs`); the plugin-side escape hatch below covers the case where the operator cannot or will not change storage drivers.
 
 Invariants:
 
 - `disableUserNamespaceRemap` is a plugin-config boolean; default `false` preserves the historical `keep-id` behaviour for every existing deployment.
-- The flag affects **only** the rootless-Podman branch of `userMappingFlags()`. Docker and rootful-Podman paths are untouched because they never emit `keep-id` to begin with.
-- When the flag is active, `userMappingFlags()` returns `[]` for rootless-Podman — no `--userns` and no `--user`. The default rootless mapping (in-image UID 0 → host caller's UID) then drives bind-mount ownership for root-by-default images. Non-root images lose host-caller ownership; that's the documented trade-off.
+- The flag affects **only** the rootless-Podman branch of `userMappingFlags()`. Docker and rootful-Podman paths are untouched because they use `User` (a `--user`-equivalent), never `keep-id`. (Aside: `keep-id` is meaningless under rootful Podman — there is no user namespace to map into, so podman silently no-ops it and runs as in-image root. We use `User` on the rootful branches precisely to get caller ownership; this is why accurate `isRootless` detection is correctness-critical, since a misread would silently produce root-owned bind-mount files rather than failing loudly.)
+- `userMappingFlags()` returns a create-payload fragment, not CLI flags: `{ HostConfig: { UsernsMode: "keep-id:uid=N,gid=N" } }` for rootless podman, `{ User: "N:N" }` for docker/rootful podman, `{}` for opt-out. When `disableUserNamespaceRemap` is active it returns `{}` for rootless-Podman — no `UsernsMode` and no `User`. The default rootless mapping (in-image UID 0 → host caller's UID) then drives bind-mount ownership for root-by-default images. Non-root images lose host-caller ownership; that's the documented trade-off.
 - The toggle lives in module state in `src/runtime.ts`, set by `setDisableUserns()` from `plugin.start()` and reset to `false` in `plugin.stop()`. Stop/start cycles must not strand a previous run's setting.
 - Drift detection in `ensureRunning` composes through `userMappingFlags()`, so the toggle is automatically reflected; never add a parallel codepath that re-derives the same decision.
 
@@ -156,17 +150,14 @@ When a consumer plugin sets a restart policy explicitly, it overrides the defaul
 
 ### In-container signalk-server + host-side rootless Podman
 
-The signalk-universal-installer's deployment runs signalk-server itself as a Podman container, with the host's rootless podman socket bind-mounted to `/var/run/docker.sock` inside. The in-container side ships both `podman` and `docker` CLIs (the latter is what consumer plugins effectively reach, since the bind socket is on the docker path). This topology has five sharp edges the runtime detection layer must handle. Future contributors maintaining the runtime layer should know about them as one story:
+The signalk-universal-installer's deployment runs signalk-server itself as a Podman container, with the host's rootless podman socket bind-mounted to `/var/run/docker.sock` inside. signalk-container talks to that socket directly via dockerode — **the socket IS the channel to the host daemon**, so there is no CLI binary, no client-side flag validation, and no `podman --remote` dance. That collapses most of the sharp edges the CLI era had to work around (the docker-shim reclassification, `--remote --url` promotion, `cleanEnv`/`XDG_RUNTIME_DIR` backfill, and `runtimeCmd` binary-flipping are all gone). Two edges remain, in changed form:
 
-| Concern                                                                                                                                                                                                                                                                                                                                                                          | Code                                                                                                                                                                 |
-| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Rootless Podman daemon discovery under system-scoped systemd units (no `XDG_RUNTIME_DIR` in the inherited env), without breaking the in-container case where `/run/user` doesn't exist at all (podman `lstat`s `XDG_RUNTIME_DIR` at startup before honouring `--url <socket>`, so pointing it at a missing directory makes every `podman --remote` probe fail before it can run) | `cleanEnv()` in `runtime.ts` backfills `XDG_RUNTIME_DIR=/run/user/<uid>` only when that path exists                                                                  |
-| Detecting that the in-container `docker` CLI is actually talking to a host-side podman daemon (default `docker --version` doesn't reveal it)                                                                                                                                                                                                                                     | `tryRuntime()` probes `docker info --format {{.DefaultRuntime}}` — `crun` → reclassify to podman                                                                     |
-| Keeping podman-flag semantics (`--userns=keep-id:uid=X,gid=Y`, etc.) once we've reclassified a docker-shim to podman — the in-container docker CLI client-validates podman-specific values and rejects them before forwarding to the daemon                                                                                                                                      | `tryRuntime()` promotes the shim to `podman --remote --url <socket>` when the bind-mounted socket is reachable; `runtimeCmd()` then flips the binary back to podman  |
-| Finding our own container id when HOSTNAME is empty, cgroup is `0::/`, and `Network=host` makes `/etc/hostname` return the host machine name                                                                                                                                                                                                                                     | `parseSelfContainerIdsFromMountinfo()` matches the 64-hex id the runtime stamps into bindfs source paths (`/etc/hostname`, `/etc/resolv.conf`, `/run/.containerenv`) |
-| Detecting rootless mode when `podman info --format {{.Host.Security.Rootless}}` fails (in-container podman can't reach a daemon at its default socket)                                                                                                                                                                                                                           | `probeRootless()` falls back to `docker info --format {{.SecurityOptions}}` and looks for the `name=rootless` token                                                  |
+| Concern                                                                                                                                      | Code                                                                                                                                                                                                                               |
+| -------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Finding our own container id when HOSTNAME is empty, cgroup is `0::/`, and `Network=host` makes `/etc/hostname` return the host machine name | `parseSelfContainerIdsFromMountinfo()` matches the 64-hex id the runtime stamps into bindfs source paths (`/etc/hostname`, `/etc/resolv.conf`, `/run/.containerenv`); each candidate is validated via `getContainer(id).inspect()` |
+| Detecting rootless mode over the socket (dockerode reaches podman's docker-compat `/info`, which does NOT expose `host.security.rootless`)   | `rootlessFromInfo()` in `runtime.ts` reads the compat shape: the top-level `Rootless` boolean, falling back to `SecurityOptions` containing `name=rootless`                                                                        |
 
-The thread that runs through all five: **the in-container signalk-server has no native podman channel back to the host daemon**. Every detection that worked on bare-metal has to be re-derived from artefacts that survive the bind-mount-only topology — env vars set by the runtime, mountinfo paths, the docker compat API, the bind-mounted socket via `podman --remote --url`. When debugging future "signalk-container thinks we're not rootless" / "thinks we're not in a container" / "can't find our own id" / "consumer plugin still failing on `--userns=keep-id`" reports, check whether you're in this deployment shape first.
+When debugging "signalk-container thinks we're not rootless" / "can't find our own id" reports, check whether you're in this deployment shape first — and remember that under the socket the cgroup-controller view comes from the kernel FS (`/sys/fs/cgroup/cgroup.controllers`), not `info()`, because the compat endpoint doesn't expose `CgroupControllers`.
 
 ## Workflow Conventions
 

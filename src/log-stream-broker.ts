@@ -110,7 +110,11 @@ export function createLogStreamBroker(
   const respawnDelayMs = options?.respawnDelayMs ?? RESPAWN_DELAY_MS;
 
   const subscribers = new Set<LogSubscriber>();
-  let tail: { stop: () => void; pid: number | undefined } | null = null;
+  let tail: {
+    stop: () => void;
+    pid: number | undefined;
+    spawnFailed?: boolean;
+  } | null = null;
   let closed = false;
   // Pending auto-respawn timer.  Tracked so `close()` and `stopTail()`
   // can cancel it cleanly.
@@ -186,15 +190,16 @@ export function createLogStreamBroker(
         scheduleRespawn();
       },
     });
-    // `spawnRuntimeStreaming` returns a no-op handle with
-    // `pid === undefined` when `spawn()` fails synchronously (bad
-    // binary, ENOENT, etc.).  No child process exists, so `onExit`
-    // will NEVER fire — caching this handle would wedge the broker
-    // forever (subscribers attached, no live tail, no respawn).
-    // Treat it as a failed spawn: surface via onTailError (already
-    // done synchronously by spawnRuntimeStreaming) and schedule a
-    // backoff-respawn instead of storing the dead handle.
-    if (thisTail.pid === undefined) {
+    // The dockerode log path establishes its stream asynchronously: the
+    // handle returns immediately with `spawnFailed: false`, and on a
+    // failure to open the stream it both flips `spawnFailed` true AND
+    // fires `onExit(null)` — so the onExit handler above already drives
+    // the backoff-respawn. `spawnFailed` is checked here only to cover a
+    // synchronous-failure handle (it carries no live stream and no future
+    // onExit), so we schedule a respawn instead of caching a dead handle.
+    // Note: do NOT gate on `pid` — dockerode stream handles never carry a
+    // pid, so a `pid === undefined` check would treat every tail as failed.
+    if (thisTail.spawnFailed) {
       scheduleRespawn();
       return;
     }

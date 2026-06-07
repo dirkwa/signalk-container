@@ -1,8 +1,10 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { getImageHealthcheck, ensureRunning } from "../containers.js";
-import { _setCurrentHostIdsForTesting, type ExecResult } from "../runtime.js";
+import { _setCurrentHostIdsForTesting } from "../runtime.js";
 import type { ContainerConfig, ContainerRuntimeInfo } from "../types.js";
+import type Docker from "dockerode";
+import { makeMockClient } from "./helpers/mockClient.js";
 
 const podman: ContainerRuntimeInfo = {
   runtime: "podman",
@@ -20,22 +22,25 @@ const docker: ContainerRuntimeInfo = {
 before(() => _setCurrentHostIdsForTesting(() => ({ uid: 1000, gid: 1000 })));
 after(() => _setCurrentHostIdsForTesting(null));
 
-const HEALTHCHECK_JSON = JSON.stringify({
+// The nanosecond-integer shape dockerode returns under `Config.Healthcheck`
+// on both podman and docker (verified live).
+const IMAGE_HEALTHCHECK = {
   Test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:6502/signalk"],
   Interval: 30_000_000_000,
   Timeout: 5_000_000_000,
   StartPeriod: 15_000_000_000,
   Retries: 3,
-});
+};
 
 describe("getImageHealthcheck", () => {
   it("parses the image's healthcheck from inspect JSON", async () => {
-    const exec = async (): Promise<ExecResult> => ({
-      stdout: HEALTHCHECK_JSON,
-      stderr: "",
-      exitCode: 0,
+    const client = makeMockClient({
+      images: {
+        // podman qualifies a registry-bearing ref unchanged.
+        "ghcr.io/x/y:tag": { Config: { Healthcheck: IMAGE_HEALTHCHECK } },
+      },
     });
-    const hc = await getImageHealthcheck(podman, "ghcr.io/x/y:tag", exec);
+    const hc = await getImageHealthcheck(podman, "ghcr.io/x/y:tag", client);
     assert.deepEqual(hc, {
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:6502/signalk"],
       intervalNs: 30_000_000_000,
@@ -46,156 +51,131 @@ describe("getImageHealthcheck", () => {
   });
 
   it("returns null when the image declares no healthcheck", async () => {
-    const exec = async (): Promise<ExecResult> => ({
-      stdout: "null",
-      stderr: "",
-      exitCode: 0,
+    const client = makeMockClient({
+      // podman prefixes a bare name with docker.io/.
+      images: { "docker.io/img": { Config: {} } },
     });
-    assert.equal(await getImageHealthcheck(podman, "img", exec), null);
+    assert.equal(await getImageHealthcheck(podman, "img", client), null);
   });
 
   it("returns null for HEALTHCHECK NONE", async () => {
-    const exec = async (): Promise<ExecResult> => ({
-      stdout: JSON.stringify({ Test: ["NONE"] }),
-      stderr: "",
-      exitCode: 0,
+    const client = makeMockClient({
+      images: {
+        "docker.io/img": { Config: { Healthcheck: { Test: ["NONE"] } } },
+      },
     });
-    assert.equal(await getImageHealthcheck(podman, "img", exec), null);
+    assert.equal(await getImageHealthcheck(podman, "img", client), null);
   });
 
   it("returns null when inspect fails", async () => {
-    const exec = async (): Promise<ExecResult> => ({
-      stdout: "",
-      stderr: "no such image",
-      exitCode: 1,
-    });
-    assert.equal(await getImageHealthcheck(podman, "img", exec), null);
+    // Image absent from the spec → inspect throws 404 → mapped to null.
+    const client = makeMockClient({ images: {} });
+    assert.equal(await getImageHealthcheck(podman, "img", client), null);
   });
 });
 
-describe("ensureRunning — image healthcheck re-emitted as run flags", () => {
-  // Drive the missing-state create path and capture the `run` args. The fake
-  // answers the state probe (missing), image inspect (present), the
-  // healthcheck format-inspect, and the run.
-  function captureRunArgs(
+describe("ensureRunning — image healthcheck re-emitted in the create payload", () => {
+  // Drive the missing-state create path and capture the `createContainer`
+  // payload. The container is missing (not listed → inspect 404), the image
+  // is present with the given healthcheck, and the create call is recorded.
+  function captureCreate(
     config: ContainerConfig,
-    healthcheckStdout: string,
-  ): { runArgs: () => string[] | null; run: () => Promise<void> } {
-    let captured: string[] | null = null;
-    const exec = async (
-      _runtime: ContainerRuntimeInfo,
-      args: string[],
-    ): Promise<ExecResult> => {
-      const cmd = args[0];
-      if (
-        cmd === "inspect" &&
-        args.includes("{{.State.Status}}|{{.State.Running}}|{{.State.Pid}}")
-      ) {
-        return { stdout: "", stderr: "no such object", exitCode: 1 };
-      }
-      // Healthcheck format-inspect.
-      if (
-        cmd === "image" &&
-        args[1] === "inspect" &&
-        args.includes("{{json .Config.Healthcheck}}")
-      ) {
-        return { stdout: healthcheckStdout, stderr: "", exitCode: 0 };
-      }
-      // Plain image-exists inspect.
-      if (cmd === "image" && args[1] === "inspect") {
-        return { stdout: "ok", stderr: "", exitCode: 0 };
-      }
-      if (cmd === "run") {
-        captured = args;
-        return { stdout: "id", stderr: "", exitCode: 0 };
-      }
-      throw new Error(`unexpected exec: ${args.join(" ")}`);
-    };
+    imageHealthcheck:
+      | Docker.ContainerInspectInfo["Config"]["Healthcheck"]
+      | undefined,
+  ): {
+    createPayload: () => Docker.ContainerCreateOptions | undefined;
+    run: () => Promise<void>;
+  } {
+    const calls = new Map<string, unknown[]>();
+    const client = makeMockClient({
+      images: {
+        "ghcr.io/x/y:tag": {
+          Config: imageHealthcheck ? { Healthcheck: imageHealthcheck } : {},
+        },
+      },
+      calls,
+    });
     return {
-      runArgs: () => captured,
+      createPayload: () =>
+        calls.get("createContainer")?.[0] as
+          | Docker.ContainerCreateOptions
+          | undefined,
       run: () =>
-        ensureRunning(docker, "demo", config, () => {}, undefined, exec),
+        ensureRunning(docker, "demo", config, () => {}, undefined, client),
     };
   }
 
-  it("emits --health-cmd and timing flags from the image healthcheck", async () => {
-    const cap = captureRunArgs(
+  it("re-emits the image healthcheck timing fields in the create payload", async () => {
+    const cap = captureCreate(
       { image: "ghcr.io/x/y", tag: "tag" },
-      HEALTHCHECK_JSON,
+      IMAGE_HEALTHCHECK,
     );
     await cap.run();
-    const args = cap.runArgs();
-    assert.ok(args, "run was invoked");
-    const i = args!.indexOf("--health-cmd");
-    assert.ok(i >= 0, "--health-cmd present");
-    assert.equal(
-      args![i + 1],
+    const opts = cap.createPayload();
+    assert.ok(opts, "createContainer was invoked");
+    const hc = opts!.Healthcheck;
+    assert.ok(hc, "Healthcheck present in create payload");
+    assert.deepEqual(hc!.Test, [
+      "CMD-SHELL",
       "wget -q -O /dev/null http://127.0.0.1:6502/signalk",
-    );
-    assert.ok(args!.includes("--health-interval"));
-    assert.equal(args![args!.indexOf("--health-interval") + 1], "30s");
-    assert.equal(args![args!.indexOf("--health-timeout") + 1], "5s");
-    assert.equal(args![args!.indexOf("--health-start-period") + 1], "15s");
-    assert.equal(args![args!.indexOf("--health-retries") + 1], "3");
+    ]);
+    assert.equal(hc!.Interval, 30_000_000_000);
+    assert.equal(hc!.Timeout, 5_000_000_000);
+    assert.equal(hc!.StartPeriod, 15_000_000_000);
+    assert.equal(hc!.Retries, 3);
   });
 
-  it("emits no health flags when the image has no healthcheck", async () => {
-    const cap = captureRunArgs({ image: "ghcr.io/x/y", tag: "tag" }, "null");
+  it("sets no Healthcheck when the image has no healthcheck", async () => {
+    const cap = captureCreate({ image: "ghcr.io/x/y", tag: "tag" }, undefined);
     await cap.run();
-    const args = cap.runArgs();
-    assert.ok(args, "run was invoked");
-    assert.ok(!args!.includes("--health-cmd"), "no --health-cmd emitted");
+    const opts = cap.createPayload();
+    assert.ok(opts, "createContainer was invoked");
+    assert.equal(opts!.Healthcheck, undefined, "no Healthcheck emitted");
   });
 });
 
 describe("ensureRunning — explicit healthcheck override", () => {
-  // Like captureRunArgs above, but also records whether the image-healthcheck
-  // inspect was consulted, so we can assert the override skips it.
-  function captureRunArgs(config: ContainerConfig): {
-    runArgs: () => string[] | null;
-    imageHealthcheckInspected: () => boolean;
+  // A "decoy" image healthcheck distinct from every override below. The
+  // image is present (so imageExists succeeds) and carries this check; the
+  // override path must NOT surface it in the create payload — production
+  // short-circuits `getImageHealthcheck` entirely when `config.healthcheck`
+  // is set. Asserting the payload reflects the override (not the decoy)
+  // proves the image's healthcheck was not consulted.
+  const DECOY_IMAGE_HEALTHCHECK = {
+    Test: ["CMD-SHELL", "echo decoy"],
+    Interval: 99_000_000_000,
+    Retries: 9,
+  };
+
+  // Like captureCreate above. The image is listed (so imageExists succeeds)
+  // and inspect returns the decoy healthcheck.
+  function captureCreate(config: ContainerConfig): {
+    createPayload: () => Docker.ContainerCreateOptions | undefined;
     run: () => Promise<void>;
   } {
-    let captured: string[] | null = null;
-    let inspectedImageHealthcheck = false;
-    const exec = async (
-      _runtime: ContainerRuntimeInfo,
-      args: string[],
-    ): Promise<ExecResult> => {
-      const cmd = args[0];
-      if (
-        cmd === "inspect" &&
-        args.includes("{{.State.Status}}|{{.State.Running}}|{{.State.Pid}}")
-      ) {
-        return { stdout: "", stderr: "no such object", exitCode: 1 };
-      }
-      if (
-        cmd === "image" &&
-        args[1] === "inspect" &&
-        args.includes("{{json .Config.Healthcheck}}")
-      ) {
-        inspectedImageHealthcheck = true;
-        return { stdout: "null", stderr: "", exitCode: 0 };
-      }
-      if (cmd === "image" && args[1] === "inspect") {
-        return { stdout: "ok", stderr: "", exitCode: 0 };
-      }
-      if (cmd === "run") {
-        captured = args;
-        return { stdout: "id", stderr: "", exitCode: 0 };
-      }
-      throw new Error(`unexpected exec: ${args.join(" ")}`);
-    };
+    const calls = new Map<string, unknown[]>();
+    const client = makeMockClient({
+      images: {
+        "x/y:t": { Config: { Healthcheck: DECOY_IMAGE_HEALTHCHECK } },
+        "questdb/questdb:latest": {
+          Config: { Healthcheck: DECOY_IMAGE_HEALTHCHECK },
+        },
+      },
+      calls,
+    });
     return {
-      runArgs: () => captured,
-      imageHealthcheckInspected: () => inspectedImageHealthcheck,
+      createPayload: () =>
+        calls.get("createContainer")?.[0] as
+          | Docker.ContainerCreateOptions
+          | undefined,
       run: () =>
-        ensureRunning(docker, "demo", config, () => {}, undefined, exec),
+        ensureRunning(docker, "demo", config, () => {}, undefined, client),
     };
   }
 
-  it("emits --health-cmd from a CMD override and skips the image inspect", async () => {
-    const cap = captureRunArgs({
+  it("emits a CMD override healthcheck and ignores the image healthcheck", async () => {
+    const cap = captureCreate({
       image: "questdb/questdb",
       tag: "latest",
       healthcheck: {
@@ -207,24 +187,24 @@ describe("ensureRunning — explicit healthcheck override", () => {
       },
     });
     await cap.run();
-    const args = cap.runArgs();
-    assert.ok(args, "run was invoked");
-    const i = args!.indexOf("--health-cmd");
-    assert.ok(i >= 0, "--health-cmd present");
-    assert.equal(args![i + 1], "curl -f http://127.0.0.1:9000/");
-    assert.equal(args![args!.indexOf("--health-interval") + 1], "30s");
-    assert.equal(args![args!.indexOf("--health-timeout") + 1], "5s");
-    assert.equal(args![args!.indexOf("--health-start-period") + 1], "15s");
-    assert.equal(args![args!.indexOf("--health-retries") + 1], "3");
-    assert.equal(
-      cap.imageHealthcheckInspected(),
-      false,
-      "override skips the image-healthcheck inspect",
+    const opts = cap.createPayload();
+    assert.ok(opts, "createContainer was invoked");
+    const hc = opts!.Healthcheck;
+    assert.ok(hc, "Healthcheck present in create payload");
+    assert.deepEqual(hc!.Test, ["CMD", "curl -f http://127.0.0.1:9000/"]);
+    assert.equal(hc!.Interval, 30_000_000_000);
+    assert.equal(hc!.Timeout, 5_000_000_000);
+    assert.equal(hc!.StartPeriod, 15_000_000_000);
+    assert.equal(hc!.Retries, 3);
+    assert.notEqual(
+      hc!.Retries,
+      9,
+      "override wins over the image's own healthcheck",
     );
   });
 
   it("wraps a CMD-SHELL override as a single shell string", async () => {
-    const cap = captureRunArgs({
+    const cap = captureCreate({
       image: "x/y",
       tag: "t",
       healthcheck: {
@@ -232,27 +212,27 @@ describe("ensureRunning — explicit healthcheck override", () => {
       },
     });
     await cap.run();
-    const args = cap.runArgs();
-    const i = args!.indexOf("--health-cmd");
-    assert.ok(i >= 0, "--health-cmd present");
-    assert.equal(args![i + 1], "curl -f http://localhost:9000/ || exit 1");
+    const opts = cap.createPayload();
+    assert.ok(opts, "createContainer was invoked");
+    assert.deepEqual(opts!.Healthcheck!.Test, [
+      "CMD-SHELL",
+      "curl -f http://localhost:9000/ || exit 1",
+    ]);
   });
 
-  it("emits --no-healthcheck when the override is false", async () => {
-    const cap = captureRunArgs({
+  it("emits Test ['NONE'] when the override is false", async () => {
+    const cap = captureCreate({
       image: "x/y",
       tag: "t",
       healthcheck: false,
     });
     await cap.run();
-    const args = cap.runArgs();
-    assert.ok(args, "run was invoked");
-    assert.ok(args!.includes("--no-healthcheck"), "--no-healthcheck emitted");
-    assert.ok(!args!.includes("--health-cmd"), "no --health-cmd with false");
-    assert.equal(
-      cap.imageHealthcheckInspected(),
-      false,
-      "false override skips the image-healthcheck inspect",
+    const opts = cap.createPayload();
+    assert.ok(opts, "createContainer was invoked");
+    assert.deepEqual(
+      opts!.Healthcheck!.Test,
+      ["NONE"],
+      "false override disables the healthcheck",
     );
   });
 });
