@@ -25,6 +25,8 @@ import {
 export { userMappingFlags, _setCurrentHostIdsForTesting } from "./runtime.js";
 
 const JOB_LOG_MAX_LINES = 200;
+/** Name prefix that marks a container as a one-shot helper job (see runJob). */
+const JOB_NAME_PREFIX = "sk-job-";
 
 /**
  * Run a one-shot helper container to completion, streaming progress.
@@ -38,7 +40,7 @@ export async function runJob(
   client: ContainerClient = getClient(),
 ): Promise<ContainerJobResult> {
   const id = randomUUID();
-  const jobName = `sk-job-${id.slice(0, 8)}`;
+  const jobName = `${JOB_NAME_PREFIX}${id.slice(0, 8)}`;
   const createdAt = new Date().toISOString();
   const image = qualifyImage(config.image, runtime);
 
@@ -274,6 +276,12 @@ export function orphanFromContainer(
   const name = (c.Names?.[0] ?? "").replace(/^\//, "");
   const image = c.Image ?? "";
   if (!name || !image) return null;
+  // Reap ONLY unmistakable one-shot jobs. `runJob` names every helper
+  // `sk-job-<id>`; a long-running managed container (e.g. a consumer plugin's
+  // service) could carry the same `sk-charts-job`/`sk-job-owner` labels but is
+  // NOT a job, and must never be force-removed on startup. The name prefix is
+  // the defining, unspoofable-by-label trait.
+  if (!name.startsWith(JOB_NAME_PREFIX)) return null;
   const labels = c.Labels ?? {};
   // Require a positive owner-label match. The list filter should already
   // restrict the set, but never trust filter output enough to force-remove

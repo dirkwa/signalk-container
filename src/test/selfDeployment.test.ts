@@ -1,6 +1,5 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import type Docker from "dockerode";
 import { selfDeployment, type SelfDeploymentProbes } from "../doctor.js";
 import type { ContainerClient, ResolvedClient } from "../client.js";
 import { makeMockClient } from "./helpers/mockClient.js";
@@ -9,20 +8,15 @@ const TEST_SOCKET = "/run/test/podman.sock";
 
 /**
  * Wrap a `ContainerClient` (typically from `makeMockClient`) as a
- * `resolveClient` probe that always resolves to that client + a socket
- * path. This is the socket-era replacement for the CLI-era
- * `findBinary`/`readBinaryVersion` injection: "a runtime is present"
- * now means "a socket answered the Docker API", and the resolved
- * socket is authoritative for `daemon.socketPath`.
+ * `resolveClient` probe that resolves to that client + a socket path.
+ * "A runtime is present" means "a socket answered the Docker API", and the
+ * resolved socket is authoritative for `daemon.socketPath`.
  */
 function resolveTo(
   client: ContainerClient,
   socketPath = TEST_SOCKET,
 ): () => Promise<ResolvedClient | null> {
-  return async () => ({
-    client: client as unknown as Docker,
-    socketPath,
-  });
+  return async () => ({ client, socketPath });
 }
 
 /** A `resolveClient` probe that reports no socket answered. */

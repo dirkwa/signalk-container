@@ -1,8 +1,9 @@
 /**
  * Test helpers for building a mock `ContainerClient` (the dockerode-over-
- * socket injection seam that replaced the CLI-era `ExecFn` stub). Tests
- * stub only the methods their subject calls; unstubbed methods throw so a
- * test can't silently exercise an unmocked path.
+ * socket injection seam). A test supplies only the behaviour its subject
+ * needs via `MockClientSpec`; anything unspecified returns a benign default
+ * (e.g. `inspect()` on an unlisted container throws a 404, `version()`
+ * resolves to a stub, `wait()` resolves `{StatusCode: 0}`).
  */
 import { PassThrough } from "node:stream";
 import type { ContainerClient } from "../../client.js";
@@ -17,7 +18,13 @@ export interface MockContainerBehaviour {
   update?: () => Promise<unknown>;
   wait?: Json | (() => Promise<Json>);
   logs?: Buffer | NodeJS.ReadableStream | (() => Promise<unknown>);
-  exec?: () => Promise<unknown>;
+  /**
+   * Behaviour for `container.exec()`. The mock returns a real dockerode-shaped
+   * exec object (`start()` → a finished stream carrying `output`, `inspect()`
+   * → `{ ExitCode }`), so `runExec` works without the test hand-rolling it.
+   * Each invocation's `Cmd` is recorded under the `exec` calls key.
+   */
+  exec?: { output?: string; exitCode?: number };
 }
 
 export interface MockClientSpec {
@@ -98,7 +105,19 @@ export function makeMockClient(spec: MockClientSpec = {}): ContainerClient {
           if (typeof b?.logs === "function") return b.logs();
           return Promise.resolve(b?.logs ?? Buffer.from(""));
         },
-        exec: () => b?.exec?.() ?? Promise.resolve({}),
+        exec: (execOpts?: { Cmd?: string[] }) => {
+          record(spec, "exec", { id, cmd: execOpts?.Cmd ?? [] });
+          const output = b?.exec?.output ?? "";
+          const exitCode = b?.exec?.exitCode ?? 0;
+          return Promise.resolve({
+            start: () => {
+              const stream = new PassThrough();
+              stream.end(Buffer.from(output));
+              return Promise.resolve(stream);
+            },
+            inspect: () => Promise.resolve({ ExitCode: exitCode }),
+          });
+        },
       };
     },
     getImage(name: string) {

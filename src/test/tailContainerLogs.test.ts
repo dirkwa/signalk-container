@@ -309,14 +309,19 @@ describe("getContainerLogs", () => {
     assert.deepEqual(lines, ["out1", "out2", "err1"]);
   });
 
-  it("returns no empty lines for empty log output", async () => {
+  it("returns an empty array for empty log output", async () => {
     const client = makeMockClient({
-      containers: { "sk-foo": { logs: Buffer.from("err1\nerr2") } },
+      containers: { "sk-foo": { logs: Buffer.from("") } },
     });
     const lines = await getContainerLogs(runtime, "foo", undefined, client);
-    assert.ok(
-      !lines.some((l) => l === ""),
-      `no empty lines expected, got ${JSON.stringify(lines)}`,
-    );
+    assert.deepEqual(lines, []);
+  });
+
+  it("drops trailing empty lines (no phantom blank from the final newline)", async () => {
+    const client = makeMockClient({
+      containers: { "sk-foo": { logs: Buffer.from("err1\nerr2\n") } },
+    });
+    const lines = await getContainerLogs(runtime, "foo", undefined, client);
+    assert.deepEqual(lines, ["err1", "err2"]);
   });
 });

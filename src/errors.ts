@@ -69,6 +69,7 @@ const NOT_FOUND_PATTERNS = [/no such (image|container|network)/i, /not found/i];
  * to classify 404 → not-found cheaply before falling back to message matching.
  */
 function statusCodeOf(err: unknown): number | undefined {
+  if (typeof err !== "object" || err === null) return undefined;
   const code = (err as { statusCode?: unknown }).statusCode;
   return typeof code === "number" ? code : undefined;
 }

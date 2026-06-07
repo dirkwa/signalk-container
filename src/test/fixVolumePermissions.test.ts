@@ -1,6 +1,5 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { PassThrough } from "node:stream";
 import { removeContainer } from "../containers.js";
 import type { ContainerClient } from "../client.js";
 import type { ContainerRuntimeInfo } from "../types.js";
@@ -21,24 +20,24 @@ interface ExecCall {
 /**
  * Build a `ContainerClient` that drives `removeContainer` through
  * `fixVolumePermissions`: a running (or stopped) container with the given
- * bind `Mounts`, then stop + remove. `container.exec` is intercepted so the
- * find/chmod argv the production code issues can be asserted.
+ * bind `Mounts`, then stop + remove. The mock records every `container.exec`
+ * Cmd, so `execCalls()` (read AFTER `removeContainer`) exposes the find/chmod
+ * argv the production code issued for assertion.
  *
  * @param opts.running   whether `State` reports the container as running
  * @param opts.mounts    bind-mount destinations inside the container
- * @returns the client plus the recorded exec calls and `calls` map
+ * @returns the client, an `execCalls()` accessor, and the calls map
  */
 function makeClient(opts: { running?: boolean; mounts?: string[] }): {
   client: ContainerClient;
-  execCalls: ExecCall[];
+  execCalls: () => ExecCall[];
   calls: Map<string, unknown[]>;
 } {
   const running = opts.running ?? true;
   const mounts = opts.mounts ?? ["/signalk-data", "/host-media"];
-  const execCalls: ExecCall[] = [];
   const calls = new Map<string, unknown[]>();
 
-  const base = makeMockClient({
+  const client = makeMockClient({
     containers: {
       [FULL_NAME]: {
         inspect: {
@@ -52,33 +51,17 @@ function makeClient(opts: { running?: boolean; mounts?: string[] }): {
             Destination: dest,
           })),
         },
+        exec: { exitCode: 0 },
       },
     },
     calls,
   });
 
-  // Wrap getContainer to intercept `exec` (the mock helper's stub returns
-  // `{}`, which lacks the dockerode exec object shape `runExec` needs).
-  const client = {
-    ...base,
-    getContainer(id: string) {
-      const c = base.getContainer(id);
-      return {
-        ...c,
-        exec: (execOpts: { Cmd: string[] }) => {
-          execCalls.push({ cmd: [...execOpts.Cmd] });
-          return Promise.resolve({
-            start: () => {
-              const stream = new PassThrough();
-              stream.end(Buffer.from(""));
-              return Promise.resolve(stream);
-            },
-            inspect: () => Promise.resolve({ ExitCode: 0 }),
-          });
-        },
-      };
-    },
-  } as unknown as ContainerClient;
+  // The mock records each exec under the "exec" key as `{ id, cmd }`.
+  const execCalls = (): ExecCall[] =>
+    (calls.get("exec") ?? []).map((e) => ({
+      cmd: (e as { cmd: string[] }).cmd,
+    }));
 
   return { client, execCalls, calls };
 }
@@ -88,10 +71,12 @@ describe("fixVolumePermissions", () => {
     const { client, execCalls, calls } = makeClient({});
     await removeContainer(podman, "backup-server", client);
 
-    const chmodCall = execCalls.find((c) => c.cmd.includes("find"));
+    const chmodCall = execCalls().find((c) => c.cmd.includes("find"));
     assert.ok(
       chmodCall,
-      `expected a find exec call; got: ${execCalls.map((c) => c.cmd.join(" ")).join(" | ")}`,
+      `expected a find exec call; got: ${execCalls()
+        .map((c) => c.cmd.join(" "))
+        .join(" | ")}`,
     );
 
     // The find invocation must restrict to directories. Without
@@ -116,7 +101,7 @@ describe("fixVolumePermissions", () => {
     // Regression guard: must NEVER fall back to recursive `chmod -R o+rwX`.
     // That form widens file modes including SSL keys / credential files
     // that the container may have written into the bind mount.
-    const recursiveChmod = execCalls.find(
+    const recursiveChmod = execCalls().find(
       (c) => c.cmd.includes("chmod") && c.cmd.includes("-R"),
     );
     assert.equal(
@@ -135,7 +120,7 @@ describe("fixVolumePermissions", () => {
     });
     await removeContainer(podman, "backup-server", client);
 
-    const findCall = execCalls.find((c) => c.cmd.includes("find"));
+    const findCall = execCalls().find((c) => c.cmd.includes("find"));
     assert.ok(findCall, "expected find call");
     for (const mount of ["/signalk-data", "/host-media", "/host-mnt"]) {
       assert.ok(
@@ -149,7 +134,7 @@ describe("fixVolumePermissions", () => {
     const { client, execCalls, calls } = makeClient({ mounts: [] });
     await removeContainer(podman, "backup-server", client);
 
-    const findCall = execCalls.find((c) => c.cmd.includes("find"));
+    const findCall = execCalls().find((c) => c.cmd.includes("find"));
     assert.equal(
       findCall,
       undefined,
@@ -162,7 +147,7 @@ describe("fixVolumePermissions", () => {
     const { client, execCalls, calls } = makeClient({ running: false });
     await removeContainer(podman, "backup-server", client);
 
-    const findCall = execCalls.find((c) => c.cmd.includes("find"));
+    const findCall = execCalls().find((c) => c.cmd.includes("find"));
     assert.equal(
       findCall,
       undefined,

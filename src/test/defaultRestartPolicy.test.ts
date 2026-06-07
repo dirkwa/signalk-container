@@ -6,16 +6,10 @@ import { makeMockClient } from "./helpers/mockClient.js";
 import type { ContainerConfig, ContainerRuntimeInfo } from "../types.js";
 
 // signalk-container forwards `ContainerConfig.restart` to the runtime as
-// `HostConfig.RestartPolicy.Name` in the createContainer payload. Until
-// 1.11.0 the field was optional with no default, so a consumer plugin
-// that forgot to set it would create a container with no restart policy —
-// a host reboot would leave the container `exited` and nothing brought it
-// back until signalk-server was restarted and the plugin's start() ran
-// ensureRunning() again.
-//
-// The default is now `unless-stopped` so containers come back on host
-// reboot without the consumer plugin having to opt in. `"no"` still
-// suppresses the policy entirely for genuinely one-shot containers.
+// `HostConfig.RestartPolicy.Name` in the createContainer payload. The
+// default is `unless-stopped` so containers come back after a host reboot
+// without the consumer plugin having to opt in; `"no"` suppresses the
+// policy entirely for genuinely one-shot containers.
 
 const docker: ContainerRuntimeInfo = {
   runtime: "docker",

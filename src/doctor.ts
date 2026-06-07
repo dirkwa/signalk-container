@@ -405,7 +405,11 @@ export async function selfDeployment(
       daemon: {
         reachable: false,
         rootless: null,
-        socketPath: inferSocketPath("docker", env),
+        // No runtime was detected, so there's no binary kind to key on —
+        // surface whichever explicit endpoint the operator configured
+        // (CONTAINER_HOST for podman, DOCKER_HOST for docker) as the
+        // troubleshooting hint, rather than hardcoding the docker var.
+        socketPath: env.CONTAINER_HOST ?? env.DOCKER_HOST ?? null,
         error: "no container runtime socket answered the Docker API",
       },
       env,
@@ -421,7 +425,7 @@ export async function selfDeployment(
 
   // The resolved socket is authoritative for the socket path; an injected
   // `client` only overrides the API channel (tests), not the path.
-  const apiClient = client ?? (resolved.client as unknown as ContainerClient);
+  const apiClient = client ?? resolved.client;
   const socketPath = resolved.socketPath;
 
   // 2. Daemon reachability — `version()` + `info()`, classified off the
@@ -644,23 +648,6 @@ async function probeDaemon(
 function classifyDaemonFailure(kind: ErrorKind | null): SelfDeploymentStatus {
   if (kind === "permission") return "permission-denied";
   return "socket-unreachable";
-}
-
-/**
- * Best-effort guess at the socket path the binary used, based purely on
- * the relevant env vars. Reported back to the operator so they can
- * confirm whether their bind-mount matches what the CLI actually saw.
- * Returns null when no relevant env var is set.
- */
-function inferSocketPath(
-  binary: RuntimeName,
-  env: SelfDeploymentResult["env"],
-): string | null {
-  if (binary === "docker") return env.DOCKER_HOST ?? null;
-  // Podman prefers CONTAINER_HOST but also honors DOCKER_HOST when in
-  // docker-API compat mode, so fall through to it when CONTAINER_HOST
-  // is unset.
-  return env.CONTAINER_HOST ?? env.DOCKER_HOST ?? null;
 }
 
 /**

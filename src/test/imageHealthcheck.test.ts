@@ -191,7 +191,10 @@ describe("ensureRunning — explicit healthcheck override", () => {
     assert.ok(opts, "createContainer was invoked");
     const hc = opts!.Healthcheck;
     assert.ok(hc, "Healthcheck present in create payload");
-    assert.deepEqual(hc!.Test, ["CMD", "curl -f http://127.0.0.1:9000/"]);
+    // Exec-form CMD keeps each argv element separate — Docker execs the binary
+    // directly, so joining into one string would make it look for a binary
+    // literally named "curl -f http://...". Only CMD-SHELL takes a joined string.
+    assert.deepEqual(hc!.Test, ["CMD", "curl", "-f", "http://127.0.0.1:9000/"]);
     assert.equal(hc!.Interval, 30_000_000_000);
     assert.equal(hc!.Timeout, 5_000_000_000);
     assert.equal(hc!.StartPeriod, 15_000_000_000);

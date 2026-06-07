@@ -107,7 +107,7 @@ describe("imageRunsAsUser", () => {
 
   it("returns ok=false (never throws) when the runtime layer throws", async () => {
     // createContainer rejecting stands in for "daemon unreachable / probe
-    // couldn't even be created" — the old CLI-era "command not found".
+    // container couldn't be created".
     const failingClient = makeMockClient({});
     (
       failingClient as unknown as { createContainer: () => Promise<never> }

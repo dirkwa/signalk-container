@@ -61,25 +61,34 @@ export interface ContainerClient {
 export type SocketPreference = "auto" | "podman" | "docker";
 
 /**
- * Socket candidates, in priority order. The first that answers `version()`
- * wins. `DOCKER_HOST`/`CONTAINER_HOST` (the docker/podman remote-mode env vars)
- * take precedence so an explicitly configured endpoint is always honoured.
+ * Socket candidates, in priority order, plus whether the operator pinned an
+ * explicit endpoint. When `DOCKER_HOST`/`CONTAINER_HOST` is set we honour ONLY
+ * that endpoint (`explicit: true`) and never fall back to the default sockets —
+ * silently probing a different daemon than the operator selected would manage
+ * the wrong runtime. A non-unix endpoint throws here: only unix sockets are
+ * supported.
  *
- * `preference` biases the conventional-path order so a host with BOTH a
- * podman and a docker socket reachable still honours `PluginConfig.runtime`:
- * "podman" tries the podman sockets first, "docker" tries the docker sockets
- * first, "auto" keeps the historical podman-first order.
- * `/var/run/docker.sock` is the universal-installer bind-mount target.
+ * Otherwise `preference` biases the conventional-path order so a host with BOTH
+ * a podman and a docker socket reachable still honours `PluginConfig.runtime`:
+ * "podman" tries the podman sockets first, "docker" the docker sockets first,
+ * "auto" keeps the historical podman-first order. `/var/run/docker.sock` is the
+ * universal-installer bind-mount target.
  */
-function socketCandidates(preference: SocketPreference = "auto"): string[] {
-  const candidates: string[] = [];
-  for (const envVar of [process.env.DOCKER_HOST, process.env.CONTAINER_HOST]) {
-    if (envVar) {
-      const path = envVar.startsWith("unix://")
-        ? envVar.slice("unix://".length)
-        : envVar;
-      candidates.push(path);
+function socketCandidates(preference: SocketPreference = "auto"): {
+  candidates: string[];
+  explicit: boolean;
+} {
+  const envEndpoint = process.env.DOCKER_HOST ?? process.env.CONTAINER_HOST;
+  if (envEndpoint) {
+    if (!envEndpoint.startsWith("unix://") && !envEndpoint.startsWith("/")) {
+      throw new Error(
+        `Unsupported container socket endpoint '${envEndpoint}'; only unix sockets (unix://… or an absolute path) are supported`,
+      );
     }
+    const path = envEndpoint.startsWith("unix://")
+      ? envEndpoint.slice("unix://".length)
+      : envEndpoint;
+    return { candidates: [path], explicit: true };
   }
   const uid = process.getuid?.() ?? 1000;
   const podmanPaths = [
@@ -87,44 +96,62 @@ function socketCandidates(preference: SocketPreference = "auto"): string[] {
     "/run/podman/podman.sock",
   ];
   const dockerPaths = ["/var/run/docker.sock", "/run/docker.sock"];
-  if (preference === "docker") {
-    candidates.push(...dockerPaths, ...podmanPaths);
-  } else {
-    candidates.push(...podmanPaths, ...dockerPaths);
-  }
-  return candidates;
+  const candidates =
+    preference === "docker"
+      ? [...dockerPaths, ...podmanPaths]
+      : [...podmanPaths, ...dockerPaths];
+  return { candidates, explicit: false };
 }
 
 /**
  * Find the first socket path that exists AND answers `version()`. Existence
  * alone isn't enough — a stale socket file or one our uid can't read must be
- * skipped so detection falls through to the next candidate.
+ * skipped so detection falls through to the next candidate. When an explicit
+ * endpoint was configured there is no next candidate to fall through to, so a
+ * failure to reach it propagates rather than being swallowed.
  */
 async function pickSocket(preference: SocketPreference = "auto"): Promise<{
   socketPath: string;
   client: Docker;
 } | null> {
-  for (const socketPath of socketCandidates(preference)) {
+  const { candidates, explicit } = socketCandidates(preference);
+  for (const socketPath of candidates) {
     try {
       const s = await stat(socketPath);
-      if (!s.isSocket()) continue;
-    } catch {
+      if (!s.isSocket()) {
+        if (explicit) {
+          throw new Error(
+            `Configured endpoint '${socketPath}' is not a socket`,
+          );
+        }
+        continue;
+      }
+    } catch (err) {
+      if (explicit) throw err;
       continue;
     }
     const client = new Docker({ socketPath });
     try {
       await client.version();
       return { socketPath, client };
-    } catch {
-      // socket exists but doesn't answer the API (wrong uid, dead daemon) —
-      // try the next candidate.
+    } catch (err) {
+      // An explicit endpoint must fail closed — don't silently probe a
+      // different daemon than the operator selected.
+      if (explicit) throw err;
+      // Otherwise: socket exists but doesn't answer the API (wrong uid, dead
+      // daemon) — try the next candidate.
     }
   }
   return null;
 }
 
 export interface ResolvedClient {
-  client: Docker;
+  /**
+   * The resolved dockerode client, typed as the narrow `ContainerClient`
+   * surface the plugin uses (a real `Docker` instance satisfies it). Consumers
+   * get a usable client with no `as` cast.
+   */
+  client: ContainerClient;
   socketPath: string;
 }
 
@@ -156,7 +183,7 @@ export function getClient(): ContainerClient {
       "getClient() called before resolveClient(); runtime not detected yet",
     );
   }
-  return cached.client as unknown as ContainerClient;
+  return cached.client;
 }
 
 /** Path of the resolved socket, for doctor/diagnostic display. */

@@ -329,7 +329,12 @@ export function tailContainerLogs(
       stream.on("error", (err: Error) => {
         if (!stopped) options?.onError?.(err.message);
       });
+      // Both `end` and `close` can fire for the same stream; guard so the
+      // broker's onExit (which drives respawn + the SSE `event: end`) runs once.
+      let ended = false;
       const onEnd = () => {
+        if (ended) return;
+        ended = true;
         splitter.flush();
         if (!stopped) options?.onExit?.(0);
       };
@@ -1450,10 +1455,9 @@ function healthcheckPayload(
     return { Test: ["NONE"] };
   }
   if (override) {
-    const [kind, ...rest] = override.test;
-    const cmd = kind === "CMD-SHELL" ? rest[0] : rest.join(" ");
-    if (!cmd) return undefined;
-    const hc: Docker.HealthConfig = { Test: [kind, cmd] };
+    const test = healthTest(override.test);
+    if (!test) return undefined;
+    const hc: Docker.HealthConfig = { Test: test };
     if (override.interval) hc.Interval = durationToNanos(override.interval);
     if (override.timeout) hc.Timeout = durationToNanos(override.timeout);
     if (override.startPeriod) {
@@ -1463,10 +1467,9 @@ function healthcheckPayload(
     return hc;
   }
   if (imageHealthcheck) {
-    const [kind, ...rest] = imageHealthcheck.test;
-    const cmd = kind === "CMD-SHELL" ? rest[0] : rest.join(" ");
-    if (!cmd) return undefined;
-    const hc: Docker.HealthConfig = { Test: [kind, cmd] };
+    const test = healthTest(imageHealthcheck.test);
+    if (!test) return undefined;
+    const hc: Docker.HealthConfig = { Test: test };
     if (imageHealthcheck.intervalNs) hc.Interval = imageHealthcheck.intervalNs;
     if (imageHealthcheck.timeoutNs) hc.Timeout = imageHealthcheck.timeoutNs;
     if (imageHealthcheck.startPeriodNs) {
@@ -1476,6 +1479,22 @@ function healthcheckPayload(
     return hc;
   }
   return undefined;
+}
+
+/**
+ * Normalize a `["CMD"|"CMD-SHELL", ...]` source array into the Docker API's
+ * `Healthcheck.Test` shape. `CMD-SHELL` takes ONE joined string the shell
+ * parses; `CMD` is exec-form and MUST keep each argv element separate —
+ * collapsing `["CMD","curl","-f","url"]` into `["CMD","curl -f url"]` makes
+ * Docker look for a binary literally named "curl -f url". Returns `undefined`
+ * when there is no command to run.
+ */
+function healthTest(source: string[]): string[] | undefined {
+  const [kind, ...rest] = source;
+  if (kind === "CMD-SHELL") {
+    return rest[0] ? ["CMD-SHELL", rest[0]] : undefined;
+  }
+  return rest.length > 0 ? [kind, ...rest] : undefined;
 }
 
 /**
