@@ -1,27 +1,19 @@
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import {
   ensureRunning,
   removeContainer,
   getContainerState,
 } from "../../containers.js";
+import { detectRuntime } from "../../runtime.js";
 import type { ContainerRuntimeInfo } from "../../types.js";
 
-const execFileP = promisify(execFile);
-
+// detectRuntime() resolves AND caches the dockerode client singleton, so a
+// non-null result means the bare container-function calls below (which
+// default to getClient()) have a live client — the production path.
 async function hasContainerRuntime(): Promise<ContainerRuntimeInfo | null> {
   if (process.platform === "win32") return null;
-  for (const rt of ["podman", "docker"] as const) {
-    try {
-      await execFileP(rt, ["--version"], { timeout: 5000 });
-      return { runtime: rt, version: "test", isPodmanDockerShim: false };
-    } catch {
-      // try next
-    }
-  }
-  return null;
+  return detectRuntime("auto");
 }
 
 const CONTAINER_NAME = "remove-stop-timeout-test";

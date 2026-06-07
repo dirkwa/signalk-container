@@ -10,6 +10,14 @@ export type RuntimePreference = "auto" | RuntimeName;
 export interface ContainerRuntimeInfo {
   runtime: RuntimeName;
   version: string;
+  /**
+   * @deprecated Always `false` since the move to the dockerode socket
+   * client. The "docker CLI is really a podman shim" distinction only
+   * mattered when we spawned a CLI that client-validated flags; over
+   * the API socket there is one wire protocol and no client-side
+   * validation to route around. Retained for one release to avoid a
+   * breaking type change for any consumer reading it; will be removed.
+   */
   isPodmanDockerShim: boolean;
   /**
    * cgroup v2 controllers actually available to this runtime, e.g.
@@ -42,35 +50,53 @@ export interface ContainerRuntimeInfo {
    * Captured once at detection time from `process.getuid()` /
    * `process.getgid()`.
    *
-   * Reserved for the upcoming `ownership` config translator: files
-   * created inside a container started with `--user uid:gid` (or
-   * `--userns=keep-id` on rootless Podman) end up owned by this same
-   * identity on the host, so the plugin doesn't need recursive
-   * `chmod` sweeps to make outputs readable by Signal K.
+   * Drives the userns/`User` decision in `userMappingFlags`: files
+   * created inside a container whose create payload carried
+   * `User: "uid:gid"` (docker / rootful podman) or
+   * `HostConfig.UsernsMode: "keep-id:uid=N,gid=N"` (rootless podman)
+   * end up owned by this same identity on the host, so the plugin
+   * doesn't need recursive `chmod` sweeps to make outputs readable by
+   * Signal K.
    *
    * `null` on platforms where `process.getuid`/`getgid` are undefined
-   * (Windows); callers must not emit `--user` flags in that case.
+   * (Windows); callers must not emit a `User` field in that case.
    */
   hostUser?: { uid: number; gid: number } | null;
   /**
-   * Socket URL (e.g. `unix:///var/run/docker.sock`) for podman remote
-   * mode. Set when the in-container podman binary can't operate
-   * locally — typically because the image lacks the `uidmap` package
-   * and rootless user-namespace mapping fails with
-   * `exec: "newuidmap": executable file not found in $PATH` — but a
-   * host podman socket has been bind-mounted into the container.
-   *
-   * When set, every podman invocation is prefixed with
-   * `--remote --url <socket>` so commands route to the host daemon
-   * instead of attempting local execution. The actual runtime is
-   * still podman; the in-container binary just acts as a client.
-   *
-   * `undefined` for docker and for podman running directly.
+   * Path of the unix socket the dockerode client resolved to (e.g.
+   * `/var/run/docker.sock` or `/run/user/<uid>/podman/podman.sock`).
+   * Diagnostic only — surfaced by the doctor so a "no runtime" report
+   * can name which socket paths were tried. The live client itself is
+   * the `client.ts` singleton, not stored here, so this struct stays
+   * plain and serializable.
+   */
+  socketPath?: string;
+  /**
+   * @deprecated Superseded by `socketPath`. Never populated since the
+   * dockerode socket port (the `--remote --url` CLI fallback it described
+   * no longer exists). Kept as an optional field for one release so
+   * consumer plugins reading `ContainerRuntimeInfo` don't break on a
+   * removed property; will be removed in the next major.
    */
   remoteSocketUrl?: string;
 }
 
 export type ContainerState = "running" | "stopped" | "missing" | "no-runtime";
+
+/**
+ * Create-payload fragment that carries the UID-mapping decision from
+ * `userMappingFlags` into a dockerode `createContainer` call. Exactly one of
+ * the shapes applies per runtime (see `userMappingFlags` for the matrix):
+ *   - rootless podman → `{ HostConfig: { UsernsMode: "keep-id:uid=N,gid=N" } }`
+ *   - docker / rootful podman → `{ User: "N:N" }`
+ *   - opt-out / Windows / disableUserNamespaceRemap → `{}`
+ * The fragment is merged into the create options; `HostConfig` here is shallow
+ * and the caller deep-merges it with the rest of the container's `HostConfig`.
+ */
+export interface UserMappingPayload {
+  User?: string;
+  HostConfig?: { UsernsMode?: string };
+}
 
 /**
  * Drop-in shape for a managed container. Pass the same `ContainerConfig`

@@ -5,7 +5,9 @@ import {
   getContainerLogs,
   MAX_TAIL,
 } from "../containers.js";
+import { PassThrough } from "node:stream";
 import type { ContainerRuntimeInfo } from "../types.js";
+import { makeMockClient, streamFrom } from "./helpers/mockClient.js";
 
 const runtime: ContainerRuntimeInfo = {
   runtime: "podman",
@@ -13,249 +15,278 @@ const runtime: ContainerRuntimeInfo = {
   isPodmanDockerShim: false,
 };
 
-interface SpawnCall {
-  args: string[];
-  mergeStderr?: boolean;
+/** Give the `.logs(...).then(...)` microtask chain a tick to settle. */
+function flush(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
 /**
- * Stub the underlying `spawnRuntimeStreaming` so we can assert
- * exactly which CLI args `tailContainerLogs` produces, without
- * spawning anything real.
+ * Build a mock client whose `containerId` streams `text` from a
+ * (newly constructed each call) follow-logs stream, recording calls
+ * so tests can assert on the `logs(opts)` payload.
  */
-function makeStubSpawn() {
-  const calls: SpawnCall[] = [];
-  let stopCount = 0;
-  const stub: typeof import("../runtime.js").spawnRuntimeStreaming = (
-    _runtime,
-    args,
-    _onLine,
-    options,
-  ) => {
-    calls.push({ args: [...args], mergeStderr: options?.mergeStderr });
-    return {
-      stop: () => {
-        stopCount++;
-      },
-      pid: 1234,
-    };
-  };
-  return {
-    spawn: stub,
+function clientStreaming(
+  containerId: string,
+  text: string,
+  calls?: Map<string, unknown[]>,
+) {
+  return makeMockClient({
+    containers: {
+      [containerId]: { logs: () => Promise.resolve(streamFrom(text)) },
+    },
     calls,
-    stopCount: () => stopCount,
-  };
+  });
 }
 
 describe("tailContainerLogs", () => {
-  it("builds 'logs -f --tail 0 sk-foo' for default options", () => {
-    const stub = makeStubSpawn();
-    tailContainerLogs(runtime, "foo", () => {}, { spawn: stub.spawn });
-    assert.equal(stub.calls.length, 1);
-    assert.deepEqual(stub.calls[0].args, [
-      "logs",
-      "-f",
-      "--tail",
-      "0",
-      "sk-foo",
-    ]);
+  it("forwards demuxed lines to onLine and prefixes the container name", async () => {
+    const lines: string[] = [];
+    const calls = new Map<string, unknown[]>();
+    const client = clientStreaming("sk-foo", "line1\nline2\n", calls);
+    tailContainerLogs(runtime, "foo", (l) => lines.push(l), { client });
+    await flush();
+    assert.deepEqual(lines, ["line1", "line2"]);
+    // The handle resolved its log stream against the prefixed name.
+    const logCalls = calls.get("logs") as Array<{ id: string }>;
+    assert.equal(logCalls.length, 1);
+    assert.equal(logCalls[0].id, "sk-foo");
   });
 
-  it("honours startTail when supplied", () => {
-    const stub = makeStubSpawn();
-    tailContainerLogs(runtime, "foo", () => {}, {
-      spawn: stub.spawn,
-      startTail: 100,
+  it("requests a follow stream with default tail 0", async () => {
+    const calls = new Map<string, unknown[]>();
+    const client = clientStreaming("sk-foo", "", calls);
+    tailContainerLogs(runtime, "foo", () => {}, { client });
+    await flush();
+    const logCalls = calls.get("logs") as Array<{
+      opts: { follow?: boolean; tail?: number };
+    }>;
+    assert.equal(logCalls[0].opts.follow, true);
+    assert.equal(logCalls[0].opts.tail, 0);
+  });
+
+  it("honours startTail when supplied", async () => {
+    const calls = new Map<string, unknown[]>();
+    const client = clientStreaming("sk-foo", "", calls);
+    tailContainerLogs(runtime, "foo", () => {}, { client, startTail: 100 });
+    await flush();
+    const logCalls = calls.get("logs") as Array<{ opts: { tail?: number } }>;
+    assert.equal(logCalls[0].opts.tail, 100);
+  });
+
+  it("does not double-prefix when name already starts with sk-", async () => {
+    const calls = new Map<string, unknown[]>();
+    const client = clientStreaming("sk-bar", "", calls);
+    tailContainerLogs(runtime, "sk-bar", () => {}, { client });
+    await flush();
+    const logCalls = calls.get("logs") as Array<{ id: string }>;
+    assert.equal(logCalls[0].id, "sk-bar");
+  });
+
+  it("returned stop() destroys the underlying stream", async () => {
+    // An open (never-ended) PassThrough so only the explicit stop()
+    // calls drive destroy() — an already-ended stream would self-destroy
+    // on cleanup and inflate the count.
+    let destroyed = 0;
+    const stream = new PassThrough();
+    (stream as unknown as { destroy: () => void }).destroy = () => {
+      destroyed++;
+    };
+    const client = makeMockClient({
+      containers: { "sk-foo": { logs: () => Promise.resolve(stream) } },
     });
-    assert.deepEqual(stub.calls[0].args, [
-      "logs",
-      "-f",
-      "--tail",
-      "100",
-      "sk-foo",
-    ]);
-  });
-
-  it("does not double-prefix when name already starts with sk-", () => {
-    const stub = makeStubSpawn();
-    tailContainerLogs(runtime, "sk-bar", () => {}, { spawn: stub.spawn });
-    assert.equal(stub.calls[0].args[stub.calls[0].args.length - 1], "sk-bar");
-  });
-
-  it("returned stop() forwards to the underlying handle", () => {
-    const stub = makeStubSpawn();
-    const handle = tailContainerLogs(runtime, "foo", () => {}, {
-      spawn: stub.spawn,
-    });
+    const handle = tailContainerLogs(runtime, "foo", () => {}, { client });
+    await flush();
     handle.stop();
     handle.stop();
-    assert.equal(stub.stopCount(), 2);
+    assert.equal(destroyed, 2);
   });
 
-  it("sets mergeStderr so container stderr reaches onLine", () => {
+  it("merges container stderr into onLine via demux", async () => {
     // Regression for the bug where mayara (a Rust container that
-    // logs everything to stderr) produced no SSE output while
-    // spamming SK's server log as `tail error: ...`.  Combined
-    // stdout+stderr is the documented contract; the spawn options
-    // must reflect that.
-    const stub = makeStubSpawn();
-    tailContainerLogs(runtime, "foo", () => {}, { spawn: stub.spawn });
-    assert.equal(stub.calls[0].mergeStderr, true);
+    // logs everything to stderr) produced no SSE output.  The mock
+    // demuxStream forwards the source straight to the stdout sink,
+    // so any stderr the runtime multiplexes reaches onLine the same
+    // as stdout — combined stdout+stderr is the documented contract.
+    const lines: string[] = [];
+    const client = clientStreaming("sk-foo", "stderr-line\n");
+    tailContainerLogs(runtime, "foo", (l) => lines.push(l), { client });
+    await flush();
+    assert.deepEqual(lines, ["stderr-line"]);
   });
 
-  it("normalizes NaN/Infinity/negative startTail to 0", () => {
+  it("normalizes NaN/Infinity/negative startTail to 0", async () => {
     for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, -7]) {
-      const stub = makeStubSpawn();
-      tailContainerLogs(runtime, "foo", () => {}, {
-        spawn: stub.spawn,
-        startTail: bad,
-      });
+      const calls = new Map<string, unknown[]>();
+      const client = clientStreaming("sk-foo", "", calls);
+      tailContainerLogs(runtime, "foo", () => {}, { client, startTail: bad });
+      await flush();
+      const logCalls = calls.get("logs") as Array<{ opts: { tail?: number } }>;
       assert.equal(
-        stub.calls[0].args[3],
-        "0",
-        `startTail=${bad} should normalize to "0"`,
+        logCalls[0].opts.tail,
+        0,
+        `startTail=${bad} should normalize to 0`,
       );
     }
   });
 
-  it("caps absurd startTail at MAX_TAIL", () => {
-    const stub = makeStubSpawn();
+  it("caps absurd startTail at MAX_TAIL", async () => {
+    const calls = new Map<string, unknown[]>();
+    const client = clientStreaming("sk-foo", "", calls);
     tailContainerLogs(runtime, "foo", () => {}, {
-      spawn: stub.spawn,
+      client,
       startTail: MAX_TAIL + 1,
     });
-    assert.equal(stub.calls[0].args[3], String(MAX_TAIL));
+    await flush();
+    const logCalls = calls.get("logs") as Array<{ opts: { tail?: number } }>;
+    assert.equal(logCalls[0].opts.tail, MAX_TAIL);
+  });
+
+  it("sets spawnFailed and fires onExit(null) when logs() rejects", async () => {
+    const exits: Array<number | null> = [];
+    const client = makeMockClient({
+      containers: {
+        "sk-foo": {
+          logs: () => Promise.reject(new Error("no such container")),
+        },
+      },
+    });
+    const handle = tailContainerLogs(runtime, "foo", () => {}, {
+      client,
+      onExit: (code) => exits.push(code),
+    });
+    await flush();
+    assert.equal(handle.spawnFailed, true);
+    assert.deepEqual(exits, [null]);
+  });
+
+  it("handle.pid is always undefined (socket stream has no process)", async () => {
+    const client = clientStreaming("sk-foo", "");
+    const handle = tailContainerLogs(runtime, "foo", () => {}, { client });
+    await flush();
+    assert.equal(handle.pid, undefined);
   });
 });
 
 describe("getContainerLogs", () => {
-  it("calls 'logs --tail N sk-foo' and returns split lines", async () => {
-    const calls: string[][] = [];
-    const exec = async (
-      _r: ContainerRuntimeInfo,
-      args: string[],
-    ): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
-      calls.push([...args]);
-      return { stdout: "alpha\nbeta\ngamma", stderr: "", exitCode: 0 };
-    };
-    const lines = await getContainerLogs(runtime, "foo", { tail: 3 }, exec);
-    assert.deepEqual(calls[0], ["logs", "--tail", "3", "sk-foo"]);
+  it("requests logs for the prefixed name and returns split lines", async () => {
+    const calls = new Map<string, unknown[]>();
+    const client = makeMockClient({
+      containers: { "sk-foo": { logs: Buffer.from("alpha\nbeta\ngamma") } },
+      calls,
+    });
+    const lines = await getContainerLogs(runtime, "foo", { tail: 3 }, client);
+    const logCalls = calls.get("logs") as Array<{
+      id: string;
+      opts: { follow?: boolean; tail?: number };
+    }>;
+    assert.equal(logCalls[0].id, "sk-foo");
+    assert.equal(logCalls[0].opts.follow, false);
+    assert.equal(logCalls[0].opts.tail, 3);
     assert.deepEqual(lines, ["alpha", "beta", "gamma"]);
   });
 
   it("defaults tail to 200 when not supplied", async () => {
-    const calls: string[][] = [];
-    const exec = async (
-      _r: ContainerRuntimeInfo,
-      args: string[],
-    ): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
-      calls.push([...args]);
-      return { stdout: "", stderr: "", exitCode: 0 };
-    };
-    await getContainerLogs(runtime, "foo", undefined, exec);
-    assert.equal(calls[0][2], "200");
+    const calls = new Map<string, unknown[]>();
+    const client = makeMockClient({
+      containers: { "sk-foo": { logs: Buffer.from("") } },
+      calls,
+    });
+    await getContainerLogs(runtime, "foo", undefined, client);
+    const logCalls = calls.get("logs") as Array<{ opts: { tail?: number } }>;
+    assert.equal(logCalls[0].opts.tail, 200);
   });
 
   it("caps tail at MAX_TAIL", async () => {
-    const calls: string[][] = [];
-    const exec = async (
-      _r: ContainerRuntimeInfo,
-      args: string[],
-    ): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
-      calls.push([...args]);
-      return { stdout: "", stderr: "", exitCode: 0 };
-    };
-    await getContainerLogs(runtime, "foo", { tail: MAX_TAIL + 1000 }, exec);
-    assert.equal(calls[0][2], String(MAX_TAIL));
+    const calls = new Map<string, unknown[]>();
+    const client = makeMockClient({
+      containers: { "sk-foo": { logs: Buffer.from("") } },
+      calls,
+    });
+    await getContainerLogs(runtime, "foo", { tail: MAX_TAIL + 1000 }, client);
+    const logCalls = calls.get("logs") as Array<{ opts: { tail?: number } }>;
+    assert.equal(logCalls[0].opts.tail, MAX_TAIL);
   });
 
   it("floors tail to 0 when negative", async () => {
-    const calls: string[][] = [];
-    const exec = async (
-      _r: ContainerRuntimeInfo,
-      args: string[],
-    ): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
-      calls.push([...args]);
-      return { stdout: "", stderr: "", exitCode: 0 };
-    };
-    await getContainerLogs(runtime, "foo", { tail: -50 }, exec);
-    assert.equal(calls[0][2], "0");
+    const calls = new Map<string, unknown[]>();
+    const client = makeMockClient({
+      containers: { "sk-foo": { logs: Buffer.from("") } },
+      calls,
+    });
+    await getContainerLogs(runtime, "foo", { tail: -50 }, client);
+    const logCalls = calls.get("logs") as Array<{ opts: { tail?: number } }>;
+    assert.equal(logCalls[0].opts.tail, 0);
   });
 
-  it("includes --since when supplied", async () => {
-    const calls: string[][] = [];
-    const exec = async (
-      _r: ContainerRuntimeInfo,
-      args: string[],
-    ): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
-      calls.push([...args]);
-      return { stdout: "", stderr: "", exitCode: 0 };
-    };
-    await getContainerLogs(runtime, "foo", { since: 1700000000 }, exec);
-    assert.ok(calls[0].includes("--since"));
-    assert.equal(calls[0][calls[0].indexOf("--since") + 1], "1700000000");
+  it("includes since when supplied", async () => {
+    const calls = new Map<string, unknown[]>();
+    const client = makeMockClient({
+      containers: { "sk-foo": { logs: Buffer.from("") } },
+      calls,
+    });
+    await getContainerLogs(runtime, "foo", { since: 1700000000 }, client);
+    const logCalls = calls.get("logs") as Array<{ opts: { since?: number } }>;
+    assert.equal(logCalls[0].opts.since, 1700000000);
   });
 
-  it("omits --since when negative, NaN or Infinity", async () => {
+  it("omits since when negative, NaN or Infinity", async () => {
     for (const bad of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
-      const calls: string[][] = [];
-      const exec = async (
-        _r: ContainerRuntimeInfo,
-        args: string[],
-      ): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
-        calls.push([...args]);
-        return { stdout: "", stderr: "", exitCode: 0 };
-      };
-      await getContainerLogs(runtime, "foo", { since: bad }, exec);
-      assert.ok(
-        !calls[0].includes("--since"),
-        `since=${bad} should not become --since`,
+      const calls = new Map<string, unknown[]>();
+      const client = makeMockClient({
+        containers: { "sk-foo": { logs: Buffer.from("") } },
+        calls,
+      });
+      await getContainerLogs(runtime, "foo", { since: bad }, client);
+      const logCalls = calls.get("logs") as Array<{
+        opts: { since?: number };
+      }>;
+      assert.equal(
+        logCalls[0].opts.since,
+        undefined,
+        `since=${bad} should not be forwarded`,
       );
     }
   });
 
   it("falls back to default 200 when tail is NaN or Infinity", async () => {
     for (const bad of [Number.NaN, Number.POSITIVE_INFINITY]) {
-      const calls: string[][] = [];
-      const exec = async (
-        _r: ContainerRuntimeInfo,
-        args: string[],
-      ): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
-        calls.push([...args]);
-        return { stdout: "", stderr: "", exitCode: 0 };
-      };
-      await getContainerLogs(runtime, "foo", { tail: bad }, exec);
-      assert.equal(calls[0][2], "200", `tail=${bad} should fall back to "200"`);
+      const calls = new Map<string, unknown[]>();
+      const client = makeMockClient({
+        containers: { "sk-foo": { logs: Buffer.from("") } },
+        calls,
+      });
+      await getContainerLogs(runtime, "foo", { tail: bad }, client);
+      const logCalls = calls.get("logs") as Array<{ opts: { tail?: number } }>;
+      assert.equal(
+        logCalls[0].opts.tail,
+        200,
+        `tail=${bad} should fall back to 200`,
+      );
     }
   });
 
-  it("merges stdout and stderr into the line array", async () => {
-    const exec = async (): Promise<{
-      stdout: string;
-      stderr: string;
-      exitCode: number;
-    }> => ({
-      stdout: "out1\nout2",
-      stderr: "err1",
-      exitCode: 0,
+  it("demuxes the multiplexed buffer into a line array", async () => {
+    // The mock demuxStream forwards the source straight to stdout, so
+    // both stdout and stderr text the runtime multiplexes arrive on the
+    // combined channel (matching `podman logs` semantics).
+    const client = makeMockClient({
+      containers: { "sk-foo": { logs: Buffer.from("out1\nout2\nerr1") } },
     });
-    const lines = await getContainerLogs(runtime, "foo", undefined, exec);
+    const lines = await getContainerLogs(runtime, "foo", undefined, client);
     assert.deepEqual(lines, ["out1", "out2", "err1"]);
   });
 
-  it("throws when exec returns non-zero", async () => {
-    const exec = async (): Promise<{
-      stdout: string;
-      stderr: string;
-      exitCode: number;
-    }> => ({
-      stdout: "",
-      stderr: "No such container",
-      exitCode: 125,
+  it("throws when the runtime rejects (e.g. no such container)", async () => {
+    const client = makeMockClient({
+      containers: {
+        "sk-ghost": {
+          logs: () => Promise.reject(new Error("No such container")),
+        },
+      },
     });
     await assert.rejects(
-      () => getContainerLogs(runtime, "ghost", undefined, exec),
-      /No such container/,
+      () => getContainerLogs(runtime, "ghost", undefined, client),
+      /logs ghost/,
     );
   });
 
@@ -263,55 +294,34 @@ describe("getContainerLogs", () => {
     // Real `podman logs` output typically has a trailing newline,
     // which our split would otherwise turn into an empty array
     // entry.  Verify we drop it.
-    const exec = async (): Promise<{
-      stdout: string;
-      stderr: string;
-      exitCode: number;
-    }> => ({
-      stdout: "a\nb\n",
-      stderr: "",
-      exitCode: 0,
+    const client = makeMockClient({
+      containers: { "sk-foo": { logs: Buffer.from("a\nb\n") } },
     });
-    const lines = await getContainerLogs(runtime, "foo", undefined, exec);
+    const lines = await getContainerLogs(runtime, "foo", undefined, client);
     assert.deepEqual(lines, ["a", "b"]);
   });
 
-  it("does not synthesize a phantom blank line between stdout and stderr", async () => {
-    // stdout already ends with `\n` and stderr is non-empty.  A
-    // naive `[stdout, stderr].join("\n")` would produce
-    // "out1\nout2\n\nerr1", splitting to ["out1","out2","","err1"]
-    // — a blank line nobody actually emitted.
-    const exec = async (): Promise<{
-      stdout: string;
-      stderr: string;
-      exitCode: number;
-    }> => ({
-      stdout: "out1\nout2\n",
-      stderr: "err1",
-      exitCode: 0,
+  it("does not emit a phantom blank line within demuxed text", async () => {
+    const client = makeMockClient({
+      containers: { "sk-foo": { logs: Buffer.from("out1\nout2\nerr1") } },
     });
-    const lines = await getContainerLogs(runtime, "foo", undefined, exec);
+    const lines = await getContainerLogs(runtime, "foo", undefined, client);
     assert.deepEqual(lines, ["out1", "out2", "err1"]);
   });
 
-  it("does not emit a phantom leading empty line when one side is empty", async () => {
-    // A naive `${stdout}\n${stderr}` concat injects "\n" + "err"
-    // when stdout=="", producing ["", "err"].  Verify the filter
-    // suppresses that.  Symmetrical for stderr=="".
-    for (const fixture of [
-      { stdout: "", stderr: "err1\nerr2" },
-      { stdout: "out1\nout2", stderr: "" },
-    ]) {
-      const exec = async (): Promise<{
-        stdout: string;
-        stderr: string;
-        exitCode: number;
-      }> => ({ ...fixture, exitCode: 0 });
-      const lines = await getContainerLogs(runtime, "foo", undefined, exec);
-      assert.ok(
-        !lines.some((l) => l === ""),
-        `no empty lines expected, got ${JSON.stringify(lines)}`,
-      );
-    }
+  it("returns an empty array for empty log output", async () => {
+    const client = makeMockClient({
+      containers: { "sk-foo": { logs: Buffer.from("") } },
+    });
+    const lines = await getContainerLogs(runtime, "foo", undefined, client);
+    assert.deepEqual(lines, []);
+  });
+
+  it("drops trailing empty lines (no phantom blank from the final newline)", async () => {
+    const client = makeMockClient({
+      containers: { "sk-foo": { logs: Buffer.from("err1\nerr2\n") } },
+    });
+    const lines = await getContainerLogs(runtime, "foo", undefined, client);
+    assert.deepEqual(lines, ["err1", "err2"]);
   });
 });

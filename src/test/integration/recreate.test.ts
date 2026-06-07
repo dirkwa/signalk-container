@@ -1,7 +1,5 @@
 import { describe, it, after, before } from "node:test";
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,6 +9,7 @@ import {
   getContainerState,
   getLiveContainerConfig,
 } from "../../containers.js";
+import { detectRuntime } from "../../runtime.js";
 import containerManagerPlugin from "../../index.js";
 import type {
   ContainerManagerApi,
@@ -18,27 +17,17 @@ import type {
   PluginConfig,
 } from "../../types.js";
 
-const execFileP = promisify(execFile);
-
 async function hasContainerRuntime(): Promise<ContainerRuntimeInfo | null> {
   if (process.platform === "win32") return null;
-  for (const rt of ["podman", "docker"] as const) {
-    try {
-      await execFileP(rt, ["--version"], { timeout: 5000 });
-      return { runtime: rt, version: "test", isPodmanDockerShim: false };
-    } catch {
-      // try next
-    }
-  }
-  return null;
+  return detectRuntime("auto");
 }
 
 const CONTAINER_NAME = "recreate-test";
 
 // trap-and-wait so the container exits promptly on SIGTERM — busybox
-// `sleep` and `tail` ignore SIGTERM and force `podman stop` into its 10s
-// SIGKILL fallback, which races against execRuntime's 10s execFile
-// timeout and the subsequent `rm -f`.
+// `sleep` and `tail` ignore SIGTERM and force `stop` into its 10s SIGKILL
+// fallback, which the destructive `removeContainer` path sidesteps with
+// `stop({ t: 0 })`.
 const TRAP_AND_WAIT_CMD = ["sh", "-c", "trap exit TERM; sleep 60 & wait"];
 
 /**

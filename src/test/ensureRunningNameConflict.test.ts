@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { ensureRunning } from "../containers.js";
 import { _setCurrentHostIdsForTesting } from "../runtime.js";
 import type { ContainerConfig, ContainerRuntimeInfo } from "../types.js";
+import type { ContainerClient } from "../client.js";
+import { makeMockClient } from "./helpers/mockClient.js";
 
 const docker: ContainerRuntimeInfo = {
   runtime: "docker",
@@ -13,40 +15,36 @@ const docker: ContainerRuntimeInfo = {
 before(() => _setCurrentHostIdsForTesting(() => ({ uid: 1000, gid: 1000 })));
 after(() => _setCurrentHostIdsForTesting(null));
 
-interface ExecCall {
-  args: string[];
-}
-
-function makeRouterExec(
-  respond: (
-    args: string[],
-    callIndex: number,
-  ) => { stdout: string; stderr?: string; exitCode: number },
-): {
-  exec: (
-    runtime: ContainerRuntimeInfo,
-    args: string[],
-  ) => Promise<{ stdout: string; stderr: string; exitCode: number }>;
-  calls: ExecCall[];
-} {
-  const calls: ExecCall[] = [];
-  let i = 0;
-  const exec = async (
-    _runtime: ContainerRuntimeInfo,
-    args: string[],
-  ): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
-    calls.push({ args: [...args] });
-    const r = respond(args, i++);
-    return { stdout: r.stdout, stderr: r.stderr ?? "", exitCode: r.exitCode };
-  };
-  return { exec, calls };
-}
-
 const requested: ContainerConfig = {
   image: "questdb/questdb",
   tag: "9.0.0",
   env: { FOO: "2" },
 };
+
+/**
+ * Wrap a base mock client, overriding `createContainer` with a caller-supplied
+ * implementation. `makeMockClient` always succeeds on create; the name-conflict
+ * scenario needs the FIRST create to throw and the second to succeed, which a
+ * closure-driven override expresses without forking the whole mock.
+ */
+function withCreateOverride(
+  base: ContainerClient,
+  createContainer: (opts: unknown) => Promise<unknown>,
+): ContainerClient {
+  return new Proxy(base, {
+    get(target, prop, receiver) {
+      if (prop === "createContainer") return createContainer;
+      return Reflect.get(target, prop, receiver);
+    },
+  }) as ContainerClient;
+}
+
+/** A name-conflict error as the runtime surfaces it over the socket. */
+function nameConflict(): Error {
+  return new Error(
+    'the container name "sk-questdb" is already in use by abc123',
+  );
+}
 
 describe("ensureRunning — stale-container name conflict on create", () => {
   it("removes the stale container and retries when create hits a name conflict", async () => {
@@ -54,38 +52,26 @@ describe("ensureRunning — stale-container name conflict on create", () => {
     // corrupt storage layer after an unclean shutdown), so getContainerState
     // reports "missing". The create then collides with the still-registered
     // name; ensureRunning must remove the stale container and retry once.
-    let runCount = 0;
-    const { exec, calls } = makeRouterExec((args) => {
-      const cmd = args[0];
-      // getContainerState — in ensureRunning itself and inside
-      // removeContainer's fixVolumePermissions: inspect fails → "missing".
-      if (
-        cmd === "inspect" &&
-        args.includes("{{.State.Status}}|{{.State.Running}}|{{.State.Pid}}")
-      ) {
-        return { stdout: "", stderr: "no such object", exitCode: 1 };
-      }
-      // imageExists → image inspect: image present, skip pull.
-      if (cmd === "image" && args[1] === "inspect") {
-        return { stdout: "ok", exitCode: 0 };
-      }
-      // First create fails on the name conflict; second create succeeds.
-      if (cmd === "run") {
-        runCount++;
-        if (runCount === 1) {
-          return {
-            stdout: "",
-            stderr:
-              'the container name "sk-questdb" is already in use by abc123',
-            exitCode: 125,
-          };
-        }
-        return { stdout: "id", exitCode: 0 };
-      }
-      // removeContainer: stop (result ignored), then rm -f.
-      if (cmd === "stop") return { stdout: "", exitCode: 0 };
-      if (cmd === "rm") return { stdout: "ok", exitCode: 0 };
-      throw new Error(`unexpected exec: ${args.join(" ")}`);
+    const calls = new Map<string, unknown[]>();
+    let createCount = 0;
+    // Container is "missing" (no inspect registered → 404 throughout, which
+    // also drives removeContainer's fixVolumePermissions getContainerState to
+    // "missing"). Image is present → no pull. First create throws the name
+    // conflict, second succeeds.
+    const base = makeMockClient({
+      images: { "questdb/questdb:9.0.0": { Id: "sha256:abc" } },
+      calls,
+    });
+    const client = withCreateOverride(base, (opts) => {
+      createCount++;
+      const list = calls.get("createContainer") ?? [];
+      list.push(opts);
+      calls.set("createContainer", list);
+      if (createCount === 1) return Promise.reject(nameConflict());
+      // Hand back a real mock container so createAndStart's `.start()` works.
+      return Promise.resolve(
+        base.getContainer((opts as { name?: string }).name ?? "created"),
+      );
     });
     const debugLines: string[] = [];
     await ensureRunning(
@@ -94,11 +80,13 @@ describe("ensureRunning — stale-container name conflict on create", () => {
       requested,
       (m) => debugLines.push(m),
       undefined,
-      exec,
+      client,
     );
-    const cmds = calls.map((c) => c.args[0]);
-    assert.equal(runCount, 2, "create should be attempted exactly twice");
-    assert.ok(cmds.includes("rm"), "stale container should be removed");
+    assert.equal(createCount, 2, "create should be attempted exactly twice");
+    assert.ok(
+      (calls.get("remove") ?? []).length > 0,
+      "stale container should be removed",
+    );
     assert.ok(
       debugLines.some((l) => l.includes("name conflict")),
       `expected name-conflict message, got: ${debugLines.join(" | ")}`,
@@ -106,31 +94,31 @@ describe("ensureRunning — stale-container name conflict on create", () => {
   });
 
   it("does not retry create when the failure is unrelated to a name conflict", async () => {
-    let runCount = 0;
-    const { exec, calls } = makeRouterExec((args) => {
-      const cmd = args[0];
-      if (
-        cmd === "inspect" &&
-        args.includes("{{.State.Status}}|{{.State.Running}}|{{.State.Pid}}")
-      ) {
-        return { stdout: "", stderr: "no such object", exitCode: 1 };
-      }
-      if (cmd === "image" && args[1] === "inspect") {
-        return { stdout: "ok", exitCode: 0 };
-      }
-      if (cmd === "run") {
-        runCount++;
-        return { stdout: "", stderr: "no space left on device", exitCode: 125 };
-      }
-      throw new Error(`unexpected exec: ${args.join(" ")}`);
+    const calls = new Map<string, unknown[]>();
+    let createCount = 0;
+    const base = makeMockClient({
+      images: { "questdb/questdb:9.0.0": { Id: "sha256:abc" } },
+      calls,
+    });
+    const client = withCreateOverride(base, (opts) => {
+      createCount++;
+      const list = calls.get("createContainer") ?? [];
+      list.push(opts);
+      calls.set("createContainer", list);
+      // A disk-full failure: categorized as "disk", never as a conflict, so
+      // ensureRunning must not remove-and-retry.
+      return Promise.reject(new Error("no space left on device"));
     });
     await assert.rejects(
-      ensureRunning(docker, "questdb", requested, () => {}, undefined, exec),
-      /Failed to create .*no space left on device/,
+      ensureRunning(docker, "questdb", requested, () => {}, undefined, client),
+      // The thrown message now carries the categorized userMessage rather than
+      // the raw runtime text ("no space left on device" → "Disk full.").
+      /Failed to create .*Disk full/,
     );
-    assert.equal(runCount, 1, "create should be attempted exactly once");
-    assert.ok(
-      !calls.map((c) => c.args[0]).includes("rm"),
+    assert.equal(createCount, 1, "create should be attempted exactly once");
+    assert.equal(
+      (calls.get("remove") ?? []).length,
+      0,
       "no removal should be attempted for an unrelated failure",
     );
   });

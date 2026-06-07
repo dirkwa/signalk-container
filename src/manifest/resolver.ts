@@ -3,7 +3,7 @@ import type {
   ContainerRuntimeInfo,
   ResolveResult,
 } from "../types.js";
-import type { ExecFn } from "../containers.js";
+import type { ContainerClient } from "../client.js";
 
 /** sha256 digest format used everywhere a digest is declared or stored. */
 export const DIGEST_RE = /^sha256:[a-f0-9]{64}$/;
@@ -18,21 +18,23 @@ export interface ResolveDeps {
   imageExists(
     runtime: ContainerRuntimeInfo,
     image: string,
-    exec?: ExecFn,
+    client?: ContainerClient,
   ): Promise<boolean>;
   pullImage(
     runtime: ContainerRuntimeInfo,
     image: string,
     onProgress?: (msg: string) => void,
+    client?: ContainerClient,
   ): Promise<void>;
   getRepoDigest(
     runtime: ContainerRuntimeInfo,
     image: string,
-    exec?: ExecFn,
+    client?: ContainerClient,
   ): Promise<string | null>;
   getImageDigest(
     runtime: ContainerRuntimeInfo,
     imageOrContainer: string,
+    client?: ContainerClient,
   ): Promise<string | null>;
 }
 

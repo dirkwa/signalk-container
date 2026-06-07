@@ -1,5 +1,59 @@
 import type { ContainerResourceLimits, ContainerRuntimeInfo } from "./types.js";
-import { execRuntime } from "./runtime.js";
+import {
+  getClient,
+  safe,
+  safeInspect,
+  type ContainerClient,
+} from "./client.js";
+
+/**
+ * dockerode `HostConfig` resource fields. The Docker API takes CPU as a
+ * NanoCpus integer and memory as a byte count, where the CLI took
+ * `--cpus 1.5` and `--memory 512m`. `prefixedName` callers build this
+ * fragment and merge it into a createContainer payload or pass it to
+ * `container.update()`.
+ */
+export interface ResourceHostConfig {
+  NanoCpus?: number;
+  CpuShares?: number;
+  CpusetCpus?: string;
+  Memory?: number;
+  MemorySwap?: number;
+  MemoryReservation?: number;
+  PidsLimit?: number;
+  OomScoreAdj?: number;
+}
+
+/**
+ * Parse a memory string the consumer-plugin / config-panel form uses
+ * (`"512m"`, `"2g"`, `"1024k"`, `"536870912"`/`"...b"`) into bytes for
+ * the Docker API. Uses binary units (1m = 1024*1024), matching how
+ * `bytesToString` in containers.ts renders the round-trip.
+ *
+ * Throws on a malformed non-empty value (e.g. `"512mb"`, `"abc"`). This
+ * is a system boundary: silently omitting the field would remove the cap
+ * on create and let `tryLiveUpdate` report success after applying
+ * nothing — a typo must fail loudly, before the container is touched.
+ */
+export function parseMemoryToBytes(value: string): number {
+  const m = value.trim().match(/^(\d+(?:\.\d+)?)\s*([bkmg]?)$/i);
+  const n = m ? Number(m[1]) : NaN;
+  if (!m || !Number.isFinite(n)) {
+    throw new Error(
+      `invalid memory value "${value}" (expected e.g. "512m", "2g", "1024k", or a byte count)`,
+    );
+  }
+  const unit = (m[2] || "b").toLowerCase();
+  const mult =
+    unit === "g"
+      ? 1024 ** 3
+      : unit === "m"
+        ? 1024 ** 2
+        : unit === "k"
+          ? 1024
+          : 1;
+  return Math.round(n * mult);
+}
 
 /**
  * Resource limits known to be applyable via `podman update` /
@@ -267,51 +321,60 @@ function clean(limits: ContainerResourceLimits): ContainerResourceLimits {
 }
 
 /**
- * Translate ContainerResourceLimits into podman/docker run flags.
- * Returns a flat array suitable for splicing into the run argv.
- * Ordering doesn't matter — both runtimes accept these in any order.
+ * Translate ContainerResourceLimits into a dockerode `HostConfig`
+ * resource fragment for `createContainer`. CPU becomes NanoCpus, memory
+ * strings become byte counts.
  *
- * Fields whose backing cgroup controller is unavailable on the host
- * are silently dropped — caller should call `filterUnsupportedLimits`
+ * Fields whose backing cgroup controller is unavailable on the host are
+ * silently dropped — caller should call `filterUnsupportedLimits`
  * separately if it wants to log the dropped set.
  */
-export function resourceFlagsForRun(
+export function resourcePayloadForRun(
   limits: ContainerResourceLimits | undefined,
   runtime: ContainerRuntimeInfo,
-): string[] {
-  if (!limits) return [];
+): ResourceHostConfig {
+  if (!limits) return {};
   const { accepted } = filterUnsupportedLimits(limits, runtime);
-  const args: string[] = [];
+  return limitsToHostConfig(accepted);
+}
 
-  if (accepted.cpus !== undefined && accepted.cpus !== null) {
-    args.push("--cpus", String(accepted.cpus));
+/**
+ * Shared `ContainerResourceLimits` → `ResourceHostConfig` translation.
+ * Skips null/undefined and unparseable memory values. `cpus` → NanoCpus
+ * (integer; rounded to avoid float noise), memory strings → bytes.
+ */
+function limitsToHostConfig(
+  limits: ContainerResourceLimits,
+): ResourceHostConfig {
+  const hc: ResourceHostConfig = {};
+  if (limits.cpus !== undefined && limits.cpus !== null) {
+    hc.NanoCpus = Math.round(limits.cpus * 1_000_000_000);
   }
-  if (accepted.cpuShares !== undefined && accepted.cpuShares !== null) {
-    args.push("--cpu-shares", String(accepted.cpuShares));
+  if (limits.cpuShares !== undefined && limits.cpuShares !== null) {
+    hc.CpuShares = limits.cpuShares;
   }
-  if (accepted.cpusetCpus !== undefined && accepted.cpusetCpus !== null) {
-    args.push("--cpuset-cpus", accepted.cpusetCpus);
+  if (limits.cpusetCpus !== undefined && limits.cpusetCpus !== null) {
+    hc.CpusetCpus = limits.cpusetCpus;
   }
-  if (accepted.memory !== undefined && accepted.memory !== null) {
-    args.push("--memory", accepted.memory);
+  if (limits.memory !== undefined && limits.memory !== null) {
+    hc.Memory = parseMemoryToBytes(limits.memory);
   }
-  if (accepted.memorySwap !== undefined && accepted.memorySwap !== null) {
-    args.push("--memory-swap", accepted.memorySwap);
+  if (limits.memorySwap !== undefined && limits.memorySwap !== null) {
+    hc.MemorySwap = parseMemoryToBytes(limits.memorySwap);
   }
   if (
-    accepted.memoryReservation !== undefined &&
-    accepted.memoryReservation !== null
+    limits.memoryReservation !== undefined &&
+    limits.memoryReservation !== null
   ) {
-    args.push("--memory-reservation", accepted.memoryReservation);
+    hc.MemoryReservation = parseMemoryToBytes(limits.memoryReservation);
   }
-  if (accepted.pidsLimit !== undefined && accepted.pidsLimit !== null) {
-    args.push("--pids-limit", String(accepted.pidsLimit));
+  if (limits.pidsLimit !== undefined && limits.pidsLimit !== null) {
+    hc.PidsLimit = limits.pidsLimit;
   }
-  if (accepted.oomScoreAdj !== undefined && accepted.oomScoreAdj !== null) {
-    args.push("--oom-score-adj", String(accepted.oomScoreAdj));
+  if (limits.oomScoreAdj !== undefined && limits.oomScoreAdj !== null) {
+    hc.OomScoreAdj = limits.oomScoreAdj;
   }
-
-  return args;
+  return hc;
 }
 
 /**
@@ -322,9 +385,9 @@ export function resourceFlagsForRun(
  *
  * Caller should fall back to recreate when this returns null.
  */
-export function resourceFlagsForUpdate(
+export function resourcePayloadForUpdate(
   limits: ContainerResourceLimits,
-): string[] | null {
+): ResourceHostConfig | null {
   // Check whether every set field is in the live-updatable set.
   for (const key of Object.keys(limits) as Array<
     keyof ContainerResourceLimits
@@ -335,43 +398,16 @@ export function resourceFlagsForUpdate(
       return null;
     }
   }
-
-  const args: string[] = [];
-  if (limits.cpus !== undefined && limits.cpus !== null) {
-    args.push("--cpus", String(limits.cpus));
-  }
-  if (limits.cpuShares !== undefined && limits.cpuShares !== null) {
-    args.push("--cpu-shares", String(limits.cpuShares));
-  }
-  if (limits.memory !== undefined && limits.memory !== null) {
-    args.push("--memory", limits.memory);
-  }
-  if (limits.memorySwap !== undefined && limits.memorySwap !== null) {
-    args.push("--memory-swap", limits.memorySwap);
-  }
-  if (
-    limits.memoryReservation !== undefined &&
-    limits.memoryReservation !== null
-  ) {
-    args.push("--memory-reservation", limits.memoryReservation);
-  }
-  if (limits.pidsLimit !== undefined && limits.pidsLimit !== null) {
-    args.push("--pids-limit", String(limits.pidsLimit));
-  }
-  return args;
+  // oomScoreAdj is excluded from LIVE_UPDATABLE_FIELDS, so the only fields
+  // that reach here are CPU/memory/pids — all valid `container.update`
+  // inputs. Reuse the shared translator and drop OomScoreAdj if present.
+  const hc = limitsToHostConfig(limits);
+  delete hc.OomScoreAdj;
+  return hc;
 }
 
 /**
- * Type of the runtime exec function. Matches `execRuntime` from
- * runtime.ts; passed in by the caller so tests can inject a stub.
- */
-export type ExecRuntimeFn = (
-  runtime: ContainerRuntimeInfo,
-  args: string[],
-) => Promise<{ stdout: string; stderr: string; exitCode: number }>;
-
-/**
- * Attempt a live `podman update` / `docker update` on the named
+ * Attempt a live resource update on the named
  * container. Returns ok=true on success, ok=false on any failure
  * (caller is expected to fall back to recreate).
  *
@@ -395,29 +431,30 @@ export async function tryLiveUpdate(
   runtime: ContainerRuntimeInfo,
   fullName: string,
   limits: ContainerResourceLimits,
-  exec: ExecRuntimeFn = execRuntime,
+  client: ContainerClient = getClient(),
 ): Promise<{ ok: boolean; stderr?: string }> {
   const { accepted } = filterUnsupportedLimits(limits, runtime);
-  const flags = resourceFlagsForUpdate(accepted);
-  if (flags === null) {
+  const payload = resourcePayloadForUpdate(accepted);
+  if (payload === null) {
     return { ok: false, stderr: "limits contain non-live-updatable fields" };
   }
-  if (flags.length === 0) {
-    // Nothing to apply via update. Don't claim vacuous success
-    // without verifying the target exists — the caller may be
-    // operating on a container that was removed out from under us.
-    const exists = await exec(runtime, ["inspect", fullName]);
-    if (exists.exitCode !== 0) {
-      return {
-        ok: false,
-        stderr: `container ${fullName} does not exist`,
-      };
+  if (Object.keys(payload).length === 0) {
+    // Nothing to apply via update. Don't claim vacuous success without
+    // verifying the target exists — the caller may be operating on a
+    // container that was removed out from under us.
+    const info = await safeInspect(() =>
+      client.getContainer(fullName).inspect(),
+    );
+    if (info === null) {
+      return { ok: false, stderr: `container ${fullName} does not exist` };
     }
     return { ok: true };
   }
-  const result = await exec(runtime, ["update", ...flags, fullName]);
-  if (result.exitCode !== 0) {
-    return { ok: false, stderr: result.stderr || result.stdout };
+  const result = await safe(() =>
+    client.getContainer(fullName).update(payload),
+  );
+  if (!result.ok) {
+    return { ok: false, stderr: result.error.userMessage };
   }
   return { ok: true };
 }

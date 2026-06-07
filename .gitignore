@@ -14,3 +14,5 @@ package-lock.json
 .mf/
 # Local CodeRabbit review output — see AGENTS.md "Pre-PR checklist".
 cr-review*
+# Disk-backed scratch dir for local spikes (not /tmp — that's RAM on trixie).
+.scratch/

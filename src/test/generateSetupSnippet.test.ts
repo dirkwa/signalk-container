@@ -275,23 +275,28 @@ describe("generateSetupSnippet — selfId handling", () => {
   });
 });
 
-describe("generateSetupSnippet — Dockerfile sidecar", () => {
-  it("podman → installs podman, mentions podman-remote alternative", async () => {
+describe("generateSetupSnippet — Dockerfile note", () => {
+  it("podman → states no image change is needed (talks over the socket)", async () => {
     const r = generateSetupSnippet(
       fakeResult({
-        binary: { name: "podman", path: "/usr/bin/podman", version: "5.4.2" },
+        binary: { name: "podman", path: null, version: "5.4.2" },
       }),
       "compose",
       { uid: 1000, gid: 1000 },
     );
-    assert.match(r.dockerfile, /apt-get install -y podman/);
-    assert.match(r.dockerfile, /podman-remote/);
+    // The port removed the CLI requirement — the Dockerfile note must NOT
+    // tell operators to install a runtime CLI.
+    assert.doesNotMatch(
+      r.dockerfile,
+      /apt-get install|docker-ce-cli|podman-remote/,
+    );
+    assert.match(r.dockerfile, /No Dockerfile changes are needed/);
   });
 
-  it("docker → installs docker-ce-cli", async () => {
+  it("docker → states no image change is needed (talks over the socket)", async () => {
     const r = generateSetupSnippet(
       fakeResult({
-        binary: { name: "docker", path: "/usr/bin/docker", version: "26.1.4" },
+        binary: { name: "docker", path: null, version: "26.1.4" },
         daemon: {
           reachable: true,
           rootless: false,
@@ -302,7 +307,11 @@ describe("generateSetupSnippet — Dockerfile sidecar", () => {
       "compose",
       { uid: 1000, gid: 1000 },
     );
-    assert.match(r.dockerfile, /docker-ce-cli/);
+    assert.doesNotMatch(
+      r.dockerfile,
+      /apt-get install|docker-ce-cli|podman-remote/,
+    );
+    assert.match(r.dockerfile, /No Dockerfile changes are needed/);
   });
 });
 

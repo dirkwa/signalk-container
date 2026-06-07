@@ -3,6 +3,9 @@ import assert from "node:assert/strict";
 import { ensureRunning } from "../containers.js";
 import { _setCurrentHostIdsForTesting } from "../runtime.js";
 import type { ContainerConfig, ContainerRuntimeInfo } from "../types.js";
+import { makeMockClient } from "./helpers/mockClient.js";
+
+type Json = Record<string, unknown>;
 
 const docker: ContainerRuntimeInfo = {
   runtime: "docker",
@@ -11,70 +14,53 @@ const docker: ContainerRuntimeInfo = {
 };
 
 // Pin the host UID/GID resolver so user-mapping flags are deterministic
-// regardless of who runs `npm test`. `buildLiveConfigStdout` defaults to
+// regardless of who runs `npm test`. `buildLiveInspect` defaults to
 // `user: "1000:1000"` to match.
 before(() => _setCurrentHostIdsForTesting(() => ({ uid: 1000, gid: 1000 })));
 after(() => _setCurrentHostIdsForTesting(null));
 
-const SEP = "\x1f";
-
-interface ExecCall {
-  args: string[];
-}
-
 /**
- * Reusable router for the various inspect/start/stop/rm/run shapes
- * `ensureRunning` issues. Pass a state machine via `respond(args, callIndex)`
- * to drive it through the scenario.
+ * Build a dockerode-style `inspect()` result carrying both the State fields
+ * `getContainerState` reads and the Config/HostConfig fields
+ * `getLiveContainerConfig` reads, since both go through the same
+ * `getContainer(name).inspect()`.
  */
-function makeRouterExec(
-  respond: (
-    args: string[],
-    callIndex: number,
-  ) => { stdout: string; stderr?: string; exitCode: number },
-): {
-  exec: (
-    runtime: ContainerRuntimeInfo,
-    args: string[],
-  ) => Promise<{ stdout: string; stderr: string; exitCode: number }>;
-  calls: ExecCall[];
-} {
-  const calls: ExecCall[] = [];
-  let i = 0;
-  const exec = async (
-    _runtime: ContainerRuntimeInfo,
-    args: string[],
-  ): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
-    calls.push({ args: [...args] });
-    const r = respond(args, i++);
-    return { stdout: r.stdout, stderr: r.stderr ?? "", exitCode: r.exitCode };
+function buildLiveInspect(parts: {
+  state?: { status: string; running: boolean; pid: number };
+  image: string;
+  cmd?: string[] | null;
+  networkMode?: string;
+  binds?: string[] | null;
+  env?: string[] | null;
+  portBindings?: Record<string, unknown> | null;
+  extraHosts?: string[] | null;
+  user?: string;
+}): Json {
+  const st = parts.state ?? { status: "running", running: true, pid: 12345 };
+  return {
+    State: { Status: st.status, Running: st.running, Pid: st.pid },
+    Config: {
+      Image: parts.image,
+      Cmd: parts.cmd ?? null,
+      Env: parts.env ?? null,
+      // Matches the pinned host-id resolver above (1000:1000), so the
+      // existing "no drift" fixtures stay no-drift without each call
+      // having to set user explicitly.
+      User: parts.user ?? "1000:1000",
+    },
+    HostConfig: {
+      NetworkMode: parts.networkMode ?? "bridge",
+      Binds: parts.binds ?? null,
+      PortBindings: parts.portBindings ?? null,
+      ExtraHosts: parts.extraHosts ?? null,
+    },
   };
-  return { exec, calls };
 }
 
-function buildLiveConfigStdout(parts: {
-  image: string;
-  cmd?: string;
-  networkMode?: string;
-  binds?: string;
-  env?: string;
-  portBindings?: string;
-  extraHosts?: string;
-  user?: string;
-}): string {
-  return [
-    parts.image,
-    parts.cmd ?? "null",
-    parts.networkMode ?? "bridge",
-    parts.binds ?? "null",
-    parts.env ?? "null",
-    parts.portBindings ?? "null",
-    parts.extraHosts ?? "null",
-    // Matches the pinned host-id resolver above (1000:1000), so the
-    // existing "no drift" fixtures stay no-drift without each call
-    // having to set user explicitly.
-    parts.user ?? "1000:1000",
-  ].join(SEP);
+function notFound(msg: string): Error {
+  const err = new Error(msg) as Error & { statusCode?: number };
+  err.statusCode = 404;
+  return err;
 }
 
 const requested: ContainerConfig = {
@@ -85,48 +71,25 @@ const requested: ContainerConfig = {
 
 describe("ensureRunning — config drift triggers automatic recreate", () => {
   it("calls remove + recreate when env drifts on a running container", async () => {
-    const drifted = buildLiveConfigStdout({
-      image: "questdb/questdb:9.0.0",
-      env: '["FOO=1"]',
-    });
-    const { exec, calls } = makeRouterExec((args) => {
-      const cmd = args[0];
-      // 1. getContainerState (inspect)
-      if (
-        cmd === "inspect" &&
-        args.includes("{{.State.Status}}|{{.State.Running}}|{{.State.Pid}}")
-      ) {
-        // First inspect: container is running. After remove, getContainerState
-        // sees no container (but we issue 'rm -f' before ever reaching this
-        // again; treat missing → exit 1).
-        const removeCallSeen = calls.some((c) => c.args[0] === "rm");
-        if (removeCallSeen) {
-          return { stdout: "", stderr: "no such object", exitCode: 1 };
-        }
-        return { stdout: "running|true|12345", exitCode: 0 };
+    const calls = new Map<string, unknown[]>();
+    // First inspect: running + drifted env. After remove, the container is
+    // gone (404 → "missing"), so the recursive ensureRunning lands in the
+    // missing branch and creates a fresh one.
+    const inspect = (): Promise<Json> => {
+      if ((calls.get("remove") ?? []).length > 0) {
+        return Promise.reject(notFound("no such object"));
       }
-      // 2. getLiveContainerConfig (inspect with our format)
-      if (
-        cmd === "inspect" &&
-        args.some((a) => a.includes("{{.Config.Image}}"))
-      ) {
-        return { stdout: drifted, exitCode: 0 };
-      }
-      // 3. fixVolumePermissions inside removeContainer (inspect for binds)
-      if (cmd === "inspect") {
-        return { stdout: "", exitCode: 0 };
-      }
-      // 4. removeContainer: stop, then rm -f
-      if (cmd === "stop") return { stdout: "", exitCode: 0 };
-      if (cmd === "rm") return { stdout: "ok", exitCode: 0 };
-      // 5. Recursive ensureRunning lands in case "missing":
-      //    imageExists -> image inspect (true: don't pull)
-      if (cmd === "image" && args[1] === "inspect") {
-        return { stdout: "ok", exitCode: 0 };
-      }
-      // 6. run -d ... -> create
-      if (cmd === "run") return { stdout: "id", exitCode: 0 };
-      throw new Error(`unexpected exec: ${args.join(" ")}`);
+      return Promise.resolve(
+        buildLiveInspect({
+          image: "questdb/questdb:9.0.0",
+          env: ["FOO=1"],
+        }),
+      );
+    };
+    const client = makeMockClient({
+      containers: { "sk-questdb": { inspect } },
+      images: { "questdb/questdb:9.0.0": { Id: "sha256:abc" } },
+      calls,
     });
     const debugLines: string[] = [];
     await ensureRunning(
@@ -135,13 +98,19 @@ describe("ensureRunning — config drift triggers automatic recreate", () => {
       requested,
       (m) => debugLines.push(m),
       undefined,
-      exec,
+      client,
     );
-    // Assert: stop + rm -f happened, then run -d.
-    const cmds = calls.map((c) => c.args[0]);
-    assert.ok(cmds.includes("stop"), "stop should be called");
-    assert.ok(cmds.includes("rm"), "rm should be called");
-    assert.ok(cmds.includes("run"), "run should be called");
+    // Assert: stop + remove happened (removeContainer issues both), then a
+    // fresh createContainer in the missing branch.
+    assert.ok((calls.get("stop") ?? []).length > 0, "stop should be called");
+    assert.ok(
+      (calls.get("remove") ?? []).length > 0,
+      "remove should be called",
+    );
+    assert.ok(
+      (calls.get("createContainer") ?? []).length > 0,
+      "createContainer should be called",
+    );
     // Drift line in debug.
     assert.ok(
       debugLines.some((l) => l.includes("config drift detected")),
@@ -150,28 +119,21 @@ describe("ensureRunning — config drift triggers automatic recreate", () => {
   });
 
   it("does NOT recreate when no drift (early-return path preserved)", async () => {
-    const matching = buildLiveConfigStdout({
-      image: "questdb/questdb:9.0.0",
-      env: '["FOO=2"]',
-      // Docker runtime always carries the auto-injected host-gateway entry;
-      // include it in live so diffContainerConfig finds extraHosts symmetric.
-      extraHosts: '["host.containers.internal:host-gateway"]',
-    });
-    const { exec, calls } = makeRouterExec((args) => {
-      const cmd = args[0];
-      if (
-        cmd === "inspect" &&
-        args.includes("{{.State.Status}}|{{.State.Running}}|{{.State.Pid}}")
-      ) {
-        return { stdout: "running|true|12345", exitCode: 0 };
-      }
-      if (
-        cmd === "inspect" &&
-        args.some((a) => a.includes("{{.Config.Image}}"))
-      ) {
-        return { stdout: matching, exitCode: 0 };
-      }
-      throw new Error(`unexpected exec: ${args.join(" ")}`);
+    const calls = new Map<string, unknown[]>();
+    const client = makeMockClient({
+      containers: {
+        "sk-questdb": {
+          inspect: buildLiveInspect({
+            image: "questdb/questdb:9.0.0",
+            env: ["FOO=2"],
+            // Docker runtime always carries the auto-injected host-gateway
+            // entry; include it in live so diffContainerConfig finds
+            // extraHosts symmetric.
+            extraHosts: ["host.containers.internal:host-gateway"],
+          }),
+        },
+      },
+      calls,
     });
     const debugLines: string[] = [];
     await ensureRunning(
@@ -180,12 +142,11 @@ describe("ensureRunning — config drift triggers automatic recreate", () => {
       requested,
       (m) => debugLines.push(m),
       undefined,
-      exec,
+      client,
     );
-    const cmds = calls.map((c) => c.args[0]);
-    assert.ok(!cmds.includes("stop"));
-    assert.ok(!cmds.includes("rm"));
-    assert.ok(!cmds.includes("run"));
+    assert.equal((calls.get("stop") ?? []).length, 0);
+    assert.equal((calls.get("remove") ?? []).length, 0);
+    assert.equal((calls.get("createContainer") ?? []).length, 0);
     assert.ok(
       debugLines.some((l) => l.includes("already running")),
       `expected 'already running' in debug, got: ${debugLines.join(" | ")}`,
@@ -193,22 +154,24 @@ describe("ensureRunning — config drift triggers automatic recreate", () => {
   });
 
   it("treats inspect failure during diff as 'cannot diff, skip' (no recreate)", async () => {
-    const { exec, calls } = makeRouterExec((args) => {
-      const cmd = args[0];
-      if (
-        cmd === "inspect" &&
-        args.includes("{{.State.Status}}|{{.State.Running}}|{{.State.Pid}}")
-      ) {
-        return { stdout: "running|true|12345", exitCode: 0 };
+    const calls = new Map<string, unknown[]>();
+    // getContainerState's inspect succeeds (running), but
+    // getLiveContainerConfig's inspect fails. A 404-shaped error makes
+    // safeInspect return null → "could not inspect" (the fail-safe path;
+    // non-404 errors are a real daemon fault and rethrow).
+    let stateProbeDone = false;
+    const inspect = (): Promise<Json> => {
+      if (!stateProbeDone) {
+        stateProbeDone = true;
+        return Promise.resolve(
+          buildLiveInspect({ image: "questdb/questdb:9.0.0", env: ["FOO=1"] }),
+        );
       }
-      if (
-        cmd === "inspect" &&
-        args.some((a) => a.includes("{{.Config.Image}}"))
-      ) {
-        // inspect fails — getLiveContainerConfig returns null
-        return { stdout: "", stderr: "boom", exitCode: 1 };
-      }
-      throw new Error(`unexpected exec: ${args.join(" ")}`);
+      return Promise.reject(notFound("boom"));
+    };
+    const client = makeMockClient({
+      containers: { "sk-questdb": { inspect } },
+      calls,
     });
     const debugLines: string[] = [];
     await ensureRunning(
@@ -217,43 +180,27 @@ describe("ensureRunning — config drift triggers automatic recreate", () => {
       requested,
       (m) => debugLines.push(m),
       undefined,
-      exec,
+      client,
     );
-    const cmds = calls.map((c) => c.args[0]);
-    assert.ok(!cmds.includes("rm"));
+    assert.equal((calls.get("remove") ?? []).length, 0);
     assert.ok(
       debugLines.some((l) => l.includes("could not inspect for drift")),
     );
   });
 
   it("_postRecreate guard prevents recursion if state stays 'running'", async () => {
-    // Force getContainerState to ALWAYS return "running" even after remove.
-    // Real-world this would be a race or a restart-policy auto-restart;
-    // we want the guard to short-circuit, not infinite-loop.
-    const drifted = buildLiveConfigStdout({
-      image: "questdb/questdb:9.0.0",
-      env: '["FOO=1"]',
-    });
-    let driftInspectCount = 0;
-    const { exec, calls } = makeRouterExec((args) => {
-      const cmd = args[0];
-      if (
-        cmd === "inspect" &&
-        args.includes("{{.State.Status}}|{{.State.Running}}|{{.State.Pid}}")
-      ) {
-        return { stdout: "running|true|12345", exitCode: 0 };
-      }
-      if (
-        cmd === "inspect" &&
-        args.some((a) => a.includes("{{.Config.Image}}"))
-      ) {
-        driftInspectCount++;
-        return { stdout: drifted, exitCode: 0 };
-      }
-      if (cmd === "inspect") return { stdout: "", exitCode: 0 };
-      if (cmd === "stop") return { stdout: "", exitCode: 0 };
-      if (cmd === "rm") return { stdout: "ok", exitCode: 0 };
-      throw new Error(`unexpected exec: ${args.join(" ")}`);
+    // Force inspect to ALWAYS report "running" with drifted config, even
+    // after remove. Real-world this would be a race or a restart-policy
+    // auto-restart; we want the guard to short-circuit, not infinite-loop.
+    const calls = new Map<string, unknown[]>();
+    const inspect = (): Promise<Json> =>
+      Promise.resolve(
+        buildLiveInspect({ image: "questdb/questdb:9.0.0", env: ["FOO=1"] }),
+      );
+    const client = makeMockClient({
+      containers: { "sk-questdb": { inspect } },
+      images: { "questdb/questdb:9.0.0": { Id: "sha256:abc" } },
+      calls,
     });
     const debugLines: string[] = [];
     await ensureRunning(
@@ -262,58 +209,48 @@ describe("ensureRunning — config drift triggers automatic recreate", () => {
       requested,
       (m) => debugLines.push(m),
       undefined,
-      exec,
+      client,
     );
-    // The first call did the diff + remove. The recursive call sees state
-    // "running" again, hits the _postRecreate guard, and returns silently
-    // — it does NOT do a second drift inspect.
-    assert.equal(driftInspectCount, 1, "drift inspect should run exactly once");
+    // First pass diffs + removes once. The recursive _postRecreate pass sees
+    // state "running" again, hits the guard, and returns silently — it does
+    // NOT diff-and-remove a second time, so remove fires exactly once.
+    assert.equal(
+      (calls.get("remove") ?? []).length,
+      1,
+      "remove should fire exactly once (guard breaks the loop)",
+    );
     assert.ok(
       debugLines.some((l) => l.includes("unexpectedly running after recreate")),
       `expected guard message in debug, got: ${debugLines.join(" | ")}`,
     );
-    // No 'run' issued (the recursion guard returned before the missing-branch
-    // create path could fire).
-    const cmds = calls.map((c) => c.args[0]);
-    assert.ok(!cmds.includes("run"));
+    // No fresh container created (the recursion guard returned before the
+    // missing-branch create path could fire).
+    assert.equal((calls.get("createContainer") ?? []).length, 0);
   });
 });
 
 describe("ensureRunning — stopped-state drift detection", () => {
   it("recreates a STOPPED container when its config has drifted (not just starts it)", async () => {
     // Without the stopped-state diff, the old container would be `start`ed
-    // back up with stale env. This is the bug CodeRabbit caught on PR #30.
-    const drifted = buildLiveConfigStdout({
-      image: "questdb/questdb:9.0.0",
-      env: '["FOO=1"]', // live still has the OLD value
-    });
-    const { exec, calls } = makeRouterExec((args) => {
-      const cmd = args[0];
-      if (
-        cmd === "inspect" &&
-        args.includes("{{.State.Status}}|{{.State.Running}}|{{.State.Pid}}")
-      ) {
-        // Container is stopped on first probe. After remove, missing.
-        const removeSeen = calls.some((c) => c.args[0] === "rm");
-        if (removeSeen) {
-          return { stdout: "", stderr: "no such object", exitCode: 1 };
-        }
-        return { stdout: "exited|false|0", exitCode: 0 };
+    // back up with stale env.
+    const calls = new Map<string, unknown[]>();
+    const inspect = (): Promise<Json> => {
+      // Container is stopped on first probe. After remove, missing.
+      if ((calls.get("remove") ?? []).length > 0) {
+        return Promise.reject(notFound("no such object"));
       }
-      if (
-        cmd === "inspect" &&
-        args.some((a) => a.includes("{{.Config.Image}}"))
-      ) {
-        return { stdout: drifted, exitCode: 0 };
-      }
-      if (cmd === "inspect") return { stdout: "", exitCode: 0 };
-      if (cmd === "stop") return { stdout: "", exitCode: 0 };
-      if (cmd === "rm") return { stdout: "ok", exitCode: 0 };
-      if (cmd === "image" && args[1] === "inspect") {
-        return { stdout: "ok", exitCode: 0 };
-      }
-      if (cmd === "run") return { stdout: "id", exitCode: 0 };
-      throw new Error(`unexpected exec: ${args.join(" ")}`);
+      return Promise.resolve(
+        buildLiveInspect({
+          state: { status: "exited", running: false, pid: 0 },
+          image: "questdb/questdb:9.0.0",
+          env: ["FOO=1"], // live still has the OLD value
+        }),
+      );
+    };
+    const client = makeMockClient({
+      containers: { "sk-questdb": { inspect } },
+      images: { "questdb/questdb:9.0.0": { Id: "sha256:abc" } },
+      calls,
     });
     const debugLines: string[] = [];
     await ensureRunning(
@@ -322,20 +259,27 @@ describe("ensureRunning — stopped-state drift detection", () => {
       requested,
       (m) => debugLines.push(m),
       undefined,
-      exec,
+      client,
     );
-    const cmds = calls.map((c) => c.args[0]);
-    assert.ok(cmds.includes("rm"), "stopped+drifted should be removed");
-    assert.ok(cmds.includes("run"), "stopped+drifted should be recreated");
-    // The 'start' branch should NOT have been taken on the drifting path.
-    // (It will appear once on the recursive missing-branch flow only if
-    // the new container needs starting — but `run -d` already starts it.)
     assert.ok(
-      !cmds.some(
-        (c, i) =>
-          c === "start" && i < calls.findIndex((x) => x.args[0] === "rm"),
-      ),
-      "should not 'start' the stale container before remove",
+      (calls.get("remove") ?? []).length > 0,
+      "stopped+drifted should be removed",
+    );
+    assert.ok(
+      (calls.get("createContainer") ?? []).length > 0,
+      "stopped+drifted should be recreated",
+    );
+    // The stopped+drifted container must be REMOVED and recreated, never
+    // started in place with stale config. The fresh container that
+    // createAndStart spins up reuses the same prefixed name (sk-questdb) and
+    // gets exactly one post-create start — so the only `start` is the
+    // recreate's, never a standalone "start the stale container" call. Equal
+    // start/createContainer counts prove no stray in-place start happened.
+    const started = (calls.get("start") ?? []) as string[];
+    assert.equal(
+      started.length,
+      (calls.get("createContainer") ?? []).length,
+      "the only start should be the recreated container's, not an in-place start of the stale one",
     );
     assert.ok(
       debugLines.some((l) => l.includes("config drift detected")),
@@ -344,29 +288,22 @@ describe("ensureRunning — stopped-state drift detection", () => {
   });
 
   it("starts a STOPPED container without recreating when no drift", async () => {
-    const matching = buildLiveConfigStdout({
-      image: "questdb/questdb:9.0.0",
-      env: '["FOO=2"]', // matches requested
-      // Docker runtime always carries the auto-injected host-gateway entry;
-      // include it in live so diffContainerConfig finds extraHosts symmetric.
-      extraHosts: '["host.containers.internal:host-gateway"]',
-    });
-    const { exec, calls } = makeRouterExec((args) => {
-      const cmd = args[0];
-      if (
-        cmd === "inspect" &&
-        args.includes("{{.State.Status}}|{{.State.Running}}|{{.State.Pid}}")
-      ) {
-        return { stdout: "exited|false|0", exitCode: 0 };
-      }
-      if (
-        cmd === "inspect" &&
-        args.some((a) => a.includes("{{.Config.Image}}"))
-      ) {
-        return { stdout: matching, exitCode: 0 };
-      }
-      if (cmd === "start") return { stdout: "", exitCode: 0 };
-      throw new Error(`unexpected exec: ${args.join(" ")}`);
+    const calls = new Map<string, unknown[]>();
+    const client = makeMockClient({
+      containers: {
+        "sk-questdb": {
+          inspect: buildLiveInspect({
+            state: { status: "exited", running: false, pid: 0 },
+            image: "questdb/questdb:9.0.0",
+            env: ["FOO=2"], // matches requested
+            // Docker runtime always carries the auto-injected host-gateway
+            // entry; include it in live so diffContainerConfig finds
+            // extraHosts symmetric.
+            extraHosts: ["host.containers.internal:host-gateway"],
+          }),
+        },
+      },
+      calls,
     });
     const debugLines: string[] = [];
     await ensureRunning(
@@ -375,32 +312,36 @@ describe("ensureRunning — stopped-state drift detection", () => {
       requested,
       (m) => debugLines.push(m),
       undefined,
-      exec,
+      client,
     );
-    const cmds = calls.map((c) => c.args[0]);
-    assert.ok(cmds.includes("start"));
-    assert.ok(!cmds.includes("rm"));
-    assert.ok(!cmds.includes("run"));
+    const started = (calls.get("start") ?? []) as string[];
+    assert.ok(started.includes("sk-questdb"));
+    assert.equal((calls.get("remove") ?? []).length, 0);
+    assert.equal((calls.get("createContainer") ?? []).length, 0);
     assert.ok(debugLines.some((l) => l.includes("Starting stopped container")));
   });
 
   it("starts a STOPPED container without diff when inspect fails (fail-safe)", async () => {
-    const { exec, calls } = makeRouterExec((args) => {
-      const cmd = args[0];
-      if (
-        cmd === "inspect" &&
-        args.includes("{{.State.Status}}|{{.State.Running}}|{{.State.Pid}}")
-      ) {
-        return { stdout: "exited|false|0", exitCode: 0 };
+    const calls = new Map<string, unknown[]>();
+    // State probe succeeds (stopped); the drift Config probe 404s → null →
+    // "could not inspect"; fail-safe still starts.
+    let stateProbeDone = false;
+    const inspect = (): Promise<Json> => {
+      if (!stateProbeDone) {
+        stateProbeDone = true;
+        return Promise.resolve(
+          buildLiveInspect({
+            state: { status: "exited", running: false, pid: 0 },
+            image: "questdb/questdb:9.0.0",
+            env: ["FOO=1"],
+          }),
+        );
       }
-      if (
-        cmd === "inspect" &&
-        args.some((a) => a.includes("{{.Config.Image}}"))
-      ) {
-        return { stdout: "", stderr: "boom", exitCode: 1 };
-      }
-      if (cmd === "start") return { stdout: "", exitCode: 0 };
-      throw new Error(`unexpected exec: ${args.join(" ")}`);
+      return Promise.reject(notFound("boom"));
+    };
+    const client = makeMockClient({
+      containers: { "sk-questdb": { inspect } },
+      calls,
     });
     const debugLines: string[] = [];
     await ensureRunning(
@@ -409,86 +350,70 @@ describe("ensureRunning — stopped-state drift detection", () => {
       requested,
       (m) => debugLines.push(m),
       undefined,
-      exec,
+      client,
     );
-    const cmds = calls.map((c) => c.args[0]);
+    const started = (calls.get("start") ?? []) as string[];
     assert.ok(
-      cmds.includes("start"),
+      started.includes("sk-questdb"),
       "should still start when diff inspect fails",
     );
-    assert.ok(!cmds.includes("rm"));
+    assert.equal((calls.get("remove") ?? []).length, 0);
     assert.ok(
       debugLines.some((l) => l.includes("could not inspect for drift")),
     );
   });
 });
 
-describe("ensureRunning — buildRunArgs ownership", () => {
-  // Capture the run-command args by routing exec at the missing-state path
-  // (no inspect-drift logic involved): container is missing, so ensureRunning
-  // falls straight through to pull (skipped by image inspect 'ok') + run -d.
-  function captureRunArgsOnMissing(config: ContainerConfig): {
-    runArgs: string[] | null;
+describe("ensureRunning — buildCreateOptions ownership", () => {
+  // Capture the createContainer payload by driving the missing-state path
+  // (no inspect-drift logic involved): the container is missing (no inspect
+  // registered → 404), the image is present, then createContainer fires.
+  function captureCreateOnMissing(config: ContainerConfig): {
+    payload: () => Json | null;
     run: () => Promise<void>;
   } {
-    let runArgs: string[] | null = null;
-    const exec = async (
-      _runtime: ContainerRuntimeInfo,
-      args: string[],
-    ): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
-      const cmd = args[0];
-      // Missing container path: probe says "no such object", image
-      // inspect says present, then `run -d`.
-      if (
-        cmd === "inspect" &&
-        args.includes("{{.State.Status}}|{{.State.Running}}|{{.State.Pid}}")
-      ) {
-        return { stdout: "", stderr: "no such object", exitCode: 1 };
-      }
-      if (cmd === "image" && args[1] === "inspect") {
-        return { stdout: "ok", stderr: "", exitCode: 0 };
-      }
-      if (cmd === "run") {
-        runArgs = args;
-        return { stdout: "id", stderr: "", exitCode: 0 };
-      }
-      throw new Error(`unexpected exec: ${args.join(" ")}`);
-    };
+    const calls = new Map<string, unknown[]>();
+    const client = makeMockClient({
+      // Container missing: not registered → inspect 404 → "missing".
+      images: { "questdb/questdb:9.0.0": { Id: "sha256:abc" } },
+      calls,
+    });
     return {
-      get runArgs() {
-        return runArgs;
+      payload() {
+        const created = calls.get("createContainer") ?? [];
+        return (created[0] as Json | undefined) ?? null;
       },
       run: () =>
-        ensureRunning(docker, "demo", config, () => {}, undefined, exec),
+        ensureRunning(docker, "demo", config, () => {}, undefined, client),
     };
   }
 
-  it("emits --user host:host by default (in-image uid 0 maps to host 1000:1000)", async () => {
-    const cap = captureRunArgsOnMissing({
+  it("emits User host:host by default (in-image uid 0 maps to host 1000:1000)", async () => {
+    const cap = captureCreateOnMissing({
       image: "questdb/questdb",
       tag: "9.0.0",
     });
     await cap.run();
-    assert.ok(cap.runArgs, "run command should have been issued");
-    const userIdx = cap.runArgs.indexOf("--user");
-    assert.ok(
-      userIdx >= 0,
-      `--user flag missing from: ${cap.runArgs.join(" ")}`,
-    );
-    assert.equal(cap.runArgs[userIdx + 1], "1000:1000");
+    const payload = cap.payload();
+    assert.ok(payload, "createContainer should have been issued");
+    assert.equal(payload.User, "1000:1000");
   });
 
-  it("omits --user when ContainerConfig.user is false (opt-out)", async () => {
-    const cap = captureRunArgsOnMissing({
+  it("omits User when ContainerConfig.user is false (opt-out)", async () => {
+    const cap = captureCreateOnMissing({
       image: "questdb/questdb",
       tag: "9.0.0",
       user: false,
     });
     await cap.run();
-    assert.ok(cap.runArgs);
-    assert.ok(
-      !cap.runArgs.includes("--user"),
-      `--user should not appear: ${cap.runArgs.join(" ")}`,
+    const payload = cap.payload();
+    assert.ok(payload);
+    assert.equal(payload.User, undefined, "User should not be set");
+    const hostConfig = (payload.HostConfig ?? {}) as Json;
+    assert.equal(
+      hostConfig.UsernsMode,
+      undefined,
+      "UsernsMode should not be set on the docker path",
     );
   });
 
@@ -497,33 +422,37 @@ describe("ensureRunning — buildRunArgs ownership", () => {
     // Most Linux binaries (Node.js, kopia, rclone, …) don't read the
     // UMASK env var, so auto-injecting it would advertise a guarantee
     // signalk-container can't deliver.
-    const cap = captureRunArgsOnMissing({
+    const cap = captureCreateOnMissing({
       image: "questdb/questdb",
       tag: "9.0.0",
     });
     await cap.run();
-    assert.ok(cap.runArgs);
+    const payload = cap.payload();
+    assert.ok(payload);
+    const env = (payload.Env ?? []) as string[];
     assert.ok(
-      !cap.runArgs.some((a) => a.startsWith("UMASK=")),
-      `no UMASK env should be auto-injected; got: ${cap.runArgs.join(" ")}`,
+      !env.some((a) => a.startsWith("UMASK=")),
+      `no UMASK env should be auto-injected; got: ${env.join(" ")}`,
     );
   });
 
   it("passes caller-provided UMASK in config.env through verbatim", async () => {
     // Plugin authors can still set UMASK in env if their image's
     // entrypoint script honors it. We just don't pretend to.
-    const cap = captureRunArgsOnMissing({
+    const cap = captureCreateOnMissing({
       image: "questdb/questdb",
       tag: "9.0.0",
       env: { UMASK: "0027" },
     });
     await cap.run();
-    assert.ok(cap.runArgs);
-    assert.ok(cap.runArgs.includes("UMASK=0027"));
+    const payload = cap.payload();
+    assert.ok(payload);
+    const env = (payload.Env ?? []) as string[];
+    assert.ok(env.includes("UMASK=0027"));
   });
 
-  it("emits --label flags from config.labels", async () => {
-    const cap = captureRunArgsOnMissing({
+  it("emits Labels from config.labels", async () => {
+    const cap = captureCreateOnMissing({
       image: "questdb/questdb",
       tag: "9.0.0",
       labels: {
@@ -532,31 +461,29 @@ describe("ensureRunning — buildRunArgs ownership", () => {
       },
     });
     await cap.run();
-    assert.ok(cap.runArgs);
-    const labelArgs: string[] = [];
-    for (let i = 0; i < cap.runArgs.length; i++) {
-      if (cap.runArgs[i] === "--label") labelArgs.push(cap.runArgs[i + 1]);
-    }
-    assert.ok(
-      labelArgs.includes("io.signalk.role=updater"),
-      `expected role label, got: ${labelArgs.join(", ")}`,
+    const payload = cap.payload();
+    assert.ok(payload);
+    const labels = (payload.Labels ?? {}) as Record<string, string>;
+    assert.equal(
+      labels["io.signalk.role"],
+      "updater",
+      `expected role label, got: ${JSON.stringify(labels)}`,
     );
-    assert.ok(
-      labelArgs.includes("io.signalk.persistent=true"),
-      `expected persistent label, got: ${labelArgs.join(", ")}`,
+    assert.equal(
+      labels["io.signalk.persistent"],
+      "true",
+      `expected persistent label, got: ${JSON.stringify(labels)}`,
     );
   });
 
-  it("emits no --label flags when config.labels is unset", async () => {
-    const cap = captureRunArgsOnMissing({
+  it("emits no Labels when config.labels is unset", async () => {
+    const cap = captureCreateOnMissing({
       image: "questdb/questdb",
       tag: "9.0.0",
     });
     await cap.run();
-    assert.ok(cap.runArgs);
-    assert.ok(
-      !cap.runArgs.includes("--label"),
-      `--label should not appear: ${cap.runArgs.join(" ")}`,
-    );
+    const payload = cap.payload();
+    assert.ok(payload);
+    assert.equal(payload.Labels, undefined, "Labels should not be set");
   });
 });

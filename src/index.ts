@@ -34,6 +34,7 @@ import {
   tryLiveUpdate,
 } from "./resources.js";
 import { detectRuntime, isContainerized, setDisableUserns } from "./runtime.js";
+import { resetClient } from "./client.js";
 import {
   classifyVolumeSources,
   collectRecoveredVolumes,
@@ -1916,6 +1917,10 @@ export default (app: App) => {
       pendingNetworks = null;
       portAddressMap.clear();
       registeredPorts.clear();
+      // Drop the cached dockerode client so a future start() re-probes the
+      // socket (it may have moved, or the runtime may have changed).
+      resetClient();
+      runtimeInfo = null;
       delete (globalThis as any).__signalk_containerManager;
     },
 

@@ -1,5 +1,5 @@
-import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
+import { PassThrough } from "node:stream";
 import type {
   ContainerConfig,
   ContainerRuntimeInfo,
@@ -10,12 +10,16 @@ import type {
   SetupSnippetFormat,
   SetupSnippetResult,
 } from "./types.js";
+import { findSelfContainerId, qualifyImage } from "./containers.js";
+import { isContainerized, userMappingFlags } from "./runtime.js";
 import {
-  type ExecFn,
-  findSelfContainerId,
-  qualifyImage,
-} from "./containers.js";
-import { execRuntime, isContainerized, userMappingFlags } from "./runtime.js";
+  type ContainerClient,
+  type ResolvedClient,
+  getClient,
+  resolveClient,
+  safe,
+} from "./client.js";
+import type { ErrorKind } from "./errors.js";
 
 /**
  * Outcome of an image-compliance probe. `ok` is the headline; `output`
@@ -60,21 +64,21 @@ export async function imageRunsAsUser(
   runtime: ContainerRuntimeInfo,
   image: string,
   user: ContainerConfig["user"],
-  exec: ExecFn = execRuntime,
+  client: ContainerClient = getClient(),
 ): Promise<ImageProbeResult> {
-  const userFlags = userMappingFlags(runtime, user);
-  const args = [
-    "run",
-    "--rm",
-    ...userFlags,
-    qualifyImage(image, runtime),
-    "sh",
-    "-c",
-    "touch /tmp/x && echo ok",
-  ];
+  const userMapping = userMappingFlags(runtime, user);
+  const createOpts: import("dockerode").ContainerCreateOptions = {
+    Image: qualifyImage(image, runtime),
+    Cmd: ["sh", "-c", "touch /tmp/x && echo ok"],
+    HostConfig: { AutoRemove: false },
+  };
+  if (userMapping.User) createOpts.User = userMapping.User;
+  if (userMapping.HostConfig?.UsernsMode) {
+    createOpts.HostConfig!.UsernsMode = userMapping.HostConfig.UsernsMode;
+  }
   try {
-    const r = await exec(runtime, args);
-    const output = [r.stdout, r.stderr].filter(Boolean).join("\n");
+    const r = await runProbeContainer(client, createOpts);
+    const output = r.output;
     if (r.exitCode !== 0) {
       return {
         ok: false,
@@ -82,14 +86,14 @@ export async function imageRunsAsUser(
         error: `Container exited with code ${r.exitCode}`,
       };
     }
-    if (!r.stdout.includes("ok")) {
+    if (!output.includes("ok")) {
       return {
         ok: false,
         output,
         error: "Probe exited 0 but did not print 'ok'; touch likely failed",
       };
     }
-    return { ok: true, output: r.stdout };
+    return { ok: true, output };
   } catch (err) {
     return {
       ok: false,
@@ -100,24 +104,67 @@ export async function imageRunsAsUser(
 }
 
 /**
+ * Create, run-to-completion, and tear down a throwaway probe container,
+ * returning its exit code and combined stdout+stderr. The image-compliance
+ * probe is the only caller; it needs the container's output and exit code,
+ * not a long-lived handle.
+ *
+ * The logs stream is attached in follow mode BEFORE `start()` so no early
+ * output is lost, and demuxed via `modem.demuxStream` — a non-TTY container's
+ * logs are multiplexed (8-byte stdout/stderr frame headers) and reading the
+ * raw bytes would leak that framing into `output`. Both demuxed sides feed one
+ * combined text buffer because the probe only checks for the `"ok"` token
+ * regardless of which stream it landed on. Force-remove runs unconditionally
+ * (via `safe`, so a TOCTOU 404 doesn't mask the real result).
+ */
+async function runProbeContainer(
+  client: ContainerClient,
+  opts: import("dockerode").ContainerCreateOptions,
+): Promise<{ exitCode: number; output: string }> {
+  const container = await client.createContainer(opts);
+  try {
+    let output = "";
+    const stream = await container.logs({
+      follow: true,
+      stdout: true,
+      stderr: true,
+    });
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const collect = (chunk: Buffer | string) => {
+      output += chunk.toString();
+    };
+    stdout.on("data", collect);
+    stderr.on("data", collect);
+    client.modem.demuxStream(stream, stdout, stderr);
+
+    await container.start();
+    const waitResult = await safe(() => container.wait());
+    const exitCode = waitResult.ok
+      ? ((waitResult.value as { StatusCode?: number }).StatusCode ?? 0)
+      : 1;
+    return { exitCode, output };
+  } finally {
+    await safe(() => container.remove({ force: true }));
+  }
+}
+
+/**
  * Probe-injection bag for `selfDeployment`. Production omits the arg
  * and the real helpers are used; tests pass fakes so no real podman /
  * docker / filesystem access happens.
  */
 export interface SelfDeploymentProbes {
   isContainerized?: () => boolean;
-  /** Resolve a binary in `$PATH` to its absolute path, or null. */
-  findBinary?: (name: RuntimeName) => Promise<string | null>;
   /**
-   * Extract a version string from a binary (without going through the
-   * runtime-info exec wrapper, which doesn't yet have a populated info
-   * struct at this stage). Receives the absolute path returned by
-   * `findBinary` plus the binary's logical name.
+   * Resolve the dockerode client + its socket path, or `null` when no
+   * socket answers. Replaces the CLI-era `findBinary`/`readBinaryVersion`
+   * pair: "no runtime" now means "no socket answered the Docker API", not
+   * "no binary on PATH". Defaults to the real `resolveClient` from
+   * `client.ts`; tests inject a fake to drive the no-socket /
+   * socket-reachable branches without a live daemon.
    */
-  readBinaryVersion?: (
-    name: RuntimeName,
-    path: string,
-  ) => Promise<string | null>;
+  resolveClient?: () => Promise<ResolvedClient | null>;
   /** Read an env var, returning undefined when unset. */
   readEnv?: (key: string) => string | undefined;
   /**
@@ -296,30 +343,38 @@ async function probeContainerStorage(
 }
 
 /**
- * Diagnose whether this Signal K deployment can drive `podman`/`docker`
- * at all, and (when SK is itself containerized) whether the prereqs for
- * the in-container deployment path are met.
+ * Diagnose whether this Signal K deployment can drive the container
+ * runtime at all, and (when SK is itself containerized) whether the
+ * prereqs for the in-container deployment path are met.
  *
  * Algorithm:
  *   1. Note `isContainerized()` (advisory — checks run regardless).
- *   2. Discover the runtime CLI binary honouring `preference`.
- *   3. Probe the daemon with `<binary> info` and classify stderr on
- *      failure (no-runtime / socket-unreachable / permission-denied).
+ *   2. Resolve a socket that answers the Docker API (`resolveClient`).
+ *      "No runtime" now means "no socket answered", not "no binary on
+ *      PATH" — the plugin talks the API, not a CLI.
+ *   3. Probe the daemon with `version()` + `info()`; on failure classify
+ *      off the `CategorizedError.kind` from `safe()` (socket-unreachable
+ *      / permission / etc).
  *   4. When both 2 and 3 succeed AND we're containerized, run the
  *      `findSelfContainerId` cascade.
  *
  * Each failure short-circuits and produces a copy-pasteable
  * `remediation`. Never throws.
+ *
+ * `client` is a test-injection override that takes precedence over the
+ * `resolveClient` probe; production omits it and the resolved socket's
+ * client is used. `getClient()` is NOT the default here (unlike the
+ * post-detection helpers) because the doctor runs precisely when runtime
+ * detection may have failed — eagerly calling `getClient()` would throw
+ * before the no-runtime path could report.
  */
 export async function selfDeployment(
   preference: RuntimePreference,
-  exec: ExecFn = execRuntime,
+  client: ContainerClient | null = null,
   probes: SelfDeploymentProbes = {},
 ): Promise<SelfDeploymentResult> {
   const probeIsContainerized = probes.isContainerized ?? isContainerized;
-  const probeFindBinary = probes.findBinary ?? defaultFindBinary;
-  const probeReadBinaryVersion =
-    probes.readBinaryVersion ?? defaultReadBinaryVersion;
+  const probeResolveClient = probes.resolveClient ?? resolveClient;
   const probeReadEnv = probes.readEnv ?? ((k) => process.env[k]);
   const probeReadCgroupControllers =
     probes.readCgroupControllers ?? defaultReadCgroupControllers;
@@ -340,33 +395,22 @@ export async function selfDeployment(
     probeReadKernelCmdline,
   );
 
-  // 1. Binary discovery — honour preference; auto tries podman first.
-  const candidates: RuntimeName[] =
-    preference === "auto" ? ["podman", "docker"] : [preference];
-
-  let binaryName: RuntimeName | null = null;
-  let binaryPath: string | null = null;
-  let binaryVersion: string | null = null;
-
-  for (const name of candidates) {
-    const path = await probeFindBinary(name);
-    if (!path) continue;
-    const version = await probeReadBinaryVersion(name, path);
-    binaryName = name;
-    binaryPath = path;
-    binaryVersion = version;
-    break;
-  }
-
-  if (!binaryName) {
+  // 1. Socket resolution — the first socket that answers the API wins.
+  //    No socket → no runtime (was "no binary on PATH" in the CLI era).
+  const resolved = await probeResolveClient();
+  if (!resolved) {
     return {
       isContainerized: containerized,
       binary: { name: null, path: null, version: null },
       daemon: {
         reachable: false,
         rootless: null,
-        socketPath: null,
-        error: "no runtime binary in $PATH",
+        // No runtime was detected, so there's no binary kind to key on —
+        // surface whichever explicit endpoint the operator configured
+        // (CONTAINER_HOST for podman, DOCKER_HOST for docker) as the
+        // troubleshooting hint, rather than hardcoding the docker var.
+        socketPath: env.CONTAINER_HOST ?? env.DOCKER_HOST ?? null,
+        error: "no container runtime socket answered the Docker API",
       },
       env,
       selfId: { value: null, source: null },
@@ -379,9 +423,19 @@ export async function selfDeployment(
     };
   }
 
-  // 2. Daemon reachability — call `<binary> info` and classify.
-  const info = await probeDaemon(binaryName, binaryVersion, exec);
-  const socketPath = inferSocketPath(binaryName, env);
+  // The resolved socket is authoritative for the socket path; an injected
+  // `client` only overrides the API channel (tests), not the path.
+  const apiClient = client ?? resolved.client;
+  const socketPath = resolved.socketPath;
+
+  // 2. Daemon reachability — `version()` + `info()`, classified off the
+  //    categorized error rather than CLI stderr substring matching.
+  const info = await probeDaemon(apiClient);
+
+  // No version means the socket existed at resolve time but the API call
+  // failed — fall back to the inferred env-var name for the binary field.
+  const binaryName: RuntimeName = info.runtime ?? "docker";
+  const binaryVersion = info.version;
 
   // Storage-driver / backing-filesystem advisory. Only meaningful for
   // rootless Podman: rootful Podman and Docker do not run the
@@ -395,23 +449,27 @@ export async function selfDeployment(
       ? await probeContainerStorage(probeReadMounts, probeResolveStoragePath)
       : null;
 
+  // `binary.path` is null — there is no binary concept over the socket.
+  // The field shape is retained (name/version still populated from
+  // `version()`) so existing consumers reading the daemon report don't
+  // break on the port.
   const baseResult = {
     isContainerized: containerized,
-    binary: { name: binaryName, path: binaryPath, version: binaryVersion },
+    binary: { name: binaryName, path: null, version: binaryVersion },
     env,
     cgroupControllers,
     containerStorage,
   };
 
   if (!info.reachable) {
-    const status = classifyDaemonFailure(info.stderr);
+    const status = classifyDaemonFailure(info.errorKind);
     return {
       ...baseResult,
       daemon: {
         reachable: false,
         rootless: null,
         socketPath,
-        error: info.stderr || `${binaryName} info exited ${info.exitCode}`,
+        error: info.error ?? "daemon unreachable",
       },
       selfId: { value: null, source: null },
       status,
@@ -428,7 +486,11 @@ export async function selfDeployment(
       isPodmanDockerShim: false,
       isRootless: info.rootless,
     };
-    selfId = await resolveSelfIdWithSource(runtimeInfo, probeReadEnv);
+    selfId = await resolveSelfIdWithSource(
+      runtimeInfo,
+      probeReadEnv,
+      apiClient,
+    );
     if (!selfId.value) {
       return {
         ...baseResult,
@@ -480,153 +542,112 @@ export async function selfDeployment(
 }
 
 /**
- * Resolve a binary to its absolute path using `command -v`. Returns
- * `null` if the binary is not in `$PATH`. Implemented via `execFile`
- * on `sh` so it doesn't depend on a runtime binary already existing.
+ * Outcome of the socket daemon probe. `runtime`/`version` come from
+ * `version()`; `rootless` from `info()`. On an unreachable daemon
+ * `errorKind` carries the categorized failure so `classifyDaemonFailure`
+ * can map it to a status without substring-matching CLI stderr.
  */
-function defaultFindBinary(name: RuntimeName): Promise<string | null> {
-  return new Promise((resolve) => {
-    execFile(
-      "sh",
-      ["-c", `command -v ${name}`],
-      { timeout: 5000 },
-      (error, stdout) => {
-        if (error) return resolve(null);
-        const path = stdout.toString().trim();
-        resolve(path.length > 0 ? path : null);
-      },
-    );
-  });
-}
-
-/**
- * Read `<name> --version` directly (separate from the daemon probe so
- * a binary-present-but-daemon-broken state still reports a version).
- * Default implementation; tests inject a synchronous fake via
- * `SelfDeploymentProbes.readBinaryVersion` to avoid spawning the real
- * binary.
- */
-function defaultReadBinaryVersion(
-  name: RuntimeName,
-  path: string,
-): Promise<string | null> {
-  return new Promise((resolve) => {
-    // `path` is the absolute location returned by `findBinary`. When
-    // it's empty for any reason fall back to the bare name so $PATH
-    // resolution still has a chance.
-    execFile(
-      path || name,
-      ["--version"],
-      { timeout: 5000 },
-      (error, stdout) => {
-        if (error) return resolve(null);
-        const text = stdout.toString().trim();
-        const version = text.replace(/^.*version\s*/i, "").split(/[\s,]/)[0];
-        resolve(version || null);
-      },
-    );
-  });
-}
-
 interface DaemonProbeResult {
   reachable: boolean;
   rootless: boolean | null;
-  exitCode: number;
-  stderr: string;
+  /** Runtime name from `version()` classification; null when version failed. */
+  runtime: RuntimeName | null;
+  /** Server version from `version().Version`; null when version failed. */
+  version: string | null;
+  /** Categorized failure kind; null on a reachable daemon. */
+  errorKind: ErrorKind | null;
+  /** Human-readable failure message; null on a reachable daemon. */
+  error: string | null;
 }
 
 /**
- * Talk to the daemon and extract the rootless flag in one round-trip.
- * Podman exposes `{{.Host.Security.Rootless}}` as `true`/`false`;
- * Docker exposes a `SecurityOptions` array whose entries include
- * `name=rootless` when the daemon is rootless.
+ * Fields read off `version()`. Podman's response carries a `Podman Engine`
+ * component (and/or a `Platform.Name` mentioning podman); a docker /
+ * docker-compat daemon does not.
+ */
+interface DaemonVersion {
+  Version?: string;
+  Components?: Array<{ Name?: string }>;
+  Platform?: { Name?: string };
+}
+
+/**
+ * Fields read off the docker-compat `info()`. dockerode always hits the
+ * docker-compat endpoint, so podman's NATIVE `host.security.rootless` is
+ * NOT reachable here — we read `Rootless` and `SecurityOptions`, the keys
+ * the compat shape actually returns (mirrors `rootlessFromInfo` in
+ * runtime.ts; rootless podman 5.x reports `Rootless: true` and
+ * `SecurityOptions: [...,"name=rootless"]`).
+ */
+interface DaemonInfo {
+  Rootless?: boolean;
+  SecurityOptions?: string[];
+}
+
+function classifyRuntimeFromVersion(version: DaemonVersion): RuntimeName {
+  const components = version.Components ?? [];
+  if (components.some((c) => /podman/i.test(c.Name ?? ""))) return "podman";
+  if (version.Platform?.Name && /podman/i.test(version.Platform.Name)) {
+    return "podman";
+  }
+  return "docker";
+}
+
+function rootlessFromInfo(info: DaemonInfo): boolean | null {
+  if (typeof info.Rootless === "boolean") return info.Rootless;
+  if (Array.isArray(info.SecurityOptions)) {
+    return info.SecurityOptions.some((o) => /\brootless\b/.test(o));
+  }
+  return null;
+}
+
+/**
+ * Talk to the daemon over the socket: `version()` decides the runtime
+ * name + version and doubles as the reachability check; `info()` yields
+ * the rootless flag. Both go through `safe()` so a refused or unreadable
+ * socket surfaces as a categorized error, never a throw.
  */
 async function probeDaemon(
-  binary: RuntimeName,
-  version: string | null,
-  exec: ExecFn,
+  client: ContainerClient,
 ): Promise<DaemonProbeResult> {
-  const runtimeInfo: ContainerRuntimeInfo = {
-    runtime: binary,
-    version: version ?? "unknown",
-    isPodmanDockerShim: false,
-  };
-  const format =
-    binary === "podman"
-      ? "{{.Host.Security.Rootless}}"
-      : "{{range .SecurityOptions}}{{.}}\n{{end}}";
-  const r = await exec(runtimeInfo, ["info", "--format", format]);
-  if (r.exitCode !== 0) {
+  const versionResult = await safe(() => client.version());
+  if (!versionResult.ok) {
     return {
       reachable: false,
       rootless: null,
-      exitCode: r.exitCode,
-      stderr: r.stderr.trim(),
+      runtime: null,
+      version: null,
+      errorKind: versionResult.error.kind,
+      error: versionResult.error.raw || versionResult.error.userMessage,
     };
   }
+  const version = versionResult.value as DaemonVersion;
 
-  let rootless: boolean | null = null;
-  const trimmed = r.stdout.trim();
-  if (binary === "podman") {
-    // Some podman setups print a warning to stdout before the
-    // template value (e.g. when XDG_RUNTIME_DIR is unset and rootless
-    // state can't be cached). Take the last non-empty line and
-    // require it to be exactly `true` or `false`. Anything else
-    // (warning-only output, prose ending in the word "true", JSON,
-    // older podman that doesn't expose Host.Security.Rootless)
-    // falls through to `null`.
-    const lastLine = trimmed
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .at(-1);
-    if (lastLine === "true" || lastLine === "false") {
-      rootless = lastLine === "true";
-    }
-  } else {
-    rootless = /name=rootless/.test(trimmed) ? true : false;
-  }
-  return { reachable: true, rootless, exitCode: 0, stderr: "" };
+  const infoResult = await safe(() => client.info());
+  const info: DaemonInfo = infoResult.ok
+    ? (infoResult.value as DaemonInfo)
+    : {};
+
+  return {
+    reachable: true,
+    rootless: rootlessFromInfo(info),
+    runtime: classifyRuntimeFromVersion(version),
+    version: version.Version ?? null,
+    errorKind: null,
+    error: null,
+  };
 }
 
 /**
- * Classify daemon-probe failure stderr into one of three doctor
- * statuses. Substring matches are intentionally generous — daemon
- * error text varies across versions and translations.
+ * Map a categorized daemon-probe failure to a doctor status. The socket
+ * answered at resolve time, so the failure is the API call itself: an
+ * EACCES on the socket is `permission`; everything else
+ * (socket-unreachable, network, unknown) collapses to socket-unreachable
+ * because from the operator's seat the daemon is simply not responding.
  */
-function classifyDaemonFailure(stderr: string): SelfDeploymentStatus {
-  const lower = stderr.toLowerCase();
-  if (lower.includes("permission denied")) return "permission-denied";
-  // socket-not-found / can't-connect family
-  if (
-    lower.includes("cannot connect") ||
-    lower.includes("unable to connect") ||
-    lower.includes("no such file or directory") ||
-    lower.includes("connection refused") ||
-    lower.includes("connect: no such file")
-  ) {
-    return "socket-unreachable";
-  }
-  // Default to socket-unreachable — the binary worked, something between
-  // it and the daemon didn't. The raw stderr survives in daemon.error.
+function classifyDaemonFailure(kind: ErrorKind | null): SelfDeploymentStatus {
+  if (kind === "permission") return "permission-denied";
   return "socket-unreachable";
-}
-
-/**
- * Best-effort guess at the socket path the binary used, based purely on
- * the relevant env vars. Reported back to the operator so they can
- * confirm whether their bind-mount matches what the CLI actually saw.
- * Returns null when no relevant env var is set.
- */
-function inferSocketPath(
-  binary: RuntimeName,
-  env: SelfDeploymentResult["env"],
-): string | null {
-  if (binary === "docker") return env.DOCKER_HOST ?? null;
-  // Podman prefers CONTAINER_HOST but also honors DOCKER_HOST when in
-  // docker-API compat mode, so fall through to it when CONTAINER_HOST
-  // is unset.
-  return env.CONTAINER_HOST ?? env.DOCKER_HOST ?? null;
 }
 
 /**
@@ -767,6 +788,20 @@ function remediationCgroupControllers(
 }
 
 /**
+ * The `findSelfContainerId` cascade validates HOSTNAME/cgroup/mountinfo
+ * candidates with `inspect`, which over the socket needs the dockerode
+ * client threaded in (containers.ts grows a trailing `client` param as
+ * part of the same socket port). This local view declares that optional
+ * param so the doctor can pass the resolved client while containers.ts's
+ * own port lands in parallel.
+ */
+type FindSelfContainerId = (
+  runtime: ContainerRuntimeInfo,
+  debug?: (msg: string) => void,
+  client?: ContainerClient,
+) => Promise<string | null>;
+
+/**
  * Run the existing `findSelfContainerId` cascade and report which
  * branch matched. We re-implement the source attribution here (the
  * underlying helper doesn't expose it) by re-checking inputs in the
@@ -775,8 +810,13 @@ function remediationCgroupControllers(
 async function resolveSelfIdWithSource(
   runtimeInfo: ContainerRuntimeInfo,
   readEnv: (key: string) => string | undefined,
+  client: ContainerClient,
 ): Promise<SelfDeploymentResult["selfId"]> {
-  const value = await findSelfContainerId(runtimeInfo);
+  const value = await (findSelfContainerId as FindSelfContainerId)(
+    runtimeInfo,
+    undefined,
+    client,
+  );
   if (!value) return { value: null, source: null };
   const envOverride = readEnv("SIGNALK_CONTAINER_ID")?.trim();
   if (envOverride && envOverride === value) {
@@ -827,67 +867,51 @@ function remediationDockerSocket(dockerHost: string | null): string[] {
 }
 
 const REMEDIATION_NO_RUNTIME_BARE_METAL: string[] = [
-  "No container runtime found. Install one:",
+  "No container runtime socket answered the Docker API. Install a runtime",
+  "and make sure its socket is running:",
   "  Podman (recommended):  sudo apt install podman     (Debian/Ubuntu)",
   "                          sudo dnf install podman     (Fedora/RHEL)",
+  "    then enable the socket: systemctl --user enable --now podman.socket",
   "  Docker:                 https://docs.docker.com/engine/install/",
   "After install, restart Signal K.",
 ];
 
 const REMEDIATION_NO_RUNTIME_CONTAINERIZED: string[] = [
-  "Signal K is running inside a container, but no container runtime CLI",
-  "(podman or docker) is reachable from inside this container.",
+  "Signal K is running inside a container, but no container runtime",
+  "socket answered the Docker API from inside this container.",
   "",
-  "Two things must be true: (1) the runtime CLI binary must exist inside",
-  "this container, and (2) the matching runtime socket from your host",
-  "must be bind-mounted in. Whichever runtime you already use on your",
+  "signalk-container talks to the host runtime directly over its unix",
+  "socket — no podman/docker CLI binary is needed inside the container.",
+  "The one thing required is that the matching runtime socket from your",
+  "host is bind-mounted in. Whichever runtime you already use on your",
   "host — Docker (HALOS, Docker Desktop, docker-ce) or Podman — is the",
-  "one to wire up. signalk-container talks to whichever it finds.",
-  "",
-  "── Easiest: use a pre-built image with both CLIs ──",
-  "",
-  "ghcr.io/dirkwa/signalk-server:latest is functionally identical to",
-  "the upstream signalk-server image but ships the docker and podman",
-  "CLIs (and crun/conmon) pre-installed, so condition (1) is already",
-  "satisfied. You only need to wire up the socket bind-mount below.",
-  "",
-  "  image: ghcr.io/dirkwa/signalk-server:latest",
-  "",
-  "Tags: latest (stable), beta (prerelease), master (upstream tip).",
-  "See: https://github.com/dirkwa/signalk-server-images",
+  "one to wire up; signalk-container talks to whichever socket it finds.",
   "",
   "── If your host runs Docker (HALOS, Docker Desktop, plain docker-ce) ──",
   "",
   "Update your docker-compose / docker run for the SK service to add:",
   "",
-  "  -v /usr/bin/docker:/usr/bin/docker:ro",
   "  -v /var/run/docker.sock:/var/run/docker.sock",
   "",
-  "The first line bind-mounts your host's docker CLI into the SK",
-  "container (no need to rebuild your image). The second exposes the",
-  "host's docker daemon. The SK container user must be in the host's",
-  "`docker` group, or you can use rootless docker.",
+  "This exposes the host's docker daemon. The SK container user must be",
+  "in the host's `docker` group, or you can use rootless docker.",
   "",
   "── If your host runs Podman (Fedora, RHEL, rootless Linux setups) ──",
   "",
   "Add to your SK container start command:",
   "",
-  "  -v /usr/bin/podman:/usr/bin/podman:ro",
-  "  -v /run/user/$(id -u)/podman/podman.sock:/run/user/$(id -u)/podman/podman.sock",
-  "  -e CONTAINER_HOST=unix:///run/user/$(id -u)/podman/podman.sock",
+  "  -v /run/user/$(id -u)/podman/podman.sock:/var/run/docker.sock",
   "  --user $(id -u):$(id -g)",
   "",
-  "(That's the rootless setup. For rootful Podman, replace the socket",
-  " path with /run/podman/podman.sock and drop the --user flag.)",
+  "(That's the rootless setup — the podman socket is mounted at the",
+  " docker-socket path so it's found automatically. For rootful Podman,",
+  " use /run/podman/podman.sock as the source and drop the --user flag.)",
   "",
-  "── For image maintainers / advanced users ──",
+  "── Pointing at a non-default socket path ──",
   "",
-  "Bind-mounting the host's CLI couples the SK container to the host's",
-  "exact runtime version. If you publish a SK image and want a clean,",
-  "version-independent install, bake the CLI into the image instead:",
-  "  RUN apt-get update && apt-get install -y docker-ce-cli   # for Docker hosts",
-  "  RUN apt-get update && apt-get install -y podman          # for Podman hosts",
-  "You'll still need the socket bind-mount + group/user setup above.",
+  "If you mount the socket somewhere other than the paths probed by",
+  "default, set DOCKER_HOST or CONTAINER_HOST to its unix:// URL; that",
+  "endpoint is then used exclusively.",
 ];
 
 const REMEDIATION_SOCKET_UNREACHABLE_PODMAN: string[] = [
@@ -972,7 +996,7 @@ export function generateSetupSnippet(
 
   const snippet =
     format === "compose" ? renderCompose(ctx) : renderRunCommand(ctx);
-  const dockerfile = hostUser === null ? "" : renderDockerfile(runtime);
+  const dockerfile = hostUser === null ? "" : renderDockerfile();
   const notes = buildSnippetNotes(ctx, result);
 
   return { format, runtime, rootless, snippet, dockerfile, notes };
@@ -1127,19 +1151,18 @@ function socketBindAndEnv(
 }
 
 /**
- * Minimal Dockerfile sidecar: install the runtime CLI inside the
- * Signal K image. Operators can append this to their existing Dockerfile.
+ * Image-side prerequisites note. signalk-container talks to the runtime
+ * over the bind-mounted socket via the Docker API — no podman/docker CLI
+ * needs to be installed in the Signal K image — so there is nothing to add
+ * to the Dockerfile. The socket bind-mount in the compose/run snippet is
+ * the only requirement.
  */
-function renderDockerfile(runtime: RuntimeName): string {
-  const pkg = runtime === "podman" ? "podman" : "docker-ce-cli";
+function renderDockerfile(): string {
   return [
-    "# Add this to your Signal K image Dockerfile so the runtime CLI is",
-    "# available inside the container at runtime:",
-    `RUN apt-get update && apt-get install -y ${pkg} && rm -rf /var/lib/apt/lists/*`,
-    "# Fedora/RHEL alternative:",
-    runtime === "podman"
-      ? "# RUN dnf install -y podman-remote"
-      : "# RUN dnf install -y docker-ce-cli",
+    "# No Dockerfile changes are needed: signalk-container talks to the",
+    "# runtime over the bind-mounted socket via the Docker API — no",
+    "# podman/docker CLI has to be installed in the image. The socket",
+    "# bind-mount in the snippet above is all that's required.",
   ].join("\n");
 }
 
