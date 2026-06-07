@@ -867,67 +867,51 @@ function remediationDockerSocket(dockerHost: string | null): string[] {
 }
 
 const REMEDIATION_NO_RUNTIME_BARE_METAL: string[] = [
-  "No container runtime found. Install one:",
+  "No container runtime socket answered the Docker API. Install a runtime",
+  "and make sure its socket is running:",
   "  Podman (recommended):  sudo apt install podman     (Debian/Ubuntu)",
   "                          sudo dnf install podman     (Fedora/RHEL)",
+  "    then enable the socket: systemctl --user enable --now podman.socket",
   "  Docker:                 https://docs.docker.com/engine/install/",
   "After install, restart Signal K.",
 ];
 
 const REMEDIATION_NO_RUNTIME_CONTAINERIZED: string[] = [
-  "Signal K is running inside a container, but no container runtime CLI",
-  "(podman or docker) is reachable from inside this container.",
+  "Signal K is running inside a container, but no container runtime",
+  "socket answered the Docker API from inside this container.",
   "",
-  "Two things must be true: (1) the runtime CLI binary must exist inside",
-  "this container, and (2) the matching runtime socket from your host",
-  "must be bind-mounted in. Whichever runtime you already use on your",
+  "signalk-container talks to the host runtime directly over its unix",
+  "socket — no podman/docker CLI binary is needed inside the container.",
+  "The one thing required is that the matching runtime socket from your",
+  "host is bind-mounted in. Whichever runtime you already use on your",
   "host — Docker (HALOS, Docker Desktop, docker-ce) or Podman — is the",
-  "one to wire up. signalk-container talks to whichever it finds.",
-  "",
-  "── Easiest: use a pre-built image with both CLIs ──",
-  "",
-  "ghcr.io/dirkwa/signalk-server:latest is functionally identical to",
-  "the upstream signalk-server image but ships the docker and podman",
-  "CLIs (and crun/conmon) pre-installed, so condition (1) is already",
-  "satisfied. You only need to wire up the socket bind-mount below.",
-  "",
-  "  image: ghcr.io/dirkwa/signalk-server:latest",
-  "",
-  "Tags: latest (stable), beta (prerelease), master (upstream tip).",
-  "See: https://github.com/dirkwa/signalk-server-images",
+  "one to wire up; signalk-container talks to whichever socket it finds.",
   "",
   "── If your host runs Docker (HALOS, Docker Desktop, plain docker-ce) ──",
   "",
   "Update your docker-compose / docker run for the SK service to add:",
   "",
-  "  -v /usr/bin/docker:/usr/bin/docker:ro",
   "  -v /var/run/docker.sock:/var/run/docker.sock",
   "",
-  "The first line bind-mounts your host's docker CLI into the SK",
-  "container (no need to rebuild your image). The second exposes the",
-  "host's docker daemon. The SK container user must be in the host's",
-  "`docker` group, or you can use rootless docker.",
+  "This exposes the host's docker daemon. The SK container user must be",
+  "in the host's `docker` group, or you can use rootless docker.",
   "",
   "── If your host runs Podman (Fedora, RHEL, rootless Linux setups) ──",
   "",
   "Add to your SK container start command:",
   "",
-  "  -v /usr/bin/podman:/usr/bin/podman:ro",
-  "  -v /run/user/$(id -u)/podman/podman.sock:/run/user/$(id -u)/podman/podman.sock",
-  "  -e CONTAINER_HOST=unix:///run/user/$(id -u)/podman/podman.sock",
+  "  -v /run/user/$(id -u)/podman/podman.sock:/var/run/docker.sock",
   "  --user $(id -u):$(id -g)",
   "",
-  "(That's the rootless setup. For rootful Podman, replace the socket",
-  " path with /run/podman/podman.sock and drop the --user flag.)",
+  "(That's the rootless setup — the podman socket is mounted at the",
+  " docker-socket path so it's found automatically. For rootful Podman,",
+  " use /run/podman/podman.sock as the source and drop the --user flag.)",
   "",
-  "── For image maintainers / advanced users ──",
+  "── Pointing at a non-default socket path ──",
   "",
-  "Bind-mounting the host's CLI couples the SK container to the host's",
-  "exact runtime version. If you publish a SK image and want a clean,",
-  "version-independent install, bake the CLI into the image instead:",
-  "  RUN apt-get update && apt-get install -y docker-ce-cli   # for Docker hosts",
-  "  RUN apt-get update && apt-get install -y podman          # for Podman hosts",
-  "You'll still need the socket bind-mount + group/user setup above.",
+  "If you mount the socket somewhere other than the paths probed by",
+  "default, set DOCKER_HOST or CONTAINER_HOST to its unix:// URL; that",
+  "endpoint is then used exclusively.",
 ];
 
 const REMEDIATION_SOCKET_UNREACHABLE_PODMAN: string[] = [
@@ -1012,7 +996,7 @@ export function generateSetupSnippet(
 
   const snippet =
     format === "compose" ? renderCompose(ctx) : renderRunCommand(ctx);
-  const dockerfile = hostUser === null ? "" : renderDockerfile(runtime);
+  const dockerfile = hostUser === null ? "" : renderDockerfile();
   const notes = buildSnippetNotes(ctx, result);
 
   return { format, runtime, rootless, snippet, dockerfile, notes };
@@ -1167,19 +1151,18 @@ function socketBindAndEnv(
 }
 
 /**
- * Minimal Dockerfile sidecar: install the runtime CLI inside the
- * Signal K image. Operators can append this to their existing Dockerfile.
+ * Image-side prerequisites note. signalk-container talks to the runtime
+ * over the bind-mounted socket via the Docker API — no podman/docker CLI
+ * needs to be installed in the Signal K image — so there is nothing to add
+ * to the Dockerfile. The socket bind-mount in the compose/run snippet is
+ * the only requirement.
  */
-function renderDockerfile(runtime: RuntimeName): string {
-  const pkg = runtime === "podman" ? "podman" : "docker-ce-cli";
+function renderDockerfile(): string {
   return [
-    "# Add this to your Signal K image Dockerfile so the runtime CLI is",
-    "# available inside the container at runtime:",
-    `RUN apt-get update && apt-get install -y ${pkg} && rm -rf /var/lib/apt/lists/*`,
-    "# Fedora/RHEL alternative:",
-    runtime === "podman"
-      ? "# RUN dnf install -y podman-remote"
-      : "# RUN dnf install -y docker-ce-cli",
+    "# No Dockerfile changes are needed: signalk-container talks to the",
+    "# runtime over the bind-mounted socket via the Docker API — no",
+    "# podman/docker CLI has to be installed in the image. The socket",
+    "# bind-mount in the snippet above is all that's required.",
   ].join("\n");
 }
 

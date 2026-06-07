@@ -253,17 +253,20 @@ describe("selfDeployment — no-runtime branch", () => {
     assert.equal(result.status, "no-runtime");
     assert.equal(result.binary.name, null);
     assert.equal(result.daemon.reachable, false);
-    // Bare-metal remediation mentions installing podman / docker.
+    // Bare-metal remediation: install a runtime + ensure its socket runs.
     const joined = result.remediation.join("\n");
-    assert.match(joined, /Install one/);
+    assert.match(joined, /Install a runtime/);
     assert.match(joined, /apt install podman/);
+    assert.match(joined, /podman\.socket/);
     assert.doesNotMatch(joined, /bind-mount/i);
   });
 
-  it("containerized, no socket → no-runtime + end-user-friendly bind-mount remediation", async () => {
+  it("containerized, no socket → no-runtime + socket-mount remediation (no CLI)", async () => {
     // WHY: end users of off-the-shelf SK Docker images can't edit a
-    // Dockerfile, so the remediation must lead with the bind-mount path
-    // and cover both Docker and Podman hosts.
+    // Dockerfile, so the remediation must lead with the socket bind-mount
+    // and cover both Docker and Podman hosts. Post-dockerode-port there is
+    // NO podman/docker CLI requirement inside the container — the
+    // remediation must not tell operators to mount or install one.
     const result = await selfDeployment(
       "auto",
       null,
@@ -277,35 +280,20 @@ describe("selfDeployment — no-runtime branch", () => {
 
     assert.match(joined, /If your host runs Docker/);
     assert.match(joined, /If your host runs Podman/);
-    assert.match(joined, /-v \/usr\/bin\/docker:\/usr\/bin\/docker:ro/);
-    assert.match(joined, /-v \/usr\/bin\/podman:\/usr\/bin\/podman:ro/);
     assert.match(joined, /\/var\/run\/docker\.sock/);
     assert.match(joined, /podman\.sock/);
-    assert.match(joined, /For image maintainers/);
-    assert.match(joined, /install -y docker-ce-cli/);
-    assert.match(joined, /install -y podman/);
+    // The socket is the only requirement — explicitly states no CLI is needed.
+    assert.match(joined, /no podman\/docker CLI binary is needed/i);
+
+    // Regression guards: the obsolete CLI-binary advice must be gone.
+    assert.doesNotMatch(joined, /\/usr\/bin\/docker/);
+    assert.doesNotMatch(joined, /\/usr\/bin\/podman/);
+    assert.doesNotMatch(joined, /docker-ce-cli/);
+    assert.doesNotMatch(joined, /ghcr\.io\/dirkwa\/signalk-server/);
 
     // WHY: doctor probe can't know which runtime the host uses, so the
     // remediation must not promote one as "recommended" globally.
     assert.doesNotMatch(joined, /Podman \(recommended\)/);
-
-    // WHY: the pre-built image is the lowest-friction option for users
-    // who can pick their SK image. Surface it before the bind-mount
-    // recipes so users see it first.
-    assert.match(joined, /ghcr\.io\/dirkwa\/signalk-server:latest/);
-    assert.match(joined, /pre-built image/i);
-    const prebuiltIdx = joined.indexOf("ghcr.io/dirkwa/signalk-server");
-    const dockerBindIdx = joined.indexOf("/usr/bin/docker:/usr/bin/docker");
-    assert.ok(
-      prebuiltIdx >= 0 && prebuiltIdx < dockerBindIdx,
-      "pre-built image section must appear before the bind-mount recipes",
-    );
-
-    const maintainerIdx = joined.indexOf("For image maintainers");
-    assert.ok(
-      dockerBindIdx >= 0 && maintainerIdx > dockerBindIdx,
-      "bind-mount path must appear before the image-maintainer section",
-    );
   });
 });
 
