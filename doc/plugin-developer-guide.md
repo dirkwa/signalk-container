@@ -359,7 +359,7 @@ Access via `(globalThis as any).__signalk_containerManager`:
 Returns detected runtime info or `null` if detection hasn't completed.
 
 ```typescript
-{ runtime: 'podman', version: '5.4.2', isPodmanDockerShim: false }
+{ runtime: 'podman', version: '5.4.2', isRootless: true, socketPath: '/run/user/1000/podman/podman.sock' }
 ```
 
 ### `whenReady(): Promise<void>`
@@ -712,7 +712,7 @@ Also surfaced over REST at `GET /plugins/signalk-container/api/doctor/deployment
 
 ### `containers.doctor.generateSetupSnippet(format?, result?): Promise<SetupSnippetResult>`
 
-Pure-templating companion to `selfDeployment()`: produces a ready-to-paste `docker-compose.yml` fragment (`format: "compose"`, the default) or a `podman run` / `docker run` shell command (`format: "run"`) tailored to the detected runtime. Bundles a minimal Dockerfile sidecar showing image-side prereqs and a `notes` array with operator-facing caveats.
+Pure-templating companion to `selfDeployment()`: produces a ready-to-paste `docker-compose.yml` fragment (`format: "compose"`, the default) or a `podman run` / `docker run` shell command (`format: "run"`) tailored to the detected runtime — the snippet wires up the socket bind-mount. A `dockerfile` note confirms no image change is needed (signalk-container talks to the runtime over the socket, not a CLI), and a `notes` array carries operator-facing caveats.
 
 Useful when a consumer plugin wants to surface "you need to deploy Signal K with these settings" guidance in its own onboarding UI rather than redirecting the user to signalk-container's admin panel.
 
@@ -1403,7 +1403,7 @@ Webpack outputs to `public/` which Signal K serves at `/{package-name}/`. The Ad
 
 ## Containerized Signal K
 
-When Signal K runs inside a container itself, signalk-container needs the host's Docker/Podman socket and CLI binary mounted in. Detect this case via `isContainerized()`:
+When Signal K runs inside a container itself, signalk-container needs only the host's Docker/Podman socket bind-mounted in — it talks to the runtime over the Docker API, so no podman/docker CLI binary is required inside the container. Detect this case via `isContainerized()`:
 
 ```typescript
 import { isContainerized } from "signalk-container/dist/runtime";
