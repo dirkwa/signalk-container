@@ -685,17 +685,17 @@ Returns `{ ok: true, output: "ok\n" }` on success; `{ ok: false, output, error }
 
 ### `containers.doctor.selfDeployment(): Promise<SelfDeploymentResult>`
 
-Diagnose the Signal K deployment itself — distinct from the per-image probe above. Answers "is my host actually set up to drive `podman`/`docker` at all, and (when SK is containerized) are the in-container prerequisites met?" Used by signalk-container at startup to turn vague "no runtime found" errors into actionable remediation, and exposed to consumer plugins for the same purpose if they want to surface it in their own diagnostics.
+Diagnose the Signal K deployment itself — distinct from the per-image probe above. Answers "is my host actually set up to drive `podman`/`docker` at all, and (when SK is containerised) are the in-container prerequisites met?" Used by signalk-container at startup to turn vague "no runtime found" errors into actionable remediation, and exposed to consumer plugins for the same purpose if they want to surface it in their own diagnostics.
 
 Returns a `SelfDeploymentResult` (see `src/types.ts`) whose `status` is one of:
 
 | Status               | Meaning                                                                                                                                            |
 | -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ok`                 | Binary discovered, daemon reachable; when containerized, self-id also resolved.                                                                    |
+| `ok`                 | Runtime socket reachable, daemon answered; when containerised, self-id also resolved.                                                              |
 | `no-runtime`         | No `podman` or `docker` binary in `$PATH`.                                                                                                         |
 | `socket-unreachable` | Binary present, but `<binary> info` could not contact a daemon (no socket mounted, daemon not running, etc.).                                      |
 | `permission-denied`  | Binary + socket present, but the daemon rejected the caller (UID/group mismatch).                                                                  |
-| `self-id-unresolved` | SK is containerized, daemon is reachable, but `SIGNALK_CONTAINER_ID` / `HOSTNAME` / `/proc/self/cgroup` all failed to identify SK's own container. |
+| `self-id-unresolved` | SK is containerised, daemon is reachable, but `SIGNALK_CONTAINER_ID` / `HOSTNAME` / `/proc/self/cgroup` all failed to identify SK's own container. |
 
 Each failure status carries a `remediation: string[]` of copy-pasteable lines tailored to the failure mode. Never throws.
 
@@ -1257,9 +1257,12 @@ interface HistoryEntry {
 }
 interface ContainerManagerApi {
   getRuntime: () => {
-    runtime: string;
+    runtime: "podman" | "docker";
     version: string;
+    isRootless?: boolean | null;
+    cgroupControllers?: string[] | null;
     hostUser?: { uid: number; gid: number } | null; // null on Windows
+    socketPath?: string; // resolved runtime socket
   } | null;
   whenReady: () => Promise<void>;
   ensureRunning: (
@@ -1410,7 +1413,7 @@ import { isContainerized } from "signalk-container/dist/runtime";
 
 if (isContainerized()) {
   // Signal K is running inside a container
-  // - host runtime must be exposed (docker.sock + binary)
+  // - host runtime socket must be bind-mounted in (no CLI binary needed)
   // - spawned containers are siblings, not nested
   // - host.containers.internal points to the actual host
   //   (signalk-container 1.8.0+ adds this mapping for Docker too;
@@ -1431,7 +1434,7 @@ See the README's "Running Signal K in a Container" section for full details on s
 
 ### Which API for what
 
-A consumer plugin that mounts a host path into a managed container has four reasonable patterns, depending on whether SK is bare-metal or itself containerized. Pick by use case:
+A consumer plugin that mounts a host path into a managed container has four reasonable patterns, depending on whether SK is bare-metal or itself containerised. Pick by use case:
 
 | Use case                                                                                                                 | API                                    | Why                                                                                                                                                                                                                                |
 | ------------------------------------------------------------------------------------------------------------------------ | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
