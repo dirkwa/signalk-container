@@ -359,7 +359,7 @@ Access via `(globalThis as any).__signalk_containerManager`:
 Returns detected runtime info or `null` if detection hasn't completed.
 
 ```typescript
-{ runtime: 'podman', version: '5.4.2', isPodmanDockerShim: false }
+{ runtime: 'podman', version: '5.4.2', isRootless: true, socketPath: '/run/user/1000/podman/podman.sock' }
 ```
 
 ### `whenReady(): Promise<void>`
@@ -685,17 +685,17 @@ Returns `{ ok: true, output: "ok\n" }` on success; `{ ok: false, output, error }
 
 ### `containers.doctor.selfDeployment(): Promise<SelfDeploymentResult>`
 
-Diagnose the Signal K deployment itself — distinct from the per-image probe above. Answers "is my host actually set up to drive `podman`/`docker` at all, and (when SK is containerized) are the in-container prerequisites met?" Used by signalk-container at startup to turn vague "no runtime found" errors into actionable remediation, and exposed to consumer plugins for the same purpose if they want to surface it in their own diagnostics.
+Diagnose the Signal K deployment itself — distinct from the per-image probe above. Answers "is my host actually set up to drive `podman`/`docker` at all, and (when SK is containerised) are the in-container prerequisites met?" Used by signalk-container at startup to turn vague "no runtime found" errors into actionable remediation, and exposed to consumer plugins for the same purpose if they want to surface it in their own diagnostics.
 
 Returns a `SelfDeploymentResult` (see `src/types.ts`) whose `status` is one of:
 
 | Status               | Meaning                                                                                                                                            |
 | -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ok`                 | Binary discovered, daemon reachable; when containerized, self-id also resolved.                                                                    |
+| `ok`                 | Runtime socket reachable, daemon answered; when containerised, self-id also resolved.                                                              |
 | `no-runtime`         | No `podman` or `docker` binary in `$PATH`.                                                                                                         |
 | `socket-unreachable` | Binary present, but `<binary> info` could not contact a daemon (no socket mounted, daemon not running, etc.).                                      |
 | `permission-denied`  | Binary + socket present, but the daemon rejected the caller (UID/group mismatch).                                                                  |
-| `self-id-unresolved` | SK is containerized, daemon is reachable, but `SIGNALK_CONTAINER_ID` / `HOSTNAME` / `/proc/self/cgroup` all failed to identify SK's own container. |
+| `self-id-unresolved` | SK is containerised, daemon is reachable, but `SIGNALK_CONTAINER_ID` / `HOSTNAME` / `/proc/self/cgroup` all failed to identify SK's own container. |
 
 Each failure status carries a `remediation: string[]` of copy-pasteable lines tailored to the failure mode. Never throws.
 
@@ -712,7 +712,7 @@ Also surfaced over REST at `GET /plugins/signalk-container/api/doctor/deployment
 
 ### `containers.doctor.generateSetupSnippet(format?, result?): Promise<SetupSnippetResult>`
 
-Pure-templating companion to `selfDeployment()`: produces a ready-to-paste `docker-compose.yml` fragment (`format: "compose"`, the default) or a `podman run` / `docker run` shell command (`format: "run"`) tailored to the detected runtime. Bundles a minimal Dockerfile sidecar showing image-side prereqs and a `notes` array with operator-facing caveats.
+Pure-templating companion to `selfDeployment()`: produces a ready-to-paste `docker-compose.yml` fragment (`format: "compose"`, the default) or a `podman run` / `docker run` shell command (`format: "run"`) tailored to the detected runtime — the snippet wires up the socket bind-mount. A `dockerfile` note confirms no image change is needed (signalk-container talks to the runtime over the socket, not a CLI), and a `notes` array carries operator-facing caveats.
 
 Useful when a consumer plugin wants to surface "you need to deploy Signal K with these settings" guidance in its own onboarding UI rather than redirecting the user to signalk-container's admin panel.
 
@@ -1257,9 +1257,12 @@ interface HistoryEntry {
 }
 interface ContainerManagerApi {
   getRuntime: () => {
-    runtime: string;
+    runtime: "podman" | "docker";
     version: string;
+    isRootless?: boolean | null;
+    cgroupControllers?: string[] | null;
     hostUser?: { uid: number; gid: number } | null; // null on Windows
+    socketPath?: string; // resolved runtime socket
   } | null;
   whenReady: () => Promise<void>;
   ensureRunning: (
@@ -1403,14 +1406,14 @@ Webpack outputs to `public/` which Signal K serves at `/{package-name}/`. The Ad
 
 ## Containerized Signal K
 
-When Signal K runs inside a container itself, signalk-container needs the host's Docker/Podman socket and CLI binary mounted in. Detect this case via `isContainerized()`:
+When Signal K runs inside a container itself, signalk-container needs only the host's Docker/Podman socket bind-mounted in — it talks to the runtime over the Docker API, so no podman/docker CLI binary is required inside the container. Detect this case via `isContainerized()`:
 
 ```typescript
 import { isContainerized } from "signalk-container/dist/runtime";
 
 if (isContainerized()) {
   // Signal K is running inside a container
-  // - host runtime must be exposed (docker.sock + binary)
+  // - host runtime socket must be bind-mounted in (no CLI binary needed)
   // - spawned containers are siblings, not nested
   // - host.containers.internal points to the actual host
   //   (signalk-container 1.8.0+ adds this mapping for Docker too;
@@ -1431,7 +1434,7 @@ See the README's "Running Signal K in a Container" section for full details on s
 
 ### Which API for what
 
-A consumer plugin that mounts a host path into a managed container has four reasonable patterns, depending on whether SK is bare-metal or itself containerized. Pick by use case:
+A consumer plugin that mounts a host path into a managed container has four reasonable patterns, depending on whether SK is bare-metal or itself containerised. Pick by use case:
 
 | Use case                                                                                                                 | API                                    | Why                                                                                                                                                                                                                                |
 | ------------------------------------------------------------------------------------------------------------------------ | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

@@ -6,7 +6,7 @@ Bare-metal Signal K just works — skip to the [main README](../README.md). This
 
 ## Recommended image
 
-We build and publish ready-to-use Signal K server images at **<https://github.com/dirkwa/signalk-server-images>**. They ship the `docker` and `podman` CLIs (so the in-container `signalk-container` plugin can talk to the host daemon via the mounted socket) and the `crun` / `conmon` minimum-rootless infrastructure, but stay slim — no buildah, no full local-rootless plumbing (the [remote-mode fallback](#what-works-automatically-since-194) makes that unnecessary).
+We build and publish ready-to-use Signal K server images at **<https://github.com/dirkwa/signalk-server-images>**. The in-container `signalk-container` plugin talks to the host daemon over the Docker API on the mounted socket — no podman/docker CLI is needed in the image — so these images stay slim. (Any compatible Signal K image works; the only in-container requirement is the bind-mounted socket below. The published images are simply a convenient, tested baseline.)
 
 Drop one of these references straight into your quadlet `Image=` line or compose `image:` line:
 
@@ -41,7 +41,7 @@ host (rootless podman as uid 1000)
         ...
 ```
 
-The in-container `docker` / `podman` CLI is a thin client; the host daemon owns the lifecycle of every container including signalk-server itself. This means **paths in mounts are host paths**, not in-container paths.
+The plugin is just an API client of the host daemon over the mounted socket; the host daemon owns the lifecycle of every container including signalk-server itself. This means **paths in mounts are host paths**, not in-container paths.
 
 ## What you must set up
 
@@ -69,15 +69,13 @@ volumes:
   - /run/podman/podman.sock:/var/run/docker.sock
 ```
 
-### 2. Tell the in-container clients where to talk
+### 2. (Optional) point at a non-default socket path
 
-`docker` reads `DOCKER_HOST`; podman in remote mode reads `CONTAINER_HOST` or the `--url` flag. Set whichever your image's primary CLI uses:
+If you mount the socket at `/var/run/docker.sock` (the recommendation above), the plugin discovers it automatically — nothing else to set. Only when you mount it somewhere else do you need to name the endpoint explicitly via `DOCKER_HOST` (or `CONTAINER_HOST`); that endpoint is then used exclusively:
 
 ```ini
-Environment=DOCKER_HOST=unix:///var/run/docker.sock
+Environment=DOCKER_HOST=unix:///custom/path/podman.sock
 ```
-
-This is what makes a vanilla `docker ps` (or any plugin command) inside the container reach the host daemon without extra flags.
 
 ### 3. Set `SIGNALK_CONTAINER_ID`
 
@@ -114,11 +112,9 @@ Volume=%h/.signalk:/home/node/.signalk
 
 `%h` expands to the host user's home (`/home/dirk`). On the host the data lives at `/home/dirk/.signalk`; inside SK it appears as `/home/node/.signalk`; consumer plugins request `/home/node/.signalk` as the data mount and `resolveHostPath` translates back to `/home/dirk/.signalk` when calling the host daemon.
 
-## Automatic remote-mode fallback
+## No in-container runtime needed
 
-When the in-container podman binary can't operate locally — typically because the image ships the podman CLI but not the full rootless infrastructure (`uidmap`, `slirp4netns`, `fuse-overlayfs`) — `tryRuntime` falls back to talking to the host daemon over the bind-mounted socket. Concretely: after `podman --version` succeeds, the plugin probes `podman info`; if that fails inside a container with a socket reachable via `CONTAINER_HOST` or `/var/run/docker.sock`, it switches to `podman --remote --url <socket>` for every subsequent invocation. The runtime stays podman; the in-container binary is just a client.
-
-This means the recommended image doesn't need to carry the entire rootless stack. The plugin records the chosen socket on `ContainerRuntimeInfo.remoteSocketUrl` so consumers can inspect what it picked.
+signalk-container speaks the Docker API directly to the host daemon over the bind-mounted socket — it never spawns a podman/docker process inside the Signal K container. So the image needs **no** runtime CLI and **none** of the rootless infrastructure (`uidmap`, `slirp4netns`, `fuse-overlayfs`, `crun`/`conmon`); only the socket bind-mount has to be present. The plugin records the socket it resolved on `ContainerRuntimeInfo.socketPath` so consumers can inspect what it picked.
 
 ## A reference quadlet (rootless podman host)
 
@@ -135,7 +131,6 @@ Network=host
 UserNS=keep-id
 Volume=%h/.signalk:/home/node/.signalk
 Volume=%t/podman/podman.sock:/var/run/docker.sock
-Environment=DOCKER_HOST=unix:///var/run/docker.sock
 Environment=SIGNALK_CONTAINER_ID=signalk-master
 Environment=SKIP_ADMINUI_VERSION_CHECK=true
 PodmanArgs=--init
@@ -159,13 +154,13 @@ loginctl enable-linger $USER   # so the user session (and the podman socket) sur
 
 ## Troubleshooting cheat-sheet
 
-| Symptom                                                 | Cause                                                                      | Fix                                                                                                                          |
-| ------------------------------------------------------- | -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `newuidmap: executable file not found in $PATH`         | In-container podman trying to do rootless mapping without `uidmap` package | Upgrade `signalk-container` to ≥ 1.9.4 — remote-mode fallback kicks in automatically                                         |
-| `statfs /home/node/.signalk: no such file or directory` | Self-id detection failed; host daemon got an in-container path             | Set `SIGNALK_CONTAINER_ID=<your container name>` in the env                                                                  |
-| `permission denied` opening the socket                  | UID mapping mismatch                                                       | Use `--userns=keep-id` (podman) or `--user $(id -u):$(id -g)` (docker), and confirm the host socket is owned by the same UID |
-| `could not detect self container id` in Signal K log    | Cascade returned null and no override set                                  | Same as the second row — set `SIGNALK_CONTAINER_ID`                                                                          |
-| Sibling containers start but can't reach Signal K       | `Network=host` SK + bridge-network siblings                                | Bind SK to the same user-defined bridge as siblings, or have plugins use `host.containers.internal`                          |
+| Symptom                                                 | Cause                                                          | Fix                                                                                                                                     |
+| ------------------------------------------------------- | -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `No container runtime socket answered the Docker API`   | Socket not bind-mounted, or mounted at a non-default path      | Mount the host socket at `/var/run/docker.sock` (or set `DOCKER_HOST`/`CONTAINER_HOST` to its path); confirm the socket unit is running |
+| `statfs /home/node/.signalk: no such file or directory` | Self-id detection failed; host daemon got an in-container path | Set `SIGNALK_CONTAINER_ID=<your container name>` in the env                                                                             |
+| `permission denied` opening the socket                  | UID mapping mismatch                                           | Use `--userns=keep-id` (podman) or `--user $(id -u):$(id -g)` (docker), and confirm the host socket is owned by the same UID            |
+| `could not detect self container id` in Signal K log    | Cascade returned null and no override set                      | Same as the second row — set `SIGNALK_CONTAINER_ID`                                                                                     |
+| Sibling containers start but can't reach Signal K       | `Network=host` SK + bridge-network siblings                    | Bind SK to the same user-defined bridge as siblings, or have plugins use `host.containers.internal`                                     |
 
 ## Related docs
 
