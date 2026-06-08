@@ -15,6 +15,16 @@ import {
  */
 export interface ResourceHostConfig {
   NanoCpus?: number;
+  /**
+   * CFS quota/period form of the CPU cap, used by the live-UPDATE path.
+   * Podman's docker-compat `/update` endpoint does not apply `NanoCpus`
+   * (the call succeeds but the cgroup cpu.max is left unchanged); it does
+   * honour `CpuQuota`/`CpuPeriod`, which Docker accepts too. Create uses
+   * `NanoCpus`; update uses these. `cpus` → quota = round(cpus*period),
+   * period = 100000 (100ms, the Docker/podman default).
+   */
+  CpuQuota?: number;
+  CpuPeriod?: number;
   CpuShares?: number;
   CpusetCpus?: string;
   Memory?: number;
@@ -23,6 +33,9 @@ export interface ResourceHostConfig {
   PidsLimit?: number;
   OomScoreAdj?: number;
 }
+
+/** CFS period (100ms) used to express the CPU cap as quota/period. */
+const CPU_PERIOD = 100_000;
 
 /**
  * Parse a memory string the consumer-plugin / config-panel form uses
@@ -403,6 +416,13 @@ export function resourcePayloadForUpdate(
   // inputs. Reuse the shared translator and drop OomScoreAdj if present.
   const hc = limitsToHostConfig(limits);
   delete hc.OomScoreAdj;
+  // The compat `/update` endpoint ignores NanoCpus (podman) — express the
+  // CPU cap as CFS quota/period, which both runtimes honour on update.
+  if (hc.NanoCpus !== undefined) {
+    hc.CpuQuota = Math.round((hc.NanoCpus / 1_000_000_000) * CPU_PERIOD);
+    hc.CpuPeriod = CPU_PERIOD;
+    delete hc.NanoCpus;
+  }
   return hc;
 }
 

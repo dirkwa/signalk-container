@@ -218,14 +218,17 @@ describe("resourcePayloadForRun", () => {
 });
 
 describe("resourcePayloadForUpdate", () => {
-  it("returns payload for live-updatable fields", () => {
+  it("returns payload for live-updatable fields (cpus as CpuQuota/Period)", () => {
+    // The update path expresses the CPU cap as CFS quota/period, NOT
+    // NanoCpus — podman's compat /update silently ignores NanoCpus.
     const payload = resourcePayloadForUpdate({
       cpus: 2.5,
       memory: "1g",
       pidsLimit: 300,
     });
     assert.deepEqual(payload, {
-      NanoCpus: 2500000000,
+      CpuQuota: 250000,
+      CpuPeriod: 100000,
       Memory: 1073741824,
       PidsLimit: 300,
     });
@@ -248,7 +251,7 @@ describe("resourcePayloadForUpdate", () => {
   it("ignores null fields when checking live-updatability", () => {
     // cpusetCpus: null means "explicit unset" — NOT a live update obstacle
     const payload = resourcePayloadForUpdate({ cpus: 2.5, cpusetCpus: null });
-    assert.deepEqual(payload, { NanoCpus: 2500000000 });
+    assert.deepEqual(payload, { CpuQuota: 250000, CpuPeriod: 100000 });
   });
 
   it("returns empty object for empty limits (vacuously live-updatable)", () => {
@@ -265,7 +268,8 @@ describe("resourcePayloadForUpdate", () => {
       pidsLimit: 100,
     });
     assert.deepEqual(payload, {
-      NanoCpus: 1500000000,
+      CpuQuota: 150000,
+      CpuPeriod: 100000,
       CpuShares: 1024,
       Memory: 536870912,
       MemorySwap: 536870912,
@@ -293,7 +297,11 @@ describe("tryLiveUpdate", () => {
     assert.equal(result.ok, true);
     const update = calls.get("update") as Array<{ payload: unknown }>;
     assert.equal(update.length, 1);
-    assert.deepEqual(update[0].payload, { NanoCpus: 1500000000 });
+    // cpus is sent as CFS quota/period on update (podman compat ignores NanoCpus).
+    assert.deepEqual(update[0].payload, {
+      CpuQuota: 150000,
+      CpuPeriod: 100000,
+    });
   });
 
   it("returns ok=false when update rejects", async () => {
@@ -552,7 +560,7 @@ describe("tryLiveUpdate Bug C: container existence check", () => {
   it("filters cgroup-unavailable fields BEFORE deciding live-update viability", async () => {
     // Pure regression test for the integration: cpusetCpus + cpus, on
     // a runtime with no cpuset → cpusetCpus is dropped → only cpus
-    // remains → live-updatable → update gets the NanoCpus payload only.
+    // remains → live-updatable → update gets the CPU quota/period payload only.
     const calls = new Map<string, unknown[]>();
     const client = makeMockClient({
       containers: { "sk-mayara": { update: () => Promise.resolve() } },
@@ -567,7 +575,11 @@ describe("tryLiveUpdate Bug C: container existence check", () => {
     assert.equal(result.ok, true);
     const update = calls.get("update") as Array<{ payload: unknown }>;
     assert.equal(update.length, 1);
-    assert.deepEqual(update[0].payload, { NanoCpus: 1500000000 });
+    // cpus is sent as CFS quota/period on update (podman compat ignores NanoCpus).
+    assert.deepEqual(update[0].payload, {
+      CpuQuota: 150000,
+      CpuPeriod: 100000,
+    });
   });
 });
 
