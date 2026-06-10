@@ -519,6 +519,19 @@ export interface ContainerJobConfig {
    * `signalk-container` peer-dep to the version that introduced it.
    */
   user?: { inImageUid?: number; inImageGid?: number } | false;
+  /**
+   * Cancel a job that is already running. When the signal aborts, runJob
+   * force-removes the job container, which unblocks the in-flight wait;
+   * the job then resolves with `status: "cancelled"`. A signal that is
+   * already aborted when runJob is called returns `cancelled` without
+   * creating a container. A job that finishes on its own is unaffected —
+   * a later abort is a harmless no-op.
+   *
+   * The boundary-level alternative (the caller stops dispatching new jobs)
+   * cannot interrupt a long single step such as a tile-join; this is the
+   * mechanism that can.
+   */
+  signal?: AbortSignal;
 }
 
 export type ContainerJobStatus =
@@ -526,7 +539,8 @@ export type ContainerJobStatus =
   | "pulling"
   | "running"
   | "completed"
-  | "failed";
+  | "failed"
+  | "cancelled";
 
 export interface ContainerJobResult {
   id: string;
@@ -885,6 +899,17 @@ export interface ContainerManagerApi {
   stop(name: string): Promise<void>;
   remove(name: string): Promise<void>;
   getState(name: string): Promise<ContainerState>;
+  /**
+   * Run a one-shot helper container to completion, streaming its output
+   * via the `onProgress`/`onStdoutLine`/`onStderrLine` callbacks and
+   * resolving with the exit status.
+   *
+   * Pass `config.signal` (an `AbortSignal`) to cancel a job mid-flight:
+   * aborting force-removes the running container and resolves with
+   * `status: "cancelled"`. This is the only way to interrupt a long
+   * single step (e.g. a tile-join); boundary-level cancellation in the
+   * caller cannot. Available in signalk-container >= 1.16.0.
+   */
   runJob(config: ContainerJobConfig): Promise<ContainerJobResult>;
   /**
    * One-shot capture of the last `tail` lines of a managed
