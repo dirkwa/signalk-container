@@ -81,6 +81,7 @@ import { ManifestStore } from "./manifest/store.js";
 import {
   generateSetupSnippet,
   imageRunsAsUser,
+  isDashboardDeploymentError,
   selfDeployment,
 } from "./doctor.js";
 
@@ -1849,6 +1850,25 @@ export default (app: App) => {
         app.setPluginStatus(
           `${statusPrefix}${runtimeInfo.runtime} ${runtimeInfo.version}${runtimeInfo.isPodmanDockerShim ? " (podman shim)" : ""}`,
         );
+
+        // Runtime detection succeeded, but a container can still run while
+        // its host is degraded: cgroup controllers not delegated (memory
+        // limits silently dropped) or self-id unresolved. Re-run the doctor
+        // and surface those as a dashboard error so the operator isn't left
+        // with a green status hiding a real problem. The headline mirrors
+        // the no-runtime path; full remediation goes to the server log.
+        const doctor = await selfDeployment(preference);
+        if (isDashboardDeploymentError(doctor.status)) {
+          const headline = headlineForDoctorStatus(doctor.status);
+          app.setPluginError(
+            `${headline}. See GET /plugins/signalk-container/api/doctor/deployment for details.`,
+          );
+          if (doctor.remediation.length > 0) {
+            app.error(
+              `signalk-container deployment doctor — ${headline}:\n${doctor.remediation.join("\n")}`,
+            );
+          }
+        }
 
         if (config.pruneSchedule && config.pruneSchedule !== "off") {
           const intervalMs =

@@ -1219,3 +1219,31 @@ function buildSnippetNotes(
 
   return out;
 }
+
+/**
+ * Deployment statuses that should escalate to a dashboard error even
+ * though runtime detection itself succeeded. `cgroup-controllers-incomplete`
+ * means resource limits are being silently dropped; `self-id-unresolved`
+ * means the in-container self-detection failed and consumer plugins can't
+ * mount the Signal K data dir or join its network. Both let containers run,
+ * so they never make `detectRuntime()` return `null` — the operator would
+ * otherwise see a healthy green status with no hint of the problem.
+ *
+ * `no-runtime`, `socket-unreachable`, and `permission-denied` all make
+ * `detectRuntime()` return `null` and are surfaced on that path; they are
+ * intentionally not listed here.
+ */
+const DASHBOARD_ERROR_STATUSES: ReadonlySet<SelfDeploymentStatus> = new Set([
+  "cgroup-controllers-incomplete",
+  "self-id-unresolved",
+]);
+
+/**
+ * True when a doctor status reached after successful runtime detection
+ * still warrants a dashboard error (degraded-but-running deployment).
+ */
+export function isDashboardDeploymentError(
+  status: SelfDeploymentStatus,
+): boolean {
+  return DASHBOARD_ERROR_STATUSES.has(status);
+}
