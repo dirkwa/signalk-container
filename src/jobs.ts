@@ -55,6 +55,19 @@ export async function runJob(
     runtime: runtime.runtime,
   };
 
+  // Caller cancelled before we even started — don't pull or create anything.
+  if (config.signal?.aborted) {
+    result.status = "cancelled";
+    result.error = "Job cancelled";
+    result.completedAt = new Date().toISOString();
+    return result;
+  }
+
+  // Set by the abort listener so the post-wait branch reports "cancelled"
+  // rather than the synthetic exit-1 "failed" that force-removing produces.
+  let aborted = false;
+  let onAbort: (() => void) | undefined;
+
   try {
     const exists = await safeInspect(() => client.getImage(image).inspect());
     if (exists === null) {
@@ -86,6 +99,15 @@ export async function runJob(
         result.error = `Pull failed: ${pullResult.error.userMessage}`;
         return result;
       }
+    }
+
+    // A cancel that landed during a long image pull: stop before we create
+    // and start a container. After start, the abort listener below handles it.
+    if (config.signal?.aborted) {
+      result.status = "cancelled";
+      result.error = "Job cancelled";
+      result.completedAt = new Date().toISOString();
+      return result;
     }
 
     result.status = "running";
@@ -161,6 +183,17 @@ export async function runJob(
 
     const container = await client.createContainer(createOpts);
     await container.start();
+    // Cancellation: force-removing the running container makes the pending
+    // wait() below reject — the same path a daemon-side disappearance takes —
+    // so an aborted job unwinds through the existing wait-failure handling.
+    // The `aborted` flag distinguishes that from a genuine wait() failure.
+    if (config.signal) {
+      onAbort = () => {
+        aborted = true;
+        void safe(() => client.getContainer(jobName).remove({ force: true }));
+      };
+      config.signal.addEventListener("abort", onAbort, { once: true });
+    }
     // Attach the follow-logs stream AFTER start. A follow stream opened on a
     // not-yet-started container comes back empty/immediately-closed on podman
     // (verified live), losing all output; opening it post-start replays the
@@ -187,23 +220,39 @@ export async function runJob(
     // stream's `end` can lag the container's exit by a tick.
     await drained;
 
-    result.exitCode = exitCode;
     result.log = log;
     result.completedAt = new Date().toISOString();
-    result.status = exitCode === 0 ? "completed" : "failed";
-    if (!waitResult.ok) {
-      // wait() itself failed (socket dropped, daemon restarted, container
-      // already reaped) — the exit code is a synthetic 1, so carry the real
-      // reason instead of an invented "exited with code 1".
-      result.error = `Could not read container exit status: ${waitResult.error.raw}`;
-    } else if (exitCode !== 0) {
-      result.error = `Container exited with code ${exitCode}`;
+    if (aborted) {
+      // We force-removed the container on abort, so wait() rejected (or
+      // returned a non-zero code). That's cancellation, not a failure — the
+      // synthetic exit code is meaningless here, so don't surface it.
+      result.status = "cancelled";
+      result.error = "Job cancelled";
+    } else {
+      result.exitCode = exitCode;
+      result.status = exitCode === 0 ? "completed" : "failed";
+      if (!waitResult.ok) {
+        // wait() itself failed (socket dropped, daemon restarted, container
+        // already reaped) — the exit code is a synthetic 1, so carry the real
+        // reason instead of an invented "exited with code 1".
+        result.error = `Could not read container exit status: ${waitResult.error.raw}`;
+      } else if (exitCode !== 0) {
+        result.error = `Container exited with code ${exitCode}`;
+      }
     }
   } catch (err) {
-    result.status = "failed";
-    result.error = err instanceof Error ? err.message : String(err);
     result.completedAt = new Date().toISOString();
+    if (aborted) {
+      result.status = "cancelled";
+      result.error = "Job cancelled";
+    } else {
+      result.status = "failed";
+      result.error = err instanceof Error ? err.message : String(err);
+    }
   } finally {
+    if (config.signal && onAbort) {
+      config.signal.removeEventListener("abort", onAbort);
+    }
     // Remove the container ourselves (we don't use AutoRemove). Covers both
     // the happy path and a create-but-never-started failure; `force: true`
     // stops it first if still running, and a 404 (already gone) is benign.

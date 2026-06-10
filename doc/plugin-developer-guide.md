@@ -497,13 +497,37 @@ const result = await containers.runJob({
   // it after a Signal K crash. Use your plugin's `id` from package.json.
   // Available in signalk-container >= 1.3.0.
   ownerPluginId: "signalk-charts-provider-simple",
+  // Optional AbortSignal to cancel the job mid-run. Aborting force-removes
+  // the running container and resolves with status "cancelled". This is the
+  // only way to interrupt a single long step (e.g. a tile-join) — stopping
+  // your own dispatch loop only cancels between jobs, not during one.
+  // Available in signalk-container >= 1.16.0.
+  signal: abortController.signal,
 });
 
 if (result.status === "completed") {
   console.log("Exit code:", result.exitCode);
   console.log("Output:", result.log);
+} else if (result.status === "cancelled") {
+  console.log("Job was cancelled via its AbortSignal");
 }
 ```
+
+To cancel, hold the `AbortController` and call `abort()` — e.g. from a REST handler wired to a UI Cancel button:
+
+```typescript
+const abortController = new AbortController();
+const jobPromise = containers.runJob({
+  ...config,
+  signal: abortController.signal,
+});
+// later, on user request:
+abortController.abort(); // jobPromise resolves with status "cancelled"
+```
+
+A signal already aborted when `runJob` is called (or aborted during the
+image pull) returns `cancelled` without leaving a container running. A job
+that finishes on its own is unaffected — a later `abort()` is a no-op.
 
 ### `getLogs(name, options?): Promise<string[]>`
 
