@@ -191,7 +191,12 @@ export async function runJob(
     result.log = log;
     result.completedAt = new Date().toISOString();
     result.status = exitCode === 0 ? "completed" : "failed";
-    if (exitCode !== 0) {
+    if (!waitResult.ok) {
+      // wait() itself failed (socket dropped, daemon restarted, container
+      // already reaped) — the exit code is a synthetic 1, so carry the real
+      // reason instead of an invented "exited with code 1".
+      result.error = `Could not read container exit status: ${waitResult.error.raw}`;
+    } else if (exitCode !== 0) {
       result.error = `Container exited with code ${exitCode}`;
     }
   } catch (err) {
