@@ -103,11 +103,19 @@ The cleanest setup. Runs as your user, not root, so the security
 exposure is limited to your user account rather than the entire host —
 and matches signalk-container's default behaviour.
 
-On the host, ensure the user-scoped podman socket is enabled:
+On the host, ensure the user-scoped podman socket is enabled, and enable
+lingering so it survives logout and reboot:
 
 ```bash
 systemctl --user enable --now podman.socket
+loginctl enable-linger "$USER" # or: sudo loginctl enable-linger <signalk-user>
 ```
+
+Without lingering, the user's systemd instance — and therefore the podman
+socket — only runs while that user has an active login session. On a
+headless boat where nobody logs in after a reboot, the socket never comes
+up and signalk-container can't reach the runtime. `enable-linger` keeps the
+session alive so the socket is always present.
 
 Then in your compose / `podman run`:
 
