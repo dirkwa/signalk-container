@@ -31,6 +31,7 @@ describe("runJob cancellation via AbortSignal", () => {
 
     assert.equal(result.status, "cancelled");
     assert.match(result.error ?? "", /cancelled/i);
+    assert.ok(result.completedAt, "cancelled job should set completedAt");
     assert.equal(calls.get("createContainer"), undefined);
     assert.equal(calls.get("start"), undefined);
   });
@@ -79,6 +80,7 @@ describe("runJob cancellation via AbortSignal", () => {
 
     assert.equal(result.status, "cancelled");
     assert.match(result.error ?? "", /cancelled/i);
+    assert.ok(result.completedAt, "cancelled job should set completedAt");
     assert.doesNotMatch(result.error ?? "", /exited with code/i);
 
     // The container was force-removed, and against the sk-job-* name.
@@ -91,9 +93,11 @@ describe("runJob cancellation via AbortSignal", () => {
   });
 
   it("completes normally and leaves no abort listener when the signal never fires", async () => {
+    const calls = new Map<string, unknown[]>();
     const controller = new AbortController();
     const client = makeMockClient({
       images: { "alpine:3.19": {} },
+      calls,
       defaultContainer: {
         logs: () => Promise.resolve(streamFrom("done\n")),
         wait: { StatusCode: 0 },
@@ -109,8 +113,16 @@ describe("runJob cancellation via AbortSignal", () => {
     assert.equal(result.status, "completed");
     assert.equal(result.exitCode, 0);
 
-    // The listener must have been removed in finally — a late abort triggers
-    // no further work. (If it leaked, this would invoke the force-remove path.)
-    assert.doesNotThrow(() => controller.abort());
+    // The listener must have been removed in finally: a late abort triggers no
+    // further force-remove. (`finally` already removed the container once on the
+    // happy path, so compare against that baseline rather than zero.)
+    const removesBefore = calls.get("remove")?.length ?? 0;
+    controller.abort();
+    const removesAfter = calls.get("remove")?.length ?? 0;
+    assert.equal(
+      removesAfter,
+      removesBefore,
+      "abort after completion must not trigger another remove",
+    );
   });
 });
