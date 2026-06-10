@@ -91,6 +91,12 @@ The endpoint returns plain text by default; pass
 `SetupSnippetResult` (snippet + Dockerfile sidecar + operator notes)
 for programmatic consumers.
 
+> [!note]
+> The per-runtime examples below illustrate the shape of a working setup.
+> For an actual deployment, prefer the doctor-generated snippet above — it
+> reflects your detected runtime and the running plugin version, so it
+> stays correct as these details evolve.
+
 ### Rootless Podman (recommended)
 
 The cleanest setup. Runs as your user, not root, so the security
@@ -652,7 +658,9 @@ See [doc/plugin-developer-guide.md](doc/plugin-developer-guide.md) for the full 
 | `updates.register(reg)`                         | Register a container for update detection                                                                                                                                                                                                                                                                            |
 | `updates.unregister(pluginId)`                  | Stop tracking updates for a plugin                                                                                                                                                                                                                                                                                   |
 | `updates.checkOne(pluginId)`                    | Force a fresh update check (or coalesce with in-flight)                                                                                                                                                                                                                                                              |
+| `updates.checkAll()`                            | Force a fresh update check for every registered plugin; resolves to the array of results                                                                                                                                                                                                                             |
 | `updates.getLastResult(pluginId)`               | Cached last result, no network                                                                                                                                                                                                                                                                                       |
+| `updates.sources`                               | Built-in version-source factories — `sources.githubReleases(repo, options?)` and `sources.dockerHubTags(image, options?)` — convenience for building an `UpdateRegistration.source`                                                                                                                                  |
 | `manifest.get(pluginId)`                        | Read the persisted manifest for one consumer plugin, or `null` if none. Writes happen automatically after successful `ensureRunning` calls — this is read-only                                                                                                                                                       |
 | `manifest.list()`                               | Return every persisted manifest in the data directory. Order is unspecified                                                                                                                                                                                                                                          |
 | `manifest.getContainerHistory(containerName)`   | Bounded history (max 20 entries) of digest changes for a specific container. Throws "Ambiguous container history" if more than one manifest references the same `containerName` — disambiguate via `manifest.get(pluginId)`                                                                                          |
