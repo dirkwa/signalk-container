@@ -872,6 +872,8 @@ const REMEDIATION_NO_RUNTIME_BARE_METAL: string[] = [
   "  Podman (recommended):  sudo apt install podman     (Debian/Ubuntu)",
   "                          sudo dnf install podman     (Fedora/RHEL)",
   "    then enable the socket: systemctl --user enable --now podman.socket",
+  '    and enable lingering:   sudo loginctl enable-linger "$USER"',
+  "      (so the socket survives logout and reboot on headless hosts)",
   "  Docker:                 https://docs.docker.com/engine/install/",
   "After install, restart Signal K.",
 ];
