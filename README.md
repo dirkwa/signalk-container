@@ -108,14 +108,17 @@ lingering so it survives logout and reboot:
 
 ```bash
 systemctl --user enable --now podman.socket
-loginctl enable-linger "$USER" # or: sudo loginctl enable-linger <signalk-user>
+sudo loginctl enable-linger "$USER" # or: sudo loginctl enable-linger <signalk-user>
 ```
 
 Without lingering, the user's systemd instance — and therefore the podman
 socket — only runs while that user has an active login session. On a
 headless boat where nobody logs in after a reboot, the socket never comes
 up and signalk-container can't reach the runtime. `enable-linger` keeps the
-session alive so the socket is always present.
+session alive so the socket is always present. (Enabling linger for your
+own account does not strictly require `sudo`, but minimal server images
+often lack the polkit rule that permits it, so `sudo` is the reliable
+form.)
 
 Then in your compose / `podman run`:
 
