@@ -755,10 +755,13 @@ function remediationCgroupControllers(
       "After reboot, the memory controller will appear in /sys/fs/cgroup/cgroup.controllers and systemd's Delegate=memory will start working.",
       "If systemd's Delegate= isn't already configured for the user@.service, apply the snippet below first; otherwise the user slice still won't have memory in its subtree_control after reboot.",
       "  sudo mkdir -p /etc/systemd/system/user@.service.d",
+      // The heredoc body and its closing EOF must start at column 0 — an
+      // indented terminator is not recognised, so the shell would hang
+      // waiting for EOF (and swallow the following lines into the file).
       "  sudo tee /etc/systemd/system/user@.service.d/delegate.conf <<'EOF'",
-      "  [Service]",
-      "  Delegate=cpu cpuset io memory pids",
-      "  EOF",
+      "[Service]",
+      "Delegate=cpu cpuset io memory pids",
+      "EOF",
       "  sudo systemctl daemon-reload",
       "",
       "Verify inside the SK container after reboot:",
@@ -773,10 +776,13 @@ function remediationCgroupControllers(
     "",
     "Enable delegation on the host (one-time, requires root):",
     "  sudo mkdir -p /etc/systemd/system/user@.service.d",
+    // The heredoc body and its closing EOF must start at column 0 — an
+    // indented terminator is not recognised, so the shell would hang
+    // waiting for EOF (and swallow the following lines into the file).
     "  sudo tee /etc/systemd/system/user@.service.d/delegate.conf <<'EOF'",
-    "  [Service]",
-    "  Delegate=cpu cpuset io memory pids",
-    "  EOF",
+    "[Service]",
+    "Delegate=cpu cpuset io memory pids",
+    "EOF",
     "  sudo systemctl daemon-reload",
     "",
     "Log the SK-owning user out and back in (or reboot), then restart Signal K.",

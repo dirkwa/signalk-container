@@ -156,6 +156,26 @@ function probesWith(overrides: SelfDeploymentProbes): SelfDeploymentProbes {
 }
 
 /**
+ * Assert that every `<<'EOF'` heredoc in a remediation block is closed by
+ * a terminator on its own line at column 0. A copy-pasted heredoc whose
+ * `EOF` is indented is never recognised by the shell, so the command hangs
+ * waiting for input — the exact failure a user hit with the cgroup
+ * delegation snippet.
+ */
+function assertHeredocsTerminated(lines: string[]): void {
+  let open = 0;
+  for (const line of lines) {
+    if (/<<'EOF'\s*$/.test(line)) open++;
+    else if (line === "EOF") open--;
+  }
+  assert.equal(
+    open,
+    0,
+    `unbalanced heredoc — an EOF terminator is missing or indented:\n${lines.join("\n")}`,
+  );
+}
+
+/**
  * Most tests need to drive `findSelfContainerId` to a deterministic
  * answer. Since that helper reads `process.env.SIGNALK_CONTAINER_ID`
  * directly (without an injection seam), we mutate the real env around
@@ -558,6 +578,8 @@ describe("selfDeployment — cgroup controllers", () => {
         const joined = result.remediation.join("\n");
         assert.match(joined, /memory/);
         assert.match(joined, /Delegate=cpu cpuset io memory pids/);
+        // The delegate.conf heredoc must be copy-pasteable (column-0 EOF).
+        assertHeredocsTerminated(result.remediation);
       },
     );
   });
@@ -735,6 +757,8 @@ describe("selfDeployment — kernel cgroup_disable=memory detection", () => {
         assert.match(remediation, /cmdline\.txt/);
         assert.match(remediation, /cgroup_enable=memory/);
         assert.match(remediation, /sudo reboot/);
+        // This block also embeds the delegate.conf heredoc — keep it valid.
+        assertHeredocsTerminated(result.remediation);
       },
     );
   });

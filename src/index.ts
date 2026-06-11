@@ -1827,7 +1827,7 @@ export default (app: App) => {
           const doctor = await selfDeployment(preference);
           const headline = headlineForDoctorStatus(doctor.status);
           app.setPluginError(
-            `${headline}. See GET /plugins/signalk-container/api/doctor/deployment for details.`,
+            `${headline}. Open this plugin's config screen and click Doctor for details and remediation.`,
           );
           if (doctor.remediation.length > 0) {
             app.error(
@@ -1861,7 +1861,7 @@ export default (app: App) => {
         if (isDashboardDeploymentError(doctor.status)) {
           const headline = headlineForDoctorStatus(doctor.status);
           app.setPluginError(
-            `${headline}. See GET /plugins/signalk-container/api/doctor/deployment for details.`,
+            `${headline}. Open this plugin's config screen and click Doctor for details and remediation.`,
           );
           if (doctor.remediation.length > 0) {
             app.error(
