@@ -9,6 +9,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { copyTextToClipboard } from "./clipboard";
 
 interface LogsModalProps {
   /** Container name as it appears in the `/api/containers` listing
@@ -336,45 +337,7 @@ export default function LogsModal({ name, onClose }: LogsModalProps) {
   }, []);
 
   const doCopy = useCallback(async () => {
-    const text = lines.join("\n");
-    // Prefer the modern async Clipboard API.  It only works in a
-    // secure context (HTTPS / localhost) — Signal K servers are
-    // commonly served over plain HTTP on a LAN, where
-    // `navigator.clipboard` is undefined.  Fall back to the legacy
-    // `execCommand("copy")` trick (deprecated but still universally
-    // supported) so the button does something useful instead of
-    // silently failing.
-    const tryAsync = async (): Promise<boolean> => {
-      if (typeof navigator === "undefined" || !navigator.clipboard)
-        return false;
-      try {
-        await navigator.clipboard.writeText(text);
-        return true;
-      } catch {
-        return false;
-      }
-    };
-    const tryLegacy = (): boolean => {
-      if (typeof document === "undefined") return false;
-      const ta = document.createElement("textarea");
-      ta.value = text;
-      // Keep it off-screen + unfocused so the page doesn't visibly jump.
-      ta.style.position = "fixed";
-      ta.style.top = "-1000px";
-      ta.style.left = "-1000px";
-      ta.setAttribute("readonly", "");
-      document.body.appendChild(ta);
-      ta.select();
-      let ok = false;
-      try {
-        ok = document.execCommand("copy");
-      } catch {
-        ok = false;
-      }
-      document.body.removeChild(ta);
-      return ok;
-    };
-    const ok = (await tryAsync()) || tryLegacy();
+    const ok = await copyTextToClipboard(lines.join("\n"));
     if (ok) {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);

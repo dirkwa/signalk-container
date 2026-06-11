@@ -1,5 +1,7 @@
 import React, { CSSProperties, useCallback, useEffect, useState } from "react";
 import LogsModal from "./LogsModal";
+import DoctorModal from "./DoctorModal";
+import { headlineForStatus } from "../doctorReport";
 import type {
   ContainerInfo,
   ContainerResourceLimits,
@@ -130,6 +132,11 @@ const S: Record<string, CSSProperties> = {
   },
   btnSave: { background: "#3b82f6", color: "#fff" },
   btnSuccess: { background: "#10b981", color: "#fff" },
+  btnSecondary: {
+    background: "#fff",
+    color: "#374151",
+    border: "1px solid #d1d5db",
+  },
   btnDisabled: { opacity: 0.5, cursor: "not-allowed" },
   status: { marginTop: 8, fontSize: 12, minHeight: 18 },
   runtimeCard: {
@@ -1036,26 +1043,12 @@ function ResourceLimitsEditor({
 }
 
 /**
- * Map a deployment-doctor status to the short headline shown in the
- * runtime error card. Mirrors `headlineForDoctorStatus` in src/index.ts
- * — kept in sync by convention; if you change one, change the other.
+ * Headline shown in the runtime error card. Delegates to the shared
+ * `headlineForStatus` so the full status set stays in one place.
  */
 function noRuntimeHeadline(doctor: SelfDeploymentResult | null): string {
   if (!doctor) return "No container runtime found";
-  switch (doctor.status) {
-    case "no-runtime":
-      return "No container runtime found";
-    case "socket-unreachable":
-      return "Runtime socket unreachable";
-    case "permission-denied":
-      return "Runtime socket: permission denied";
-    case "self-id-unresolved":
-      return "Signal K container ID unresolved";
-    case "ok":
-      // unreachable in practice — we only render the error card when
-      // runtimeInfo is null — but stay defensive.
-      return "Container runtime ready";
-  }
+  return headlineForStatus(doctor.status);
 }
 
 export default function PluginConfigurationPanel({
@@ -1131,6 +1124,8 @@ export default function PluginConfigurationPanel({
   const [expandedLimits, setExpandedLimits] = useState<Set<string>>(new Set());
   // Name of the container whose Logs modal is currently open, or null.
   const [logsModalFor, setLogsModalFor] = useState<string | null>(null);
+  // Whether the deployment-doctor modal is open.
+  const [doctorOpen, setDoctorOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [actionStatus, setActionStatus] = useState("");
   const [statusError, setStatusError] = useState(false);
@@ -1623,16 +1618,17 @@ export default function PluginConfigurationPanel({
             <div style={S.runtimeName}>
               {noRuntimeHeadline(deploymentDoctor)}
             </div>
-            {deploymentDoctor && deploymentDoctor.remediation.length > 0 ? (
+            {deploymentDoctor && deploymentDoctor.remediation.length > 0 && (
               <div style={S.runtimeRemediation}>
                 {deploymentDoctor.remediation.join("\n")}
               </div>
-            ) : (
-              <div style={S.runtimeVersion}>
-                See GET /plugins/signalk-container/api/doctor/deployment for
-                details.
-              </div>
             )}
+            <button
+              style={{ ...S.btn, ...S.btnSecondary, marginTop: 8 }}
+              onClick={() => setDoctorOpen(true)}
+            >
+              Run Doctor
+            </button>
           </div>
         </div>
       )}
@@ -1881,9 +1877,17 @@ export default function PluginConfigurationPanel({
 
       <div style={S.sectionTitle}>Maintenance</div>
 
-      <button style={{ ...S.btn, ...S.btnSuccess }} onClick={doPrune}>
-        Prune Dangling Images
-      </button>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <button style={{ ...S.btn, ...S.btnSuccess }} onClick={doPrune}>
+          Prune Dangling Images
+        </button>
+        <button
+          style={{ ...S.btn, ...S.btnSecondary }}
+          onClick={() => setDoctorOpen(true)}
+        >
+          Doctor
+        </button>
+      </div>
 
       {actionStatus && (
         <div
@@ -1904,6 +1908,7 @@ export default function PluginConfigurationPanel({
       {logsModalFor && (
         <LogsModal name={logsModalFor} onClose={() => setLogsModalFor(null)} />
       )}
+      {doctorOpen && <DoctorModal onClose={() => setDoctorOpen(false)} />}
     </div>
   );
 }
