@@ -98,7 +98,7 @@ describe("formatDoctorReport", () => {
     const out = formatDoctorReport(
       baseResult({
         containerStorage: {
-          storagePath: "/home/dirk/.local/share/containers",
+          storagePath: "/var/lib/containers/storage",
           fstype: "zfs",
           idmapHazard: true,
           advice: ["Switch the rootless storage driver to fuse-overlayfs."],
