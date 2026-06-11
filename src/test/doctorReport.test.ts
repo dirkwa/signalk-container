@@ -238,4 +238,47 @@ describe("isSelfDeploymentResult", () => {
       false,
     );
   });
+
+  it("validates linger when present, tolerates it absent or null", () => {
+    // Absent entirely (payload from an older server) and null (probe
+    // skipped) both pass — the renderers guard on truthiness.
+    const withoutLinger: Record<string, unknown> = { ...baseResult() };
+    delete withoutLinger.linger;
+    assert.equal(isSelfDeploymentResult(withoutLinger), true);
+    assert.equal(
+      isSelfDeploymentResult({ ...baseResult(), linger: null }),
+      true,
+    );
+    assert.equal(
+      isSelfDeploymentResult({
+        ...baseResult(),
+        linger: { user: "dirk", enabled: true, advice: [] },
+      }),
+      true,
+    );
+    // A present object must carry the dereferenced shape: advice is
+    // `.join`-ed/`.length`-ed, enabled and user are rendered directly.
+    assert.equal(
+      isSelfDeploymentResult({ ...baseResult(), linger: {} }),
+      false,
+    );
+    assert.equal(
+      isSelfDeploymentResult({ ...baseResult(), linger: "enabled" }),
+      false,
+    );
+    assert.equal(
+      isSelfDeploymentResult({
+        ...baseResult(),
+        linger: { user: 42, enabled: true, advice: [] },
+      }),
+      false,
+    );
+    assert.equal(
+      isSelfDeploymentResult({
+        ...baseResult(),
+        linger: { user: null, enabled: true, advice: "do this" },
+      }),
+      false,
+    );
+  });
 });

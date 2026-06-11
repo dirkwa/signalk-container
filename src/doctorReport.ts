@@ -28,6 +28,16 @@ export function isSelfDeploymentResult(
   const cg = value.cgroupControllers;
   if (!Array.isArray(cg.missing)) return false;
   if (cg.available !== null && !Array.isArray(cg.available)) return false;
+  // `linger` may be absent entirely (payload from an older server) or
+  // null (probe skipped); both render fine. A present object must have
+  // the shape the renderers dereference without optional chaining.
+  if ("linger" in value && value.linger != null) {
+    if (!isObj(value.linger)) return false;
+    const lg = value.linger;
+    if (lg.user !== null && typeof lg.user !== "string") return false;
+    if (typeof lg.enabled !== "boolean") return false;
+    if (!Array.isArray(lg.advice)) return false;
+  }
   return true;
 }
 
