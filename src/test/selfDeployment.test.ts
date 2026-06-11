@@ -152,6 +152,11 @@ function probesWith(overrides: SelfDeploymentProbes): SelfDeploymentProbes {
     // Override per-test to point at a synthetic storage root.
     resolveContainerStoragePath:
       overrides.resolveContainerStoragePath ?? (() => null),
+    // Default to "linger dir unreadable" so the linger advisory never
+    // fires for tests that don't opt in. Override per-test to drive
+    // the enabled / not-enabled / absent-dir paths.
+    readLingerDir: overrides.readLingerDir ?? (async () => null),
+    resolveLingerUser: overrides.resolveLingerUser ?? (() => null),
   };
 }
 
@@ -739,6 +744,180 @@ describe("selfDeployment — cgroup controllers", () => {
         assert.deepEqual(result.cgroupControllers.missing, ["memory"]);
       },
     );
+  });
+});
+
+describe("selfDeployment — systemd linger advisory", () => {
+  // WHY: rootless podman AND rootless docker live in the user's systemd
+  // instance; without linger nothing starts the runtime socket (or
+  // containers with a restart policy) at boot on a headless host. The
+  // advisory must never escalate status and must never false-fire when
+  // the linger state isn't visible.
+
+  it("bare-metal rootless + user lingers → enabled, no advice, status ok", async () => {
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({
+        isContainerized: () => false,
+        resolveClient: resolveTo(rootlessPodman()),
+        readLingerDir: async () => ["dirk", "other"],
+        resolveLingerUser: () => "dirk",
+      }),
+    );
+    assert.equal(result.status, "ok");
+    assert.deepEqual(result.linger, {
+      user: "dirk",
+      enabled: true,
+      advice: [],
+    });
+  });
+
+  it("bare-metal rootless + user does not linger → advice, status still ok", async () => {
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({
+        isContainerized: () => false,
+        resolveClient: resolveTo(rootlessPodman()),
+        readLingerDir: async () => ["someoneelse"],
+        resolveLingerUser: () => "dirk",
+      }),
+    );
+    assert.equal(result.status, "ok");
+    assert.equal(result.linger?.enabled, false);
+    assert.match(result.linger!.advice.join("\n"), /loginctl enable-linger/);
+  });
+
+  it("bare-metal rootless + linger dir absent → not enabled (nobody lingers)", async () => {
+    // systemd creates the dir on the first enable-linger; on bare-metal
+    // its absence is itself the finding.
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({
+        isContainerized: () => false,
+        resolveClient: resolveTo(rootlessPodman()),
+        readLingerDir: async () => "absent",
+        resolveLingerUser: () => "dirk",
+      }),
+    );
+    assert.equal(result.linger?.enabled, false);
+    assert.match(result.linger!.advice.join("\n"), /loginctl enable-linger/);
+  });
+
+  it("containerized + linger dir absent → linger null (host dir not mounted)", async () => {
+    await withEnv(
+      { SIGNALK_CONTAINER_ID: "sk-test-host", HOSTNAME: "sk-test-host" },
+      async () => {
+        const result = await selfDeployment(
+          "auto",
+          null,
+          probesWith({
+            isContainerized: () => true,
+            resolveClient: resolveTo(podmanWithSelfId("sk-test-host")),
+            readLingerDir: async () => "absent",
+          }),
+        );
+        assert.equal(result.status, "ok");
+        assert.equal(result.linger, null);
+      },
+    );
+  });
+
+  it("containerized + mounted dir with entries → enabled, user null", async () => {
+    // In-container the host username is unknowable; any linger entry
+    // counts (exact on single-user hosts).
+    await withEnv(
+      { SIGNALK_CONTAINER_ID: "sk-test-host", HOSTNAME: "sk-test-host" },
+      async () => {
+        const result = await selfDeployment(
+          "auto",
+          null,
+          probesWith({
+            isContainerized: () => true,
+            resolveClient: resolveTo(podmanWithSelfId("sk-test-host")),
+            readLingerDir: async () => ["dirk"],
+          }),
+        );
+        assert.deepEqual(result.linger, {
+          user: null,
+          enabled: true,
+          advice: [],
+        });
+      },
+    );
+  });
+
+  it("containerized + mounted but empty dir → advice fires", async () => {
+    await withEnv(
+      { SIGNALK_CONTAINER_ID: "sk-test-host", HOSTNAME: "sk-test-host" },
+      async () => {
+        const result = await selfDeployment(
+          "auto",
+          null,
+          probesWith({
+            isContainerized: () => true,
+            resolveClient: resolveTo(podmanWithSelfId("sk-test-host")),
+            readLingerDir: async () => [],
+          }),
+        );
+        assert.equal(result.status, "ok");
+        assert.equal(result.linger?.enabled, false);
+        assert.match(
+          result.linger!.advice.join("\n"),
+          /loginctl enable-linger/,
+        );
+      },
+    );
+  });
+
+  it("bare-metal + username unresolvable → linger null (unknown, not a finding)", async () => {
+    // Another user's linger entry says nothing about the SK user's, so
+    // the any-entry fallback must not apply outside a container.
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({
+        isContainerized: () => false,
+        resolveClient: resolveTo(rootlessPodman()),
+        readLingerDir: async () => ["someoneelse"],
+        resolveLingerUser: () => null,
+      }),
+    );
+    assert.equal(result.linger, null);
+  });
+
+  it("rootful docker → linger null (system service needs no linger)", async () => {
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({
+        isContainerized: () => false,
+        resolveClient: resolveTo(dockerRootful()),
+        readLingerDir: async () => [],
+        resolveLingerUser: () => "dirk",
+      }),
+    );
+    assert.equal(result.linger, null);
+  });
+
+  it("rootless docker → probe runs (gate is rootless, not podman)", async () => {
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({
+        isContainerized: () => false,
+        resolveClient: resolveTo(dockerRootless()),
+        readLingerDir: async () => ["dirk"],
+        resolveLingerUser: () => "dirk",
+      }),
+    );
+    assert.deepEqual(result.linger, {
+      user: "dirk",
+      enabled: true,
+      advice: [],
+    });
   });
 });
 

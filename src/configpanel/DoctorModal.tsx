@@ -381,6 +381,14 @@ export default function DoctorModal({ onClose }: DoctorModalProps) {
                 />
               )}
 
+              {result.linger && (
+                <Row
+                  label="systemd linger"
+                  value={`${result.linger.enabled ? "enabled" : "NOT enabled"}${result.linger.user ? ` for ${result.linger.user}` : ""}`}
+                  missing={!result.linger.enabled}
+                />
+              )}
+
               <div style={S.sectionLabel}>Remediation</div>
               {result.remediation.length > 0 ? (
                 <pre style={S.pre}>{result.remediation.join("\n")}</pre>
@@ -397,6 +405,13 @@ export default function DoctorModal({ onClose }: DoctorModalProps) {
                     </pre>
                   </>
                 )}
+
+              {result.linger && result.linger.advice.length > 0 && (
+                <>
+                  <div style={S.sectionLabel}>Linger advice</div>
+                  <pre style={S.pre}>{result.linger.advice.join("\n")}</pre>
+                </>
+              )}
 
               <button
                 type="button"

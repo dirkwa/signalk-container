@@ -28,6 +28,7 @@ function fakeResult(
       kernelDisabledMemory: false,
     },
     containerStorage: null,
+    linger: null,
     status: "ok",
     remediation: [],
     ...overrides,

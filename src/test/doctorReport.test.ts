@@ -36,6 +36,7 @@ function baseResult(
       kernelDisabledMemory: false,
     },
     containerStorage: null,
+    linger: null,
     status: "ok",
     remediation: [],
     ...over,
@@ -108,6 +109,29 @@ describe("formatDoctorReport", () => {
     assert.match(out, /storage: zfs/);
     assert.match(out, /idmap hazard/);
     assert.match(out, /fuse-overlayfs/);
+  });
+
+  it("includes the linger line and advice when linger is not enabled", () => {
+    const out = formatDoctorReport(
+      baseResult({
+        linger: {
+          user: "dirk",
+          enabled: false,
+          advice: ['  sudo loginctl enable-linger "$USER"'],
+        },
+      }),
+    );
+    assert.match(out, /systemd linger: NOT enabled for dirk/);
+    assert.match(out, /Linger advice:/);
+    assert.match(out, /loginctl enable-linger/);
+  });
+
+  it("renders linger enabled without an advice block", () => {
+    const out = formatDoctorReport(
+      baseResult({ linger: { user: null, enabled: true, advice: [] } }),
+    );
+    assert.match(out, /systemd linger: enabled/);
+    assert.doesNotMatch(out, /Linger advice:/);
   });
 
   it("includes the daemon error line when the daemon is unreachable", () => {

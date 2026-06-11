@@ -102,6 +102,13 @@ export function formatDoctorReport(r: SelfDeploymentResult): string {
     lines.push(`storage: ${or(s.fstype)} at ${or(s.storagePath)}${hazard}`);
   }
 
+  if (r.linger) {
+    const who = r.linger.user ? ` for ${r.linger.user}` : "";
+    lines.push(
+      `systemd linger: ${r.linger.enabled ? "enabled" : "NOT enabled"}${who}`,
+    );
+  }
+
   const envEntries = Object.entries(r.env).filter(([, v]) => v != null);
   if (envEntries.length > 0) {
     lines.push("");
@@ -121,6 +128,12 @@ export function formatDoctorReport(r: SelfDeploymentResult): string {
     lines.push("");
     lines.push("Storage advice:");
     for (const line of r.containerStorage.advice) lines.push(line);
+  }
+
+  if (r.linger && r.linger.advice.length > 0) {
+    lines.push("");
+    lines.push("Linger advice:");
+    for (const line of r.linger.advice) lines.push(line);
   }
 
   return lines.join("\n");
