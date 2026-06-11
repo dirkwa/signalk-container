@@ -1148,6 +1148,34 @@ export interface SelfDeploymentResult {
     /** Operator-facing remediation; empty when `idmapHazard` is false. */
     advice: string[];
   } | null;
+  /**
+   * systemd linger state for the user owning the rootless runtime.
+   * Probed only when the daemon is reachable AND rootless — rootless
+   * Podman and rootless Docker both live inside the user's systemd
+   * instance, which without linger only runs while that user is logged
+   * in: on a headless host nothing starts the runtime socket (or
+   * containers with a restart policy) at boot. Rootful runtimes are
+   * system services and never need linger. Advisory only — does not
+   * escalate `status`.
+   *
+   * `null` when the probe could not run: rootful runtime, the linger
+   * directory was unreadable, or Signal K is containerized and the
+   * host's `/var/lib/systemd/linger` is not bind-mounted in (the
+   * default today — the probe sees nothing rather than guessing).
+   */
+  linger: {
+    /**
+     * Host username whose linger file was checked. `null` when SK is
+     * containerized (the in-container username says nothing about the
+     * host user) — `enabled` then falls back to "any linger entry
+     * exists", which is exact on single-user hosts.
+     */
+    user: string | null;
+    /** See `user` for the matching rule. */
+    enabled: boolean;
+    /** Operator-facing remediation; empty when `enabled` is true. */
+    advice: string[];
+  } | null;
   status: SelfDeploymentStatus;
   /** Empty when `status === "ok"`. */
   remediation: string[];

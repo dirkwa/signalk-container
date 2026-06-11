@@ -1,4 +1,5 @@
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
+import { userInfo } from "node:os";
 import { PassThrough } from "node:stream";
 import type {
   ContainerConfig,
@@ -201,6 +202,23 @@ export interface SelfDeploymentProbes {
    * `$HOME/.local/share/containers`) — tests can override.
    */
   resolveContainerStoragePath?: () => string | null;
+  /**
+   * List the usernames with systemd linger enabled (production: the
+   * entries of `/var/lib/systemd/linger`, one file per lingering user).
+   * Returns `"absent"` when the directory does not exist — systemd
+   * creates it on the first `enable-linger`, so on a bare-metal host
+   * absence means "nobody lingers", while inside a container it means
+   * the host directory simply isn't bind-mounted in. Returns `null` on
+   * any other read error (unreadable, non-Linux).
+   */
+  readLingerDir?: () => Promise<string[] | "absent" | null>;
+  /**
+   * Resolve the username whose linger file to look for. Defaults to
+   * `os.userInfo().username`; only consulted on bare-metal (inside a
+   * container the in-container username says nothing about the host
+   * user owning the runtime).
+   */
+  resolveLingerUser?: () => string | null;
 }
 
 /**
@@ -289,6 +307,66 @@ const REMEDIATION_IDMAP_HAZARD = [
   "  (the fuse-overlayfs binary ships in most distros' fuse-overlayfs package).",
   "Secondary fix: enable signalk-container's 'Disable user-namespace remap' setting to drop --userns=keep-id. Root-by-default images keep correct bind-mount ownership; non-root images give up host-caller ownership.",
 ];
+
+const LINGER_DIR = "/var/lib/systemd/linger";
+
+const REMEDIATION_NO_LINGER = [
+  "systemd linger is not enabled for the user owning the rootless container runtime.",
+  "Without linger that user's systemd instance only runs while the user is logged in: after a reboot of a headless host, the runtime socket and any containers with a restart policy stay down until someone logs in (or Signal K itself is started some other way).",
+  "Enable it once on the host, as the SK-owning user (requires root):",
+  '  sudo loginctl enable-linger "$USER"',
+  `Verify: ls ${LINGER_DIR}   # a file named after the user should exist`,
+];
+
+async function defaultReadLingerDir(): Promise<string[] | "absent" | null> {
+  try {
+    return await readdir(LINGER_DIR);
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "ENOENT" ? "absent" : null;
+  }
+}
+
+function defaultResolveLingerUser(): string | null {
+  try {
+    return userInfo().username;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Probe systemd linger for the rootless-runtime user. Callers gate on
+ * "daemon reachable AND rootless" — rootful runtimes are system
+ * services and never need linger. Returns `null` when the linger state
+ * isn't visible (unreadable dir, or containerized without the host's
+ * linger directory bind-mounted in) so the advisory can't false-fire.
+ */
+async function probeLinger(
+  containerized: boolean,
+  readLingerDir: () => Promise<string[] | "absent" | null>,
+  resolveLingerUser: () => string | null,
+): Promise<SelfDeploymentResult["linger"]> {
+  const entries = await readLingerDir();
+  if (entries === null) return null;
+  if (entries === "absent" && containerized) return null;
+  const user = containerized ? null : resolveLingerUser();
+  // Bare-metal with an unresolvable username: another user's linger
+  // entry says nothing about ours, so the state is unknown, not a
+  // finding. The any-entry fallback is reserved for the containerized
+  // case where no username can exist.
+  if (!containerized && user === null) return null;
+  const enabled =
+    entries === "absent"
+      ? false
+      : user !== null
+        ? entries.includes(user)
+        : entries.length > 0;
+  return {
+    user,
+    enabled,
+    advice: enabled ? [] : [...REMEDIATION_NO_LINGER],
+  };
+}
 
 /**
  * Choose the most-specific mount entry that covers `path`. `/proc/mounts`
@@ -415,6 +493,9 @@ export async function selfDeployment(
   const probeReadMounts = probes.readMounts ?? defaultReadMounts;
   const probeResolveStoragePath =
     probes.resolveContainerStoragePath ?? defaultResolveContainerStoragePath;
+  const probeReadLingerDir = probes.readLingerDir ?? defaultReadLingerDir;
+  const probeResolveLingerUser =
+    probes.resolveLingerUser ?? defaultResolveLingerUser;
 
   const containerized = probeIsContainerized();
   const env = {
@@ -448,6 +529,7 @@ export async function selfDeployment(
       selfId: { value: null, source: null },
       cgroupControllers,
       containerStorage: null,
+      linger: null,
       status: "no-runtime",
       remediation: containerized
         ? REMEDIATION_NO_RUNTIME_CONTAINERIZED
@@ -481,6 +563,19 @@ export async function selfDeployment(
       ? await probeContainerStorage(probeReadMounts, probeResolveStoragePath)
       : null;
 
+  // Linger advisory. Runtime-agnostic but rootless-only: rootless podman
+  // AND rootless docker both live in the user's systemd instance, which
+  // needs linger to survive headless reboots; rootful daemons are system
+  // services. Warning a rootful-Docker operator would be a false positive.
+  const linger =
+    info.reachable && info.rootless === true
+      ? await probeLinger(
+          containerized,
+          probeReadLingerDir,
+          probeResolveLingerUser,
+        )
+      : null;
+
   // `binary.path` is null — there is no binary concept over the socket.
   // The field shape is retained (name/version still populated from
   // `version()`) so existing consumers reading the daemon report don't
@@ -491,6 +586,7 @@ export async function selfDeployment(
     env,
     cgroupControllers,
     containerStorage,
+    linger,
   };
 
   if (!info.reachable) {
