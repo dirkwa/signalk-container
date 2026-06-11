@@ -30,8 +30,8 @@ export interface CategorizedError {
 // registry network error. Checked before NET_PATTERNS so a socket failure
 // isn't mislabelled "check registry connectivity". Covers both the socket
 // being absent/refusing (ENOENT/ECONNREFUSED — not bind-mounted) and the
-// daemon resetting the connection mid-request (EPIPE/ECONNRESET — e.g. old
-// podman rejecting a large create payload, see chart-provider issue #132).
+// daemon resetting the connection mid-request (EPIPE/ECONNRESET — e.g. an old
+// podman rejecting a large create payload).
 const SOCKET_PATTERNS = [
   /ECONNREFUSED/,
   /ENOENT/,

@@ -247,8 +247,8 @@ const IDMAP_HAZARD_FSTYPES = new Set(["zfs"]);
 
 // Podman below this is old enough that its docker-compat socket has known
 // instabilities — notably resetting the connection (write EPIPE) on a large
-// `createContainer` body, which broke big chart-conversion helper jobs
-// (chart-provider issue #132). Advisory only; we never escalate status for it.
+// `createContainer` body, which breaks big helper jobs (e.g. chart
+// conversions). Advisory only; we never escalate status for it.
 const PODMAN_MIN_RECOMMENDED = { major: 4, minor: 5 };
 
 const REMEDIATION_OLD_PODMAN = [
