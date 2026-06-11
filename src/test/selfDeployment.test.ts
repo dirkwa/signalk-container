@@ -223,6 +223,38 @@ describe("selfDeployment — happy paths", () => {
     assert.equal(result.selfId.source, null);
   });
 
+  it("old podman (< 4.5) → still ok, but advises an upgrade", async () => {
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({
+        isContainerized: () => false,
+        resolveClient: resolveTo(rootlessPodman("4.3.1")),
+      }),
+    );
+    // Advisory only — an old-but-working podman is not a failure.
+    assert.equal(result.status, "ok");
+    assert.equal(result.binary.version, "4.3.1");
+    const joined = result.remediation.join("\n");
+    assert.match(joined, /older than 4\.5/);
+    // The advisory names the concrete symptom (write EPIPE on large jobs) so
+    // an operator hitting it later connects the dots.
+    assert.match(joined, /EPIPE/);
+  });
+
+  it("current podman (>= 4.5) → ok with no upgrade advisory", async () => {
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({
+        isContainerized: () => false,
+        resolveClient: resolveTo(rootlessPodman("4.5.0")),
+      }),
+    );
+    assert.equal(result.status, "ok");
+    assert.equal(result.remediation.length, 0);
+  });
+
   it("bare-metal, podman reachable, rootful → ok + rootless false", async () => {
     const result = await selfDeployment(
       "auto",

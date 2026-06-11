@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { describeError } from "../errors.js";
+import { categorizeError, describeError } from "../errors.js";
 import { runJob } from "../jobs.js";
 import { makeMockClient } from "./helpers/mockClient.js";
 import type { ContainerRuntimeInfo } from "../types.js";
@@ -66,5 +66,30 @@ describe("runJob error surfacing", () => {
     assert.equal(result.status, "failed");
     assert.match(result.error ?? "", /HTTP code 500.*no such file/);
     assert.doesNotMatch(result.error ?? "", /See logs for details/);
+  });
+});
+
+describe("categorizeError — socket reset (EPIPE/ECONNRESET)", () => {
+  it("classifies a write EPIPE as socket-unreachable, not unknown", () => {
+    const c = categorizeError(new Error("write EPIPE"));
+    assert.equal(c.kind, "socket-unreachable");
+    assert.match(c.userMessage, /reset/i);
+    assert.equal(c.raw, "write EPIPE");
+  });
+
+  it("classifies an ECONNRESET as socket-unreachable", () => {
+    const c = categorizeError(new Error("read ECONNRESET"));
+    assert.equal(c.kind, "socket-unreachable");
+    assert.match(c.userMessage, /reset/i);
+    assert.equal(c.raw, "read ECONNRESET");
+  });
+
+  it("matches the bare token, not just the read/write-prefixed form", () => {
+    // The patterns are anchorless substrings, so "EPIPE" with no operation
+    // prefix classifies the same as "write EPIPE".
+    assert.equal(
+      categorizeError(new Error("EPIPE")).kind,
+      "socket-unreachable",
+    );
   });
 });
