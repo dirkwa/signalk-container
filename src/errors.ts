@@ -26,16 +26,20 @@ export interface CategorizedError {
   raw: string;
 }
 
-// ENOENT/ECONNREFUSED against the container socket mean the daemon socket is
-// absent or refusing — distinct from a registry network error. Checked before
-// NET_PATTERNS so a socket failure isn't mislabelled "check registry
-// connectivity".
+// Socket-transport failures against the container daemon — distinct from a
+// registry network error. Checked before NET_PATTERNS so a socket failure
+// isn't mislabelled "check registry connectivity". Covers both the socket
+// being absent/refusing (ENOENT/ECONNREFUSED — not bind-mounted) and the
+// daemon resetting the connection mid-request (EPIPE/ECONNRESET — e.g. old
+// podman rejecting a large create payload, see chart-provider issue #132).
 const SOCKET_PATTERNS = [
   /ECONNREFUSED/,
   /ENOENT/,
   /EACCES.*\.sock/i,
   /connect ENOENT/i,
   /socket hang up/i,
+  /EPIPE/,
+  /ECONNRESET/,
 ];
 
 const NET_PATTERNS = [
@@ -86,7 +90,7 @@ export function categorizeError(err: unknown): CategorizedError {
     return {
       kind: "socket-unreachable",
       userMessage:
-        "Container runtime socket unreachable. Is the docker/podman socket bind-mounted?",
+        "Container runtime socket unreachable or reset. Check the docker/podman socket is bind-mounted; if it reset mid-request, the runtime may be too old.",
       raw,
     };
   }

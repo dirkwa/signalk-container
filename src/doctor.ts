@@ -245,6 +245,38 @@ const EXPECTED_CGROUP_CONTROLLERS = ["cpu", "cpuset", "memory", "pids"];
  */
 const IDMAP_HAZARD_FSTYPES = new Set(["zfs"]);
 
+// Podman below this is old enough that its docker-compat socket has known
+// instabilities — notably resetting the connection (write EPIPE) on a large
+// `createContainer` body, which broke big chart-conversion helper jobs
+// (chart-provider issue #132). Advisory only; we never escalate status for it.
+const PODMAN_MIN_RECOMMENDED = { major: 4, minor: 5 };
+
+const REMEDIATION_OLD_PODMAN = [
+  "Podman is older than 4.5; its docker-compat API can reset the socket on large helper-job requests (e.g. converting big chart bundles fails with 'write EPIPE').",
+  "Upgrade Podman to >= 4.5 (ideally 5.x). On Debian/Ubuntu this usually means a backports or OBS/Kubic repo; on Fedora/RHEL a dnf update.",
+];
+
+// Parse the leading `major.minor` from a version string like "4.3.1" or
+// "5.4.2-dev". Returns null when it doesn't start with two dot-separated ints.
+function parseMajorMinor(
+  version: string | null,
+): { major: number; minor: number } | null {
+  if (!version) return null;
+  const m = /^(\d+)\.(\d+)/.exec(version.trim());
+  if (!m) return null;
+  return { major: Number(m[1]), minor: Number(m[2]) };
+}
+
+// True when `v` is strictly below the `floor` major.minor.
+function isBelow(
+  v: { major: number; minor: number },
+  floor: { major: number; minor: number },
+): boolean {
+  return (
+    v.major < floor.major || (v.major === floor.major && v.minor < floor.minor)
+  );
+}
+
 const REMEDIATION_IDMAP_HAZARD = [
   "Rootless Podman storage appears to live on a filesystem that interacts poorly with --userns=keep-id (Podman has to chown every image file via storage-chown-by-maps).",
   "Primary fix: switch the rootless storage driver to fuse-overlayfs (virtual ownership via xattrs, no chown sweep).",
@@ -527,6 +559,17 @@ export async function selfDeployment(
     };
   }
 
+  // Advisory only — an old-but-working Podman still reports `ok`, but we
+  // surface the upgrade hint so a future large helper job's EPIPE isn't a
+  // mystery. Never escalate status (mirrors the storage-driver advice).
+  const podmanVersion = parseMajorMinor(binaryVersion);
+  const oldPodmanAdvice =
+    binaryName === "podman" &&
+    podmanVersion !== null &&
+    isBelow(podmanVersion, PODMAN_MIN_RECOMMENDED)
+      ? [...REMEDIATION_OLD_PODMAN]
+      : [];
+
   return {
     ...baseResult,
     daemon: {
@@ -537,7 +580,7 @@ export async function selfDeployment(
     },
     selfId,
     status: "ok",
-    remediation: [],
+    remediation: oldPodmanAdvice,
   };
 }
 
