@@ -178,4 +178,40 @@ describe("isSelfDeploymentResult", () => {
       false,
     );
   });
+
+  it("rejects malformed nested shapes the formatter dereferences", () => {
+    // daemon without the boolean `reachable` the formatter reads.
+    assert.equal(
+      isSelfDeploymentResult({ ...baseResult(), daemon: {} }),
+      false,
+    );
+    // env must be an object — formatDoctorReport calls Object.entries on it.
+    assert.equal(isSelfDeploymentResult({ ...baseResult(), env: null }), false);
+    // cgroupControllers.missing must be an array (it is `.join`-ed/`.length`-ed).
+    assert.equal(
+      isSelfDeploymentResult({
+        ...baseResult(),
+        cgroupControllers: { available: null, missing: "memory" },
+      }),
+      false,
+    );
+    // available, when present, must be an array.
+    assert.equal(
+      isSelfDeploymentResult({
+        ...baseResult(),
+        cgroupControllers: {
+          available: "cpu memory",
+          missing: [],
+          kernelDisabledMemory: false,
+        },
+      }),
+      false,
+    );
+    // binary / selfId must be objects.
+    assert.equal(isSelfDeploymentResult({ ...baseResult(), binary: 5 }), false);
+    assert.equal(
+      isSelfDeploymentResult({ ...baseResult(), selfId: null }),
+      false,
+    );
+  });
 });

@@ -1124,7 +1124,6 @@ export default function PluginConfigurationPanel({
   const [expandedLimits, setExpandedLimits] = useState<Set<string>>(new Set());
   // Name of the container whose Logs modal is currently open, or null.
   const [logsModalFor, setLogsModalFor] = useState<string | null>(null);
-  // Whether the deployment-doctor modal is open.
   const [doctorOpen, setDoctorOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [actionStatus, setActionStatus] = useState("");

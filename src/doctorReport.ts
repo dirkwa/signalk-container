@@ -1,28 +1,34 @@
 import type { SelfDeploymentResult, SelfDeploymentStatus } from "./types.js";
 
+function isObj(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
 /**
  * Boundary validator for the `/doctor/deployment` REST response. The
  * config-panel fetch trusts the server, but a stale plugin version or a
- * proxy returning an error page could deliver a different shape — checking
- * the fields the popup actually reads lets the modal show an error instead
- * of crashing on a missing nested property.
+ * proxy returning an error page could deliver a different shape. Validate
+ * the nested fields `formatDoctorReport`/`DoctorModal` dereference without
+ * optional chaining (notably `env`'s entries and `cgroupControllers.missing`)
+ * so a malformed payload shows an error instead of crashing the render.
  */
 export function isSelfDeploymentResult(
   value: unknown,
 ): value is SelfDeploymentResult {
-  if (typeof value !== "object" || value === null) return false;
-  const v = value as Record<string, unknown>;
-  return (
-    typeof v.status === "string" &&
-    typeof v.isContainerized === "boolean" &&
-    typeof v.binary === "object" &&
-    v.binary !== null &&
-    typeof v.daemon === "object" &&
-    v.daemon !== null &&
-    typeof v.cgroupControllers === "object" &&
-    v.cgroupControllers !== null &&
-    Array.isArray(v.remediation)
-  );
+  if (!isObj(value)) return false;
+  if (typeof value.status !== "string") return false;
+  if (typeof value.isContainerized !== "boolean") return false;
+  if (!Array.isArray(value.remediation)) return false;
+  if (!isObj(value.binary)) return false;
+  if (!isObj(value.daemon) || typeof value.daemon.reachable !== "boolean")
+    return false;
+  if (!isObj(value.selfId)) return false;
+  if (!isObj(value.env)) return false;
+  if (!isObj(value.cgroupControllers)) return false;
+  const cg = value.cgroupControllers;
+  if (!Array.isArray(cg.missing)) return false;
+  if (cg.available !== null && !Array.isArray(cg.available)) return false;
+  return true;
 }
 
 /**

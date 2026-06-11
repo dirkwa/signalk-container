@@ -77,6 +77,32 @@ describe("copyTextToClipboard", () => {
     assert.equal(removed, 1); // textarea cleaned up even on success
   });
 
+  it("falls back to the legacy path when the async API rejects", async () => {
+    setGlobal("navigator", {
+      clipboard: {
+        writeText: () => Promise.reject(new Error("permission denied")),
+      },
+    });
+    let execArg: string | null = null;
+    setGlobal("document", {
+      createElement: () => ({
+        value: "",
+        style: {} as Record<string, string>,
+        setAttribute: () => {},
+        select: () => {},
+      }),
+      body: { appendChild: () => {}, removeChild: () => {} },
+      execCommand: (cmd: string) => {
+        execArg = cmd;
+        return true;
+      },
+    });
+
+    const ok = await copyTextToClipboard("x");
+    assert.equal(ok, true);
+    assert.equal(execArg, "copy"); // legacy path ran after async rejected
+  });
+
   it("returns false when neither mechanism is available (SSR-safe)", async () => {
     setGlobal("navigator", undefined);
     setGlobal("document", undefined);
