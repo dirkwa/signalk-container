@@ -523,6 +523,7 @@ export async function selfDeployment(
       remediation: remediationCgroupControllers(
         cgroupControllers.missing,
         cgroupControllers.kernelDisabledMemory,
+        selfId.value,
       ),
     };
   }
@@ -738,7 +739,17 @@ async function probeCgroupControllers(
 function remediationCgroupControllers(
   missing: string[],
   kernelDisabledMemory: boolean,
+  selfContainerId: string | null,
 ): string[] {
+  // Operators paste these commands verbatim, so substitute the real
+  // container reference for the placeholder. A full 64-hex id is
+  // shortened to the conventional 12 chars; a name passes through.
+  const self =
+    selfContainerId === null
+      ? "<sk-container>"
+      : /^[0-9a-f]{64}$/.test(selfContainerId)
+        ? selfContainerId.slice(0, 12)
+        : selfContainerId;
   if (kernelDisabledMemory) {
     return [
       `Signal K is containerized and the kernel was booted with cgroup_disable=memory (common on Raspberry Pi OS Trixie — the GPU firmware injects this token).`,
@@ -765,8 +776,8 @@ function remediationCgroupControllers(
       "  sudo systemctl daemon-reload",
       "",
       "Verify inside the SK container after reboot:",
-      "  podman exec <sk-container> cat /sys/fs/cgroup/cgroup.controllers",
-      "  # or: docker exec <sk-container> cat /sys/fs/cgroup/cgroup.controllers",
+      `  podman exec ${self} cat /sys/fs/cgroup/cgroup.controllers`,
+      `  # or: docker exec ${self} cat /sys/fs/cgroup/cgroup.controllers`,
       "  # memory should appear in the output",
     ];
   }
@@ -785,11 +796,14 @@ function remediationCgroupControllers(
     "EOF",
     "  sudo systemctl daemon-reload",
     "",
-    "Log the SK-owning user out and back in (or reboot), then restart Signal K.",
+    "Log the SK-owning user out and back in (or reboot).",
+    "Then restart the Signal K CONTAINER itself. Controllers are enabled on the container's cgroup when the container starts, so the admin UI's Restart button (which only restarts the server process inside the container) is not enough:",
+    "  systemctl --user restart signalk-server.service   # universal-installer (Quadlet) deployments",
+    `  # or: podman restart ${self} / docker restart ${self}`,
     "Signal K's next start re-applies the requested resource limits to managed containers automatically — no manual container recreation needed.",
     "Verify inside the SK container (the host view can differ from what the process sees):",
-    "  podman exec <sk-container> cat /sys/fs/cgroup/cgroup.controllers",
-    "  # or: docker exec <sk-container> cat /sys/fs/cgroup/cgroup.controllers",
+    `  podman exec ${self} cat /sys/fs/cgroup/cgroup.controllers`,
+    `  # or: docker exec ${self} cat /sys/fs/cgroup/cgroup.controllers`,
   ];
 }
 

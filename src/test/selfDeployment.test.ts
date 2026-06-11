@@ -578,8 +578,42 @@ describe("selfDeployment — cgroup controllers", () => {
         const joined = result.remediation.join("\n");
         assert.match(joined, /memory/);
         assert.match(joined, /Delegate=cpu cpuset io memory pids/);
+        // Commands are pasted verbatim: the real self container ref must
+        // be substituted, and the container restart (not the admin UI's
+        // in-container process restart) must be spelled out.
+        assert.doesNotMatch(joined, /<sk-container>/);
+        assert.match(joined, /podman exec sk-test-host/);
+        assert.match(
+          joined,
+          /systemctl --user restart signalk-server\.service/,
+        );
+        assert.match(joined, /podman restart sk-test-host/);
         // The delegate.conf heredoc must be copy-pasteable (column-0 EOF).
         assertHeredocsTerminated(result.remediation);
+      },
+    );
+  });
+
+  it("containerized + 64-hex self id → remediation uses 12-char short id", async () => {
+    const fullHexId =
+      "f1a2b3c4d5e6f1a2b3c4d5e6f1a2b3c4d5e6f1a2b3c4d5e6f1a2b3c4d5e6f1a2";
+    await withEnv(
+      { SIGNALK_CONTAINER_ID: fullHexId, HOSTNAME: fullHexId },
+      async () => {
+        const result = await selfDeployment(
+          "auto",
+          null,
+          probesWith({
+            isContainerized: () => true,
+            resolveClient: resolveTo(podmanWithSelfId(fullHexId)),
+            readCgroupControllers: async () => ["cpu", "cpuset", "io", "pids"],
+          }),
+        );
+        assert.equal(result.status, "cgroup-controllers-incomplete");
+        const joined = result.remediation.join("\n");
+        assert.match(joined, /podman exec f1a2b3c4d5e6 /);
+        assert.match(joined, /podman restart f1a2b3c4d5e6 /);
+        assert.doesNotMatch(joined, new RegExp(fullHexId));
       },
     );
   });
