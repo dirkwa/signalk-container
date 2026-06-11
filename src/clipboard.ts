@@ -29,7 +29,7 @@ export async function copyTextToClipboard(text: string): Promise<boolean> {
     ta.setAttribute("readonly", "");
     document.body.appendChild(ta);
     ta.select();
-    let ok = false;
+    let ok: boolean;
     try {
       ok = document.execCommand("copy");
     } catch {

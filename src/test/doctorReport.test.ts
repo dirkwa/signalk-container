@@ -1,6 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { formatDoctorReport, headlineForStatus } from "../doctorReport.js";
+import {
+  formatDoctorReport,
+  headlineForStatus,
+  isSelfDeploymentResult,
+} from "../doctorReport.js";
 import type { SelfDeploymentResult, SelfDeploymentStatus } from "../types.js";
 
 const ALL_STATUSES: SelfDeploymentStatus[] = [
@@ -104,5 +108,74 @@ describe("formatDoctorReport", () => {
     assert.match(out, /storage: zfs/);
     assert.match(out, /idmap hazard/);
     assert.match(out, /fuse-overlayfs/);
+  });
+
+  it("includes the daemon error line when the daemon is unreachable", () => {
+    const out = formatDoctorReport(
+      baseResult({
+        daemon: {
+          reachable: false,
+          rootless: null,
+          socketPath: null,
+          error: "connection refused",
+        },
+        status: "socket-unreachable",
+      }),
+    );
+    assert.match(out, /daemon error: connection refused/);
+  });
+
+  it("notes a kernel-disabled memory controller", () => {
+    const out = formatDoctorReport(
+      baseResult({
+        isContainerized: true,
+        cgroupControllers: {
+          available: ["cpu", "cpuset", "io", "pids"],
+          missing: ["memory"],
+          kernelDisabledMemory: true,
+        },
+        status: "cgroup-controllers-incomplete",
+      }),
+    );
+    assert.match(out, /kernel cmdline disables the memory controller/);
+  });
+
+  it("lists only the set env vars", () => {
+    const out = formatDoctorReport(
+      baseResult({
+        env: {
+          DOCKER_HOST: "unix:///custom/socket",
+          CONTAINER_HOST: null,
+          XDG_RUNTIME_DIR: "/run/user/1000",
+        },
+      }),
+    );
+    assert.match(out, /DOCKER_HOST=unix:\/\/\/custom\/socket/);
+    assert.match(out, /XDG_RUNTIME_DIR=\/run\/user\/1000/);
+    assert.doesNotMatch(out, /CONTAINER_HOST/);
+  });
+});
+
+describe("isSelfDeploymentResult", () => {
+  it("accepts a well-formed result", () => {
+    assert.equal(isSelfDeploymentResult(baseResult()), true);
+  });
+
+  it("rejects non-objects and null", () => {
+    assert.equal(isSelfDeploymentResult(null), false);
+    assert.equal(isSelfDeploymentResult("nope"), false);
+    assert.equal(isSelfDeploymentResult(42), false);
+  });
+
+  it("rejects an object missing required fields", () => {
+    assert.equal(isSelfDeploymentResult({ status: "ok" }), false);
+    assert.equal(
+      isSelfDeploymentResult({ ...baseResult(), remediation: "oops" }),
+      false,
+    );
+    assert.equal(
+      isSelfDeploymentResult({ ...baseResult(), isContainerized: "yes" }),
+      false,
+    );
   });
 });

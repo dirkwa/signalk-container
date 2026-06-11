@@ -8,8 +8,12 @@ import React, {
   useState,
 } from "react";
 import type { SelfDeploymentResult } from "../types";
-import { copyTextToClipboard } from "./clipboard";
-import { formatDoctorReport, headlineForStatus } from "../doctorReport";
+import { copyTextToClipboard } from "../clipboard";
+import {
+  formatDoctorReport,
+  headlineForStatus,
+  isSelfDeploymentResult,
+} from "../doctorReport";
 
 interface DoctorModalProps {
   onClose: () => void;
@@ -168,8 +172,13 @@ export default function DoctorModal({ onClose }: DoctorModalProps) {
           setLoading(false);
           return;
         }
-        const data = (await res.json()) as SelfDeploymentResult;
+        const data: unknown = await res.json();
         if (cancelled) return;
+        if (!isSelfDeploymentResult(data)) {
+          setError("Unexpected response shape from the deployment doctor.");
+          setLoading(false);
+          return;
+        }
         setResult(data);
         setLoading(false);
       } catch (e) {
@@ -248,12 +257,16 @@ export default function DoctorModal({ onClose }: DoctorModalProps) {
 
   const doCopy = useCallback(async () => {
     if (!result) return;
-    const ok = await copyTextToClipboard(formatDoctorReport(result));
-    if (ok) {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    }
+    if (await copyTextToClipboard(formatDoctorReport(result))) setCopied(true);
   }, [result]);
+
+  // Reset the "Copied!" label, clearing the timer on unmount so we never
+  // set state on an unmounted component.
+  useEffect(() => {
+    if (!copied) return;
+    const t = setTimeout(() => setCopied(false), 1500);
+    return () => clearTimeout(t);
+  }, [copied]);
 
   const cg = result?.cgroupControllers;
 

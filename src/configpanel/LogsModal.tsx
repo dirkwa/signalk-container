@@ -9,7 +9,7 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { copyTextToClipboard } from "./clipboard";
+import { copyTextToClipboard } from "../clipboard";
 
 interface LogsModalProps {
   /** Container name as it appears in the `/api/containers` listing

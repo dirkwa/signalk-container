@@ -1,6 +1,31 @@
 import type { SelfDeploymentResult, SelfDeploymentStatus } from "./types.js";
 
 /**
+ * Boundary validator for the `/doctor/deployment` REST response. The
+ * config-panel fetch trusts the server, but a stale plugin version or a
+ * proxy returning an error page could deliver a different shape — checking
+ * the fields the popup actually reads lets the modal show an error instead
+ * of crashing on a missing nested property.
+ */
+export function isSelfDeploymentResult(
+  value: unknown,
+): value is SelfDeploymentResult {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.status === "string" &&
+    typeof v.isContainerized === "boolean" &&
+    typeof v.binary === "object" &&
+    v.binary !== null &&
+    typeof v.daemon === "object" &&
+    v.daemon !== null &&
+    typeof v.cgroupControllers === "object" &&
+    v.cgroupControllers !== null &&
+    Array.isArray(v.remediation)
+  );
+}
+
+/**
  * Short, single-line headline for a deployment-doctor status. Mirrors
  * `headlineForDoctorStatus` in src/index.ts (server-side) — both must list
  * all six statuses. Shared by the Doctor popup and the copy-able report.
