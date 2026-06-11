@@ -17,6 +17,7 @@ import {
   safeInspect,
   type ContainerClient,
 } from "./client.js";
+import { describeError } from "./errors.js";
 
 // `userMappingFlags` and the host-id test setter (`_setCurrentHostIdsForTesting`)
 // live in `runtime.ts` so both `jobs.ts` (one-shot helpers) and
@@ -247,7 +248,10 @@ export async function runJob(
       result.error = "Job cancelled";
     } else {
       result.status = "failed";
-      result.error = err instanceof Error ? err.message : String(err);
+      // `safe()`/`safeInspect()` flatten the error to a generic userMessage and
+      // tuck the real runtime text into `cause.raw`; surface that so the
+      // consumer sees the actual reason, not "See logs for details."
+      result.error = describeError(err);
     }
   } finally {
     if (config.signal && onAbort) {

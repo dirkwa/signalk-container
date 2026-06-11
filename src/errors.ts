@@ -128,3 +128,30 @@ export function categorizeError(err: unknown): CategorizedError {
     raw,
   };
 }
+
+// Narrow to just the field describeError reads. safe()/safeInspect() attach a
+// full CategorizedError as the cause, but guarding only `raw` keeps the check
+// honest about what it actually asserts (and consumes).
+function hasRawErrorText(value: unknown): value is { raw: string } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "raw" in value &&
+    typeof (value as { raw: unknown }).raw === "string"
+  );
+}
+
+/**
+ * The most informative message for a caught error, for surfacing to a
+ * consumer/log. `safe()`/`safeInspect()` rethrow as `Error(userMessage, {
+ * cause: CategorizedError })` — so the message alone is the generic
+ * `userMessage` (e.g. "Unexpected error. See logs for details.") and the real
+ * runtime text lives in `cause.raw`. Prefer that raw text when present; fall
+ * back to the error's own message for errors thrown directly (not via `safe`).
+ */
+export function describeError(err: unknown): string {
+  if (err instanceof Error && hasRawErrorText(err.cause)) {
+    return err.cause.raw;
+  }
+  return err instanceof Error ? err.message : String(err);
+}
