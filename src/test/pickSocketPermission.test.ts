@@ -63,13 +63,12 @@ describe("pickSocket — existing-but-refused socket falls back to permission", 
   );
 
   it(
-    "prefers an answering socket over a refused one",
+    "returns null when every candidate is absent (no socket to remember)",
     { skip: SKIP },
     async () => {
-      // A real answering socket would need a daemon; instead assert the
-      // negative: with only absent candidates after the refused one, the
-      // refused one still wins (proven above), and with ONLY absent candidates
-      // the result is null (no socket to fall back to).
+      // Absent sockets (ENOENT) are NOT remembered as a permission fallback,
+      // so all-absent candidates fall through to null → no-runtime, distinct
+      // from the existing-but-refused case above.
       const absentA = join(dir, "absentA.sock");
       const absentB = join(dir, "absentB.sock");
       const picked = await _pickSocketForTesting([absentA, absentB]);
