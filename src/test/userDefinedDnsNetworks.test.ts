@@ -13,8 +13,12 @@ describe("userDefinedDnsNetworks", () => {
     assert.deepEqual(userDefinedDnsNetworks(["podman"]), []);
   });
 
-  it("drops the host/none virtual modes", () => {
-    assert.deepEqual(userDefinedDnsNetworks(["host", "none"]), []);
+  it("drops the host virtual mode", () => {
+    assert.deepEqual(userDefinedDnsNetworks(["host"]), []);
+  });
+
+  it("drops the none virtual mode", () => {
+    assert.deepEqual(userDefinedDnsNetworks(["none"]), []);
   });
 
   it("keeps a user-defined network", () => {
