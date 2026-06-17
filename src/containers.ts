@@ -2741,6 +2741,23 @@ export async function findAvailablePort(preferred: number): Promise<number> {
   throw new Error("No available port found in range 1024–65535");
 }
 
+// Reserved default-network names that do NOT provide same-network container
+// DNS: Docker's `bridge`, rootless Podman's `podman`, plus the `host`/`none`
+// virtual modes. A container on any of these can't be reached by name, so the
+// `signalkAccessiblePorts` resolver excludes them and shares SignalK's netns
+// instead. Neither runtime lets a user-defined network reuse these names.
+const DNSLESS_DEFAULT_NETWORKS = new Set(["bridge", "podman", "host", "none"]);
+
+/**
+ * From the network names a container is attached to, return only the ones that
+ * support same-network container-name DNS — i.e. drop the reserved defaults
+ * (`bridge`, `podman`, `host`, `none`). Pure so it can be unit-tested without a
+ * runtime; `resolveSignalkNetworks` wraps it around live inspect data.
+ */
+export function userDefinedDnsNetworks(networkNames: string[]): string[] {
+  return networkNames.filter((n) => !DNSLESS_DEFAULT_NETWORKS.has(n));
+}
+
 /**
  * Return the user-defined Docker/Podman networks that the current SignalK
  * container is connected to (i.e. networks other than the default `bridge`,
@@ -2788,11 +2805,12 @@ export async function resolveSignalkNetworks(
   }
 
   const all = Object.keys(info.NetworkSettings?.Networks ?? {});
-  // The default bridge network does not support container-name DNS
-  // resolution, so exclude it along with the virtual modes.
-  const userDefined = all.filter(
-    (n) => n !== "bridge" && n !== "host" && n !== "none",
-  );
+  // Default networks don't provide container-name DNS resolution, so a
+  // managed container attached to one is unreachable by name — callers must
+  // fall back to sharing SignalK's netns instead. The docker-compat
+  // network-inspect API doesn't expose a DNS flag, so we match the reserved
+  // default-network names rather than probing.
+  const userDefined = userDefinedDnsNetworks(all);
   debug(
     `resolveSignalkNetworks: all=${all.join(",")} userDefined=${userDefined.join(",")}`,
   );
