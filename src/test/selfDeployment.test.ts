@@ -418,6 +418,26 @@ describe("selfDeployment — daemon failure classification", () => {
     assert.match(joined, /group_add/);
   });
 
+  it("connect EACCES on the socket → permission-denied (the real dockerode message)", async () => {
+    // The exact string dockerode throws when the socket's owner/group ACL
+    // refuses the container user (verified live: container user not in the
+    // host `docker` group). This must reach permission-denied, not the
+    // generic socket-unreachable / no-runtime — the operator's fix is
+    // group_add, which only the permission remediation names.
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({
+        isContainerized: () => true,
+        resolveClient: resolveTo(
+          unreachableDaemon("connect EACCES /var/run/docker.sock"),
+        ),
+      }),
+    );
+    assert.equal(result.status, "permission-denied");
+    assert.match(result.remediation.join("\n"), /group_add/);
+  });
+
   it("unclassified daemon error → defaults to socket-unreachable, preserves raw text", async () => {
     const result = await selfDeployment(
       "auto",

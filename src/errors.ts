@@ -32,10 +32,16 @@ export interface CategorizedError {
 // being absent/refusing (ENOENT/ECONNREFUSED — not bind-mounted) and the
 // daemon resetting the connection mid-request (EPIPE/ECONNRESET — e.g. an old
 // podman rejecting a large create payload).
+//
+// An EACCES on the socket is deliberately NOT here: the socket exists and is
+// bind-mounted, but its owner/group ACL refuses this uid (the common Docker
+// case — the container user isn't in the host `docker` group). That is a
+// permission problem, not an unreachable socket, so it falls through to
+// PERM_PATTERNS' `eacces` and the doctor reports `permission-denied` (with the
+// `group_add` remediation) instead of the generic "socket unreachable".
 const SOCKET_PATTERNS = [
   /ECONNREFUSED/,
   /ENOENT/,
-  /EACCES.*\.sock/i,
   /connect ENOENT/i,
   /socket hang up/i,
   /EPIPE/,

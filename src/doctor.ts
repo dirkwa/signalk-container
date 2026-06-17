@@ -1110,9 +1110,10 @@ const REMEDIATION_PERMISSION_DENIED: string[] = [
   "podman socket.",
   "",
   "Docker rootful: the Signal K container user must be a member of the",
-  "'docker' group on the host. Add to your compose:",
+  "'docker' group on the host. Add to your compose, using the host's",
+  "docker GID (privileged/network_mode:host do NOT bypass the socket ACL):",
   "  group_add:",
-  '    - "<docker-gid-from-host>"',
+  '    - "<docker-gid-from-host>"   # getent group docker | cut -d: -f3',
 ];
 
 const REMEDIATION_SELF_ID_UNRESOLVED: string[] = [
