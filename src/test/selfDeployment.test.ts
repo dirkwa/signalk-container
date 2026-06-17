@@ -680,6 +680,37 @@ describe("selfDeployment — cgroup controllers", () => {
     );
   });
 
+  it("containerized + rootless (cpuset absent, cpu/memory/pids present) → ok", async () => {
+    // The real rootless deployment: systemd does not propagate the cpuset
+    // controller down to user-<uid>.slice, so a healthy rootless host shows
+    // exactly this set. cpuset is not in EXPECTED_CGROUP_CONTROLLERS, so it
+    // must NOT escalate (it used to, firing a false positive on every
+    // rootless install — including the Podman-machine VM on Windows/macOS).
+    await withEnv(
+      { SIGNALK_CONTAINER_ID: "sk-test-host", HOSTNAME: "sk-test-host" },
+      async () => {
+        const result = await selfDeployment(
+          "auto",
+          null,
+          probesWith({
+            isContainerized: () => true,
+            resolveClient: resolveTo(podmanWithSelfId("sk-test-host")),
+            readCgroupControllers: async () => ["cpu", "io", "memory", "pids"],
+          }),
+        );
+        assert.equal(result.status, "ok");
+        assert.deepEqual(result.cgroupControllers.missing, []);
+        // cpuset is reported as available-or-not verbatim, just not required.
+        assert.deepEqual(result.cgroupControllers.available, [
+          "cpu",
+          "io",
+          "memory",
+          "pids",
+        ]);
+      },
+    );
+  });
+
   it("containerized + cgroup v1 host (probe returns null) → ok, missing=[]", async () => {
     // We can't know whether memory is delegated on cgroup v1 systems —
     // each controller is a separate subdir, not a single file. Skip the
