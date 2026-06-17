@@ -93,3 +93,30 @@ describe("categorizeError — socket reset (EPIPE/ECONNRESET)", () => {
     );
   });
 });
+
+describe("categorizeError — EACCES on the socket is permission, not unreachable", () => {
+  it("classifies a connect EACCES on the runtime socket as permission", () => {
+    // dockerode surfaces a refused socket ACL as
+    // `connect EACCES /var/run/docker.sock` (verified live). The socket
+    // exists and is bind-mounted; the container user just isn't in the host
+    // `docker` group. That's a permission problem the operator fixes with
+    // group_add — not an unreachable/absent socket — so the doctor must reach
+    // its `permission-denied` remediation.
+    const c = categorizeError(new Error("connect EACCES /var/run/docker.sock"));
+    assert.equal(c.kind, "permission");
+    assert.match(c.userMessage, /permission/i);
+  });
+
+  it("classifies a bare EACCES as permission", () => {
+    assert.equal(categorizeError(new Error("EACCES")).kind, "permission");
+  });
+
+  it("still classifies an absent socket (ENOENT) as socket-unreachable", () => {
+    // The not-bind-mounted case must stay unreachable → no-runtime, distinct
+    // from the permission case.
+    assert.equal(
+      categorizeError(new Error("connect ENOENT /var/run/docker.sock")).kind,
+      "socket-unreachable",
+    );
+  });
+});

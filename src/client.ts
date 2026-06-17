@@ -104,17 +104,46 @@ function socketCandidates(preference: SocketPreference = "auto"): {
 }
 
 /**
+ * True when a thrown socket error is a permission denial on the socket file
+ * (EACCES/EPERM) rather than the socket being absent or the daemon being down.
+ * The socket exists and is bind-mounted, but its owner/group ACL refuses this
+ * uid — the classic Docker case where the container user isn't in the host
+ * `docker` group. We surface this distinctly so detection can report it as a
+ * permission problem instead of a generic "no runtime".
+ */
+function isPermissionError(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  if (code === "EACCES" || code === "EPERM") return true;
+  const message = err instanceof Error ? err.message : String(err);
+  return /\b(EACCES|EPERM|permission denied)\b/i.test(message);
+}
+
+/**
  * Find the first socket path that exists AND answers `version()`. Existence
  * alone isn't enough — a stale socket file or one our uid can't read must be
  * skipped so detection falls through to the next candidate. When an explicit
  * endpoint was configured there is no next candidate to fall through to, so a
  * failure to reach it propagates rather than being swallowed.
+ *
+ * One existing-but-refused socket is remembered: if no candidate answers but a
+ * socket DID exist and rejected us with a permission error, we return that
+ * client anyway. Returning `null` there would make the doctor report the
+ * generic "no container runtime found" — but the socket is plainly present and
+ * the real problem is an ACL the operator can fix with `group_add`. Returning
+ * the client lets the doctor's daemon probe re-hit the EACCES, classify it as
+ * `permission`, and surface the `permission-denied` remediation. A genuinely
+ * absent socket (ENOENT) is NOT remembered, so it still falls through to
+ * `no-runtime`.
  */
-async function pickSocket(preference: SocketPreference = "auto"): Promise<{
+async function pickSocket(
+  preference: SocketPreference = "auto",
+  override?: { candidates: string[]; explicit: boolean },
+): Promise<{
   socketPath: string;
   client: Docker;
 } | null> {
-  const { candidates, explicit } = socketCandidates(preference);
+  const { candidates, explicit } = override ?? socketCandidates(preference);
+  let permissionDenied: { socketPath: string; client: Docker } | null = null;
   for (const socketPath of candidates) {
     try {
       const s = await stat(socketPath);
@@ -128,6 +157,12 @@ async function pickSocket(preference: SocketPreference = "auto"): Promise<{
       }
     } catch (err) {
       if (explicit) throw err;
+      // `stat` can itself EACCES when a parent dir is unsearchable — treat
+      // that the same as a refused connect so the operator still gets the
+      // permission remediation rather than "no runtime".
+      if (!permissionDenied && isPermissionError(err)) {
+        permissionDenied = { socketPath, client: new Docker({ socketPath }) };
+      }
       continue;
     }
     const client = new Docker({ socketPath });
@@ -138,11 +173,16 @@ async function pickSocket(preference: SocketPreference = "auto"): Promise<{
       // An explicit endpoint must fail closed — don't silently probe a
       // different daemon than the operator selected.
       if (explicit) throw err;
+      // Socket exists but rejected us on a permission ACL: remember the first
+      // such candidate so we can fall back to it if nothing else answers.
+      if (!permissionDenied && isPermissionError(err)) {
+        permissionDenied = { socketPath, client };
+      }
       // Otherwise: socket exists but doesn't answer the API (wrong uid, dead
       // daemon) — try the next candidate.
     }
   }
-  return null;
+  return permissionDenied;
 }
 
 export interface ResolvedClient {
@@ -208,6 +248,19 @@ export function _setClientForTesting(
   socketPath = "/test/docker.sock",
 ): void {
   cached = client ? { client: client as unknown as Docker, socketPath } : null;
+}
+
+/**
+ * Test-only: drive `pickSocket` against an explicit candidate list instead of
+ * the hardcoded conventional paths, so the existing-but-refused fallback can be
+ * exercised with a real (chmod-restricted) unix socket. Returns the resolved
+ * socket path or `null`; the client is irrelevant to the fallback assertion.
+ */
+export async function _pickSocketForTesting(
+  candidates: string[],
+): Promise<string | null> {
+  const picked = await pickSocket("auto", { candidates, explicit: false });
+  return picked?.socketPath ?? null;
 }
 
 /**
