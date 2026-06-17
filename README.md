@@ -165,6 +165,13 @@ services:
       - "<docker-gid-from-host>" # `getent group docker | cut -d: -f3`
 ```
 
+`group_add` makes the in-container Signal K user a member of the host's
+`docker` group, which owns `/var/run/docker.sock`. Access to the socket is
+gated by that unix-socket ACL: `privileged: true` and `network_mode: host`
+do **not** bypass it. Without the correct host docker GID here, the
+connection is refused with `EACCES` and the deployment doctor reports
+`status: permission-denied`.
+
 > [!warning]
 > Mounting `/var/run/docker.sock` gives the container **root-equivalent
 > access to the host**. Anyone who compromises Signal K (including via
