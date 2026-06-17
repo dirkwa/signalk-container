@@ -1104,9 +1104,13 @@ export interface SelfDeploymentResult {
    * and the cgroup component of `status` is left unchanged.
    *
    * `missing` lists the controllers the consumer plugin layer needs but
-   * the host hasn't delegated; today that's `["memory", "cpu", "cpuset",
-   * "pids"]` minus whatever's in `available`. When `isContainerized` is
-   * true AND `missing` is non-empty, `status` escalates to
+   * the host hasn't delegated; today that's `["cpu", "memory", "pids"]`
+   * minus whatever's in `available`. `cpuset` is intentionally NOT
+   * required — rootless Podman never delegates it to the user slice, so
+   * requiring it would false-positive on every healthy rootless host;
+   * `cpusetCpus` is instead dropped per-field by `filterUnsupportedLimits`
+   * when the controller is absent. When `isContainerized` is true AND
+   * `missing` is non-empty, `status` escalates to
    * `cgroup-controllers-incomplete` (lower priority than runtime/socket/
    * self-id failures — those block more functionality).
    *

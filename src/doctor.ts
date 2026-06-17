@@ -232,20 +232,34 @@ export interface MountEntry {
 }
 
 /**
- * cgroup v2 controllers that the consumer-plugin layer needs to be able
- * to enforce its resource limits. `cpu`/`cpuset` back `cpus`/`cpusetCpus`,
+ * cgroup v2 controllers whose absence escalates the deployment status to
+ * `cgroup-controllers-incomplete`. `cpu` backs `cpus`/`cpuShares`,
  * `memory` backs `memory`/`memorySwap`/`memoryReservation`, `pids` backs
  * `pidsLimit`. Missing any of these means the corresponding limit fields
- * are silently dropped by `filterUnsupportedLimits` in resources.ts.
+ * are silently dropped by `filterUnsupportedLimits` in resources.ts — a
+ * real bug worth surfacing.
  *
- * `io` is intentionally NOT here even though the remediation snippet
- * recommends delegating it: no `ContainerResourceLimits` field maps to
- * the io controller, so `io` missing causes no silent-drop bug. We
- * still recommend delegating it because `cpu cpuset io memory pids` is
- * the standard systemd delegate set and operators are likely to look
- * it up; deviating would just look like an unexplained omission.
+ * `cpuset` is intentionally NOT here even though it backs `cpusetCpus`:
+ * rootless Podman never delegates `cpuset` to the user slice (systemd's
+ * default `Delegate=` for `user@.service` is `cpu cpuset io memory pids`
+ * at the root, but the cpuset controller does not propagate down to
+ * `user-<uid>.slice` on any current kernel/systemd). Requiring it would
+ * fire a permanent false positive on every healthy rootless deployment.
+ * If a user actually sets `cpusetCpus` while `cpuset` is unavailable,
+ * `filterUnsupportedLimits` already drops just that one field with a
+ * logged reason — so excluding it here loses no safety; it only stops
+ * the spurious status escalation. (cpuset pinning is also a niche knob;
+ * rootless users effectively cannot use it.)
+ *
+ * `io` is also NOT here even though the remediation snippet recommends
+ * delegating it: no `ContainerResourceLimits` field maps to the io
+ * controller, so `io` missing causes no silent-drop bug. We still
+ * recommend delegating both in the remediation text because
+ * `cpu cpuset io memory pids` is the standard systemd delegate set and
+ * operators are likely to look it up; deviating would just look like an
+ * unexplained omission.
  */
-const EXPECTED_CGROUP_CONTROLLERS = ["cpu", "cpuset", "memory", "pids"];
+const EXPECTED_CGROUP_CONTROLLERS = ["cpu", "memory", "pids"];
 
 /**
  * Filesystem types where rootless Podman's default `overlay` storage
