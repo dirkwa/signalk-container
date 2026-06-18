@@ -1498,6 +1498,25 @@ function healthTest(source: string[]): string[] | undefined {
 }
 
 /**
+ * Translate `ContainerConfig.ulimits` into the dockerode
+ * `HostConfig.Ulimits` array (`{ Name, Soft, Hard }`). A bare number sets
+ * soft = hard. Returns `undefined` when no ulimits are configured so the
+ * caller can leave the field unset. Exported for unit testing.
+ */
+export function ulimitsForRun(
+  ulimits: ContainerConfig["ulimits"],
+): Docker.Ulimit[] | undefined {
+  if (!ulimits) return undefined;
+  const entries = Object.entries(ulimits);
+  if (entries.length === 0) return undefined;
+  return entries.map(([name, value]) => {
+    const { soft, hard } =
+      typeof value === "number" ? { soft: value, hard: value } : value;
+    return { Name: name, Soft: soft, Hard: hard };
+  });
+}
+
+/**
  * Build the dockerode `createContainer` options from a `ContainerConfig`.
  * Replaces the former `buildRunArgs` flag-array builder; the same fields
  * map onto the structured create payload (top-level vs `HostConfig`).
@@ -1606,6 +1625,12 @@ function buildCreateOptions(
   // Resource limits → HostConfig fields. Fields whose backing cgroup
   // controller is unavailable on this runtime are silently dropped.
   Object.assign(hostConfig, resourcePayloadForRun(config.resources, runtime));
+
+  // Per-process ulimits → HostConfig.Ulimits. dockerode takes the same
+  // {Name, Soft, Hard} shape on podman and docker. A bare number sets
+  // soft = hard. Not drift-detecting (see ContainerConfig.ulimits).
+  const ulimits = ulimitsForRun(config.ulimits);
+  if (ulimits) hostConfig.Ulimits = ulimits;
 
   const options: Docker.ContainerCreateOptions = {
     name: fullName,

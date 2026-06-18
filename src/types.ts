@@ -305,6 +305,30 @@ export interface ContainerConfig {
    */
   resources?: ContainerResourceLimits;
   /**
+   * Per-process resource limits (`ulimit`) for the container, mapped to
+   * `HostConfig.Ulimits`. Keys are ulimit names (`nofile`, `nproc`,
+   * `memlock`, …); values set the soft and hard limit.
+   *
+   * The motivating case is `nofile`: a process inside a rootless-Podman
+   * container inherits its open-files limit from the container runtime,
+   * NOT from the host's `fs.file-max` sysctl. QuestDB needs a high
+   * `nofile` (it recommends 1048576) and otherwise logs an open-files
+   * warning and risks WAL corruption under heavy ingestion — raising the
+   * host `fs.file-max` alone does not fix it. Setting it here pins the
+   * limit on the container regardless of the host login configuration.
+   *
+   * A number sets soft = hard. `{ soft, hard }` sets them independently.
+   *
+   * Example:
+   *   `ulimits: { nofile: 1048576 }`
+   *   `ulimits: { nofile: { soft: 1048576, hard: 1048576 } }`
+   *
+   * Not part of drift detection — like `labels`/`healthcheck`, changing a
+   * ulimit does not recreate a running container; it takes effect on the
+   * next recreate for another reason or a clean start.
+   */
+  ulimits?: Record<string, number | { soft: number; hard: number }>;
+  /**
    * Container labels emitted as `--label key=value` flags. Use this to
    * declare static metadata that survives `inspect`. Drift detection
    * does *not* compare labels — they are informational only and not
