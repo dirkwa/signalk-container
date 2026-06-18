@@ -424,7 +424,7 @@ Creates and starts a container if missing; starts it if stopped. If the containe
 
 Volumes accept either a bare host-path string (auto-create — runtime creates the host dir if missing) or a `VolumeSpec` object `{ source, ifMissing: "create" | "skip" | "abort" }` for per-volume policy. `options` is an `EnsureRunningOptions` (a superset of `HealthCheckOptions`) which also accepts an `onVolumeIssue` event handler. See [Optional and required volumes](#optional-and-required-volumes) for the full pattern.
 
-`options` also accepts `onContainerLog` to stream the container's stdout/stderr into your plugin's debug channel — see [Streaming container logs](#streaming-container-logs-into-your-plugins-debug-channel).
+`options` also accepts `onContainerLog` to stream the container's stdout/stderr into your plugin's debug channel — see [Streaming container logs](#streaming-container-logs-into-your-plugins-debug-channel) — and `onUlimitClamped`, fired when a requested `nofile` ulimit had to be lowered to the host ceiling — see [Per-process ulimits](#per-process-ulimits-nofile-).
 
 For opt-in digest pinning, pass `digest` (`sha256:<64-hex>`) on the config and `pluginId` / `pluginVersion` on the options — see [Image Pinning Manifest](#image-pinning-manifest). To follow a floating tag (`latest`, `edge`, …) and auto-recreate when the registry moves, set `autoUpdateOnFloatingTag: true` — see [Auto-update on floating tags](#auto-update-on-floating-tags).
 
