@@ -1498,20 +1498,110 @@ function healthTest(source: string[]): string[] | undefined {
 }
 
 /**
+ * Read the highest `nofile` (`RLIMIT_NOFILE`) hard limit a container on
+ * this host can actually be given, so an over-request can be clamped
+ * instead of being rejected at container-create time.
+ *
+ * The ceiling differs by privilege:
+ *   - rootless: a container cannot raise its hard limit above the
+ *     calling user's hard limit — only privileged processes may. Signal
+ *     K server runs as that same user, so its own hard limit
+ *     (`/proc/self/limits`) IS the ceiling. crun rejects anything higher
+ *     with `setrlimit RLIMIT_NOFILE: Operation not permitted` and the
+ *     container fails to start.
+ *   - rootful / docker: the runtime is privileged and can raise up to
+ *     the kernel's absolute per-process cap, `fs.nr_open`.
+ *
+ * Returns `null` when the ceiling can't be determined (non-Linux, the
+ * proc files are absent) — the caller then passes the request through
+ * unclamped, preserving today's behaviour on those platforms.
+ */
+export function readNofileHardCeiling(
+  runtime: ContainerRuntimeInfo,
+): number | null {
+  const read = (path: string): number | null => {
+    try {
+      const raw = readFileSync(path, "utf8");
+      const n = Number(raw.trim());
+      return Number.isFinite(n) && n > 0 ? n : null;
+    } catch {
+      return null;
+    }
+  };
+
+  if (runtime.isRootless) {
+    // "Max open files   <soft>   <hard>   files" — the third column.
+    try {
+      const line = readFileSync("/proc/self/limits", "utf8")
+        .split("\n")
+        .find((l) => l.startsWith("Max open files"));
+      const hard = line?.trim().split(/\s+/)[4];
+      const n = hard === "unlimited" ? Infinity : Number(hard);
+      return Number.isFinite(n) && n > 0 ? n : null;
+    } catch {
+      return null;
+    }
+  }
+  return read("/proc/sys/fs/nr_open");
+}
+
+/**
  * Translate `ContainerConfig.ulimits` into the dockerode
  * `HostConfig.Ulimits` array (`{ Name, Soft, Hard }`). A bare number sets
  * soft = hard. Returns `undefined` when no ulimits are configured so the
- * caller can leave the field unset. Exported for unit testing.
+ * caller can leave the field unset.
+ *
+ * `nofileCeiling`, when set, caps both the soft and hard `nofile` limits
+ * to a value the host can actually grant — a rootless container that
+ * requests more `nofile` than the calling user's hard limit is rejected
+ * by crun and fails to start, so clamping turns a fatal over-request into
+ * the best limit the host can deliver. `onClamp` fires once when the
+ * `nofile` request is lowered, so the caller can log an advisory.
+ *
+ * Throws on an invalid limit (non-integer, negative, or `hard < soft`) so
+ * a bad consumer config fails early with a descriptive message rather than
+ * as an opaque runtime create error. Exported for unit testing.
  */
 export function ulimitsForRun(
   ulimits: ContainerConfig["ulimits"],
+  nofileCeiling?: number | null,
+  onClamp?: (requested: number, granted: number) => void,
 ): Docker.Ulimit[] | undefined {
   if (!ulimits) return undefined;
   const entries = Object.entries(ulimits);
   if (entries.length === 0) return undefined;
   return entries.map(([name, value]) => {
-    const { soft, hard } =
+    let { soft, hard } =
       typeof value === "number" ? { soft: value, hard: value } : value;
+    // Validate at the boundary: a consumer plugin's config is untrusted
+    // input, and an invalid ulimit otherwise only surfaces as an opaque
+    // runtime create error. Require non-negative integers with hard ≥ soft.
+    for (const [bound, n] of [
+      ["soft", soft],
+      ["hard", hard],
+    ] as const) {
+      if (!Number.isInteger(n) || n < 0) {
+        throw new Error(
+          `Invalid ${bound} ulimit for "${name}": expected a non-negative integer, got ${n}`,
+        );
+      }
+    }
+    if (hard < soft) {
+      throw new Error(
+        `Invalid ulimit for "${name}": hard (${hard}) must be >= soft (${soft})`,
+      );
+    }
+    if (
+      name === "nofile" &&
+      nofileCeiling != null &&
+      Number.isFinite(nofileCeiling)
+    ) {
+      const requestedHard = hard;
+      if (hard > nofileCeiling) hard = nofileCeiling;
+      if (soft > nofileCeiling) soft = nofileCeiling;
+      if (requestedHard > nofileCeiling)
+        onClamp?.(requestedHard, nofileCeiling);
+    }
     return { Name: name, Soft: soft, Hard: hard };
   });
 }
@@ -1526,6 +1616,7 @@ function buildCreateOptions(
   config: ContainerConfig,
   runtime: ContainerRuntimeInfo,
   healthcheck?: ImageHealthcheck | null,
+  debug: (msg: string) => void = () => {},
 ): Docker.ContainerCreateOptions {
   const fullName = prefixedName(name);
   const imageRef = qualifyImage(
@@ -1628,8 +1719,20 @@ function buildCreateOptions(
 
   // Per-process ulimits → HostConfig.Ulimits. dockerode takes the same
   // {Name, Soft, Hard} shape on podman and docker. A bare number sets
-  // soft = hard. Not drift-detecting (see ContainerConfig.ulimits).
-  const ulimits = ulimitsForRun(config.ulimits);
+  // soft = hard. Not drift-detecting (see ContainerConfig.ulimits). The
+  // `nofile` request is clamped to what this host can actually grant — a
+  // rootless container asking for more than the calling user's hard limit
+  // is rejected by crun and never starts, so we lower it (and log) rather
+  // than let the container fail.
+  const ulimits = ulimitsForRun(
+    config.ulimits,
+    readNofileHardCeiling(runtime),
+    (requested, granted) =>
+      debug(
+        `nofile ulimit ${requested} exceeds this host's hard limit; clamped to ${granted}. ` +
+          `Raise the limit for the user running the container runtime to use a higher value.`,
+      ),
+  );
   if (ulimits) hostConfig.Ulimits = ulimits;
 
   const options: Docker.ContainerCreateOptions = {
@@ -1846,7 +1949,13 @@ export async function ensureRunning(
         config.healthcheck !== undefined
           ? null
           : await getImageHealthcheck(runtime, imageRef, client);
-      const createOpts = buildCreateOptions(name, config, runtime, healthcheck);
+      const createOpts = buildCreateOptions(
+        name,
+        config,
+        runtime,
+        healthcheck,
+        debug,
+      );
       const created = await createAndStart(client, createOpts);
       if (!created.ok && created.conflict) {
         // getContainerState reported "missing" because `inspect` failed,

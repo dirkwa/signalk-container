@@ -245,7 +245,9 @@ await containers.ensureRunning("signalk-questdb", {
 });
 ```
 
-Keys are ulimit names (`nofile`, `nproc`, `memlock`, …); they map to the runtime's `Ulimits` ({ Name, Soft, Hard }) the same way on Podman and Docker.
+Keys are ulimit names (`nofile`, `nproc`, `memlock`, …); they map to the runtime's `Ulimits` ({ Name, Soft, Hard }) the same way on Podman and Docker. Values must be non-negative integers with `hard >= soft` — an invalid limit throws at `ensureRunning` time rather than surfacing as an opaque runtime create error.
+
+`nofile` is **clamped to what the host can actually grant**. A rootless container cannot raise its `nofile` hard limit above the calling user's hard limit — the runtime rejects a higher request with `setrlimit RLIMIT_NOFILE: Operation not permitted` and the container fails to start. signalk-container reads the host ceiling (the Signal K process's own hard limit when rootless, `fs.nr_open` when rootful) and lowers an over-request to it, logging an advisory, so the container always starts with the best limit available instead of failing. To get the full requested value on a rootless host, raise the limit for the user running the container runtime (e.g. `/etc/security/limits.conf` plus the systemd `user@.service` `LimitNOFILE`), then restart the container.
 
 Like `healthcheck` and `labels`, `ulimits` is **not** part of drift detection — changing it does not recreate a running container; the new limit takes effect on the next recreate (image/env/volumes/ports change) or clean start. If your plugin has a second `ensureRunning` call site (e.g. an in-place "update now" path), set `ulimits` there too so an updated container keeps the limit.
 

@@ -323,6 +323,12 @@ export interface ContainerConfig {
    *   `ulimits: { nofile: 1048576 }`
    *   `ulimits: { nofile: { soft: 1048576, hard: 1048576 } }`
    *
+   * `nofile` is automatically clamped to what the host can actually grant
+   * (a rootless container cannot exceed the calling user's hard limit, and
+   * a higher request makes the runtime refuse to start the container); the
+   * clamp is logged. Values must be non-negative integers with `hard >=
+   * soft` — an invalid limit throws at `ensureRunning` time.
+   *
    * Not part of drift detection — like `labels`/`healthcheck`, changing a
    * ulimit does not recreate a running container; it takes effect on the
    * next recreate for another reason or a clean start.
