@@ -206,4 +206,47 @@ describe("ensureRunning — ulimits", () => {
     );
     assert.equal(ulimitsFrom(calls), undefined);
   });
+
+  it("fires onUlimitClamped when nofile exceeds the host ceiling", async () => {
+    const { client, calls } = makeClient();
+    const events: { requested: number; granted: number; ulimit: string }[] = [];
+    // MAX_SAFE_INTEGER exceeds any real host ceiling (fs.nr_open on this
+    // rootful path), so the clamp always fires regardless of the test box.
+    await ensureRunning(
+      docker,
+      "questdb",
+      { ...baseConfig, ulimits: { nofile: Number.MAX_SAFE_INTEGER } },
+      () => {},
+      {
+        onUlimitClamped: (e) => {
+          events.push(e);
+        },
+      },
+      client,
+    );
+    assert.equal(events.length, 1);
+    assert.equal(events[0].ulimit, "nofile");
+    assert.equal(events[0].requested, Number.MAX_SAFE_INTEGER);
+    assert.ok(events[0].granted > 0 && events[0].granted < events[0].requested);
+    // The payload that reached the runtime carries the clamped value.
+    assert.equal(ulimitsFrom(calls)?.[0]?.Hard, events[0].granted);
+  });
+
+  it("does not fire onUlimitClamped when the request fits", async () => {
+    const { client } = makeClient();
+    let fired = false;
+    await ensureRunning(
+      docker,
+      "questdb",
+      { ...baseConfig, ulimits: { nofile: 1024 } },
+      () => {},
+      {
+        onUlimitClamped: () => {
+          fired = true;
+        },
+      },
+      client,
+    );
+    assert.equal(fired, false);
+  });
 });
