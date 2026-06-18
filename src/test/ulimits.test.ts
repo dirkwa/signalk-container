@@ -7,7 +7,11 @@ import {
 } from "../containers.js";
 import { _setCurrentHostIdsForTesting } from "../runtime.js";
 import { makeMockClient } from "./helpers/mockClient.js";
-import type { ContainerConfig, ContainerRuntimeInfo } from "../types.js";
+import type {
+  ContainerConfig,
+  ContainerRuntimeInfo,
+  UlimitClamp,
+} from "../types.js";
 
 // signalk-container forwards `ContainerConfig.ulimits` to the runtime as
 // `HostConfig.Ulimits` ({ Name, Soft, Hard }) in the createContainer payload.
@@ -205,5 +209,57 @@ describe("ensureRunning — ulimits", () => {
       client,
     );
     assert.equal(ulimitsFrom(calls), undefined);
+  });
+
+  it("fires onUlimitClamped when nofile exceeds the host ceiling", async (t) => {
+    // The clamp only fires when a host ceiling is readable. On macOS/Windows
+    // there is no /proc/self/limits or fs.nr_open, so readNofileHardCeiling
+    // returns null and the request passes through unclamped (correct
+    // behaviour) — skip the assertion there rather than fail it.
+    if (readNofileHardCeiling(docker) === null) {
+      t.skip("no readable nofile ceiling on this platform");
+      return;
+    }
+    const { client, calls } = makeClient();
+    const events: UlimitClamp[] = [];
+    // MAX_SAFE_INTEGER exceeds any real host ceiling (fs.nr_open on this
+    // rootful path), so the clamp always fires regardless of the test box.
+    await ensureRunning(
+      docker,
+      "questdb",
+      { ...baseConfig, ulimits: { nofile: Number.MAX_SAFE_INTEGER } },
+      () => {},
+      {
+        onUlimitClamped: (e) => {
+          events.push(e);
+        },
+      },
+      client,
+    );
+    assert.equal(events.length, 1);
+    assert.equal(events[0].ulimit, "nofile");
+    assert.equal(events[0].requested, Number.MAX_SAFE_INTEGER);
+    assert.ok(events[0].granted > 0 && events[0].granted < events[0].requested);
+    assert.match(events[0].reason, /nofile ulimit .* clamped to/);
+    // The payload that reached the runtime carries the clamped value.
+    assert.equal(ulimitsFrom(calls)?.[0]?.Hard, events[0].granted);
+  });
+
+  it("does not fire onUlimitClamped when the request fits", async () => {
+    const { client } = makeClient();
+    let fired = false;
+    await ensureRunning(
+      docker,
+      "questdb",
+      { ...baseConfig, ulimits: { nofile: 1024 } },
+      () => {},
+      {
+        onUlimitClamped: () => {
+          fired = true;
+        },
+      },
+      client,
+    );
+    assert.equal(fired, false);
   });
 });

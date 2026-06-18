@@ -249,6 +249,19 @@ Keys are ulimit names (`nofile`, `nproc`, `memlock`, …); they map to the runti
 
 `nofile` is **clamped to what the host can actually grant**. A rootless container cannot raise its `nofile` hard limit above the calling user's hard limit — the runtime rejects a higher request with `setrlimit RLIMIT_NOFILE: Operation not permitted` and the container fails to start. signalk-container reads the host ceiling (the Signal K process's own hard limit when rootless, `fs.nr_open` when rootful) and lowers an over-request to it, logging an advisory, so the container always starts with the best limit available instead of failing. To get the full requested value on a rootless host, raise the limit for the user running the container runtime (e.g. `/etc/security/limits.conf` plus the systemd `user@.service` `LimitNOFILE`), then restart the container.
 
+When a clamp happens signalk-container fires `EnsureRunningOptions.onUlimitClamped`, so the consumer can surface it instead of it only appearing in the container manager's debug log. Wire it to your plugin status so the operator sees the host limit is the bottleneck:
+
+```typescript
+await containers.ensureRunning("signalk-questdb", config, {
+  onUlimitClamped: (e) =>
+    app.setPluginStatus(
+      `${e.ulimit} clamped ${e.requested} → ${e.granted} (host limit). ${e.reason}`,
+    ),
+});
+```
+
+The event carries `{ ulimit, requested, granted, reason }`. It is an advisory — the container is running with `granted` — so prefer `setPluginStatus` or a banner over `setPluginError`.
+
 Like `healthcheck` and `labels`, `ulimits` is **not** part of drift detection — changing it does not recreate a running container; the new limit takes effect on the next recreate (image/env/volumes/ports change) or clean start. If your plugin has a second `ensureRunning` call site (e.g. an in-place "update now" path), set `ulimits` there too so an updated container keeps the limit.
 
 > Availability: `ContainerConfig.ulimits` requires signalk-container ≥ 1.17.0. On older versions the field is ignored — the container still runs, it just inherits the runtime's default ulimits.
@@ -411,7 +424,7 @@ Creates and starts a container if missing; starts it if stopped. If the containe
 
 Volumes accept either a bare host-path string (auto-create — runtime creates the host dir if missing) or a `VolumeSpec` object `{ source, ifMissing: "create" | "skip" | "abort" }` for per-volume policy. `options` is an `EnsureRunningOptions` (a superset of `HealthCheckOptions`) which also accepts an `onVolumeIssue` event handler. See [Optional and required volumes](#optional-and-required-volumes) for the full pattern.
 
-`options` also accepts `onContainerLog` to stream the container's stdout/stderr into your plugin's debug channel — see [Streaming container logs](#streaming-container-logs-into-your-plugins-debug-channel).
+`options` also accepts `onContainerLog` to stream the container's stdout/stderr into your plugin's debug channel — see [Streaming container logs](#streaming-container-logs-into-your-plugins-debug-channel) — and `onUlimitClamped`, fired when a requested `nofile` ulimit had to be lowered to the host ceiling — see [Per-process ulimits](#per-process-ulimits-nofile-).
 
 For opt-in digest pinning, pass `digest` (`sha256:<64-hex>`) on the config and `pluginId` / `pluginVersion` on the options — see [Image Pinning Manifest](#image-pinning-manifest). To follow a floating tag (`latest`, `edge`, …) and auto-recreate when the registry moves, set `autoUpdateOnFloatingTag: true` — see [Auto-update on floating tags](#auto-update-on-floating-tags).
 

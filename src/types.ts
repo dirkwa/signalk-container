@@ -679,6 +679,25 @@ export interface VolumeIssue {
   reason: string;
 }
 
+/**
+ * Event delivered to `EnsureRunningOptions.onUlimitClamped` when a
+ * requested ulimit had to be lowered to what the host can actually grant.
+ * Currently only `nofile` is clamped (a rootless container cannot exceed
+ * the calling user's hard limit; a higher request makes the runtime refuse
+ * to start the container). The container starts with `granted` — this is an
+ * advisory, not a failure.
+ */
+export interface UlimitClamp {
+  /** The ulimit that was clamped, e.g. `"nofile"`. */
+  ulimit: string;
+  /** The value the consumer requested. */
+  requested: number;
+  /** The value actually applied — the host's hard ceiling. */
+  granted: number;
+  /** Human-readable explanation; safe to surface in `setPluginStatus`. */
+  reason: string;
+}
+
 export interface HealthCheckOptions {
   healthCheck?: () => Promise<boolean>;
   onUnhealthy?: (name: string, error: string) => void;
@@ -719,6 +738,20 @@ export interface EnsureRunningOptions extends HealthCheckOptions {
    * etc.) — they are invoked in the lifecycle hot path.
    */
   onVolumeIssue?: (event: VolumeIssue) => void | Promise<void>;
+
+  /**
+   * Called once per ulimit that signalk-container had to clamp during
+   * this `ensureRunning` call (currently only `nofile`). The container
+   * still starts — with the `granted` value — so this is an advisory the
+   * plugin can surface (e.g. `app.setPluginStatus` or a config-panel
+   * banner) to tell the operator the host limit is the bottleneck and how
+   * to lift it.
+   *
+   * Same handler contract as `onVolumeIssue`: sync or async, fire-and-
+   * forget, errors caught and logged at error level, kept off the
+   * lifecycle path otherwise.
+   */
+  onUlimitClamped?: (event: UlimitClamp) => void | Promise<void>;
 
   /**
    * Called for every line the managed container writes to stdout

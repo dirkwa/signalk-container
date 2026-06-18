@@ -7,8 +7,9 @@ import {
   ContainerInfo,
   ContainerRuntimeInfo,
   ContainerState,
-  HealthCheckOptions,
+  EnsureRunningOptions,
   HealthcheckOverride,
+  UlimitClamp,
   VolumeIssue,
   VolumeSpec,
 } from "./types.js";
@@ -266,6 +267,23 @@ export function safeInvokeContainerLog(
   if (!handler) return;
   try {
     void Promise.resolve(handler(line)).catch(reportError);
+  } catch (err) {
+    reportError(err);
+  }
+}
+
+/**
+ * Invoke an `onUlimitClamped` callback safely. Same shape and rationale
+ * as `safeInvokeVolumeIssue` — see that helper's doc.
+ */
+export function safeInvokeUlimitClamped(
+  handler: ((event: UlimitClamp) => void | Promise<void>) | undefined,
+  event: UlimitClamp,
+  reportError: (err: unknown) => void,
+): void {
+  if (!handler) return;
+  try {
+    void Promise.resolve(handler(event)).catch(reportError);
   } catch (err) {
     reportError(err);
   }
@@ -1617,6 +1635,7 @@ function buildCreateOptions(
   runtime: ContainerRuntimeInfo,
   healthcheck?: ImageHealthcheck | null,
   debug: (msg: string) => void = () => {},
+  onClamp: (event: UlimitClamp) => void = () => {},
 ): Docker.ContainerCreateOptions {
   const fullName = prefixedName(name);
   const imageRef = qualifyImage(
@@ -1727,11 +1746,13 @@ function buildCreateOptions(
   const ulimits = ulimitsForRun(
     config.ulimits,
     readNofileHardCeiling(runtime),
-    (requested, granted) =>
-      debug(
+    (requested, granted) => {
+      const reason =
         `nofile ulimit ${requested} exceeds this host's hard limit; clamped to ${granted}. ` +
-          `Raise the limit for the user running the container runtime to use a higher value.`,
-      ),
+        `Raise the limit for the user running the container runtime to use a higher value.`;
+      debug(reason);
+      onClamp({ ulimit: "nofile", requested, granted, reason });
+    },
   );
   if (ulimits) hostConfig.Ulimits = ulimits;
 
@@ -1783,7 +1804,7 @@ export async function ensureRunning(
   config: ContainerConfig,
   debug: (msg: string) => void,
 
-  options?: HealthCheckOptions,
+  options?: EnsureRunningOptions,
   client: ContainerClient = getClient(),
   /**
    * Prior `ContainerConfig` from the previous `ensureRunning` call within
@@ -1955,6 +1976,14 @@ export async function ensureRunning(
         runtime,
         healthcheck,
         debug,
+        (event) =>
+          safeInvokeUlimitClamped(options?.onUlimitClamped, event, (err) =>
+            debug(
+              `ensureRunning(${name}): onUlimitClamped handler threw: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            ),
+          ),
       );
       const created = await createAndStart(client, createOpts);
       if (!created.ok && created.conflict) {
