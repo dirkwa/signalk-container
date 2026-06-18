@@ -225,6 +225,34 @@ An explicit `healthcheck` wins over the image's own `HEALTHCHECK`. It is **not**
 
 > Availability: `ContainerConfig.healthcheck` requires signalk-container ≥ 1.14.0. On older versions the field is ignored — the container still runs, it just keeps the pre-fix `starting` state.
 
+### Per-process ulimits (`nofile`, …)
+
+A process inside a container inherits its per-process resource limits (`ulimit`) from the **container runtime**, not from the host's matching sysctl. The canonical trap is open files: raising the host's `fs.file-max` does **not** raise the container process's `nofile` (`RLIMIT_NOFILE`) — that comes from the runtime's default, which on rootless Podman is often far below what a database needs. QuestDB recommends `nofile=1048576` and otherwise logs an open-files warning and risks WAL corruption under heavy ingestion.
+
+Set `ContainerConfig.ulimits` to pin the limit on the container, independent of the host login configuration:
+
+```typescript
+await containers.ensureRunning("signalk-questdb", {
+  image: "questdb/questdb",
+  tag: config.version,
+  ports: { "9000/tcp": "127.0.0.1:9000" },
+  volumes: { "/var/lib/questdb": app.getDataDirPath() },
+  restart: "unless-stopped",
+  ulimits: {
+    nofile: 1048576, // a bare number sets soft = hard
+    // or independent limits: nofile: { soft: 65536, hard: 1048576 }
+  },
+});
+```
+
+Keys are ulimit names (`nofile`, `nproc`, `memlock`, …); they map to the runtime's `Ulimits` ({ Name, Soft, Hard }) the same way on Podman and Docker. Values must be non-negative integers with `hard >= soft` — an invalid limit throws at `ensureRunning` time rather than surfacing as an opaque runtime create error.
+
+`nofile` is **clamped to what the host can actually grant**. A rootless container cannot raise its `nofile` hard limit above the calling user's hard limit — the runtime rejects a higher request with `setrlimit RLIMIT_NOFILE: Operation not permitted` and the container fails to start. signalk-container reads the host ceiling (the Signal K process's own hard limit when rootless, `fs.nr_open` when rootful) and lowers an over-request to it, logging an advisory, so the container always starts with the best limit available instead of failing. To get the full requested value on a rootless host, raise the limit for the user running the container runtime (e.g. `/etc/security/limits.conf` plus the systemd `user@.service` `LimitNOFILE`), then restart the container.
+
+Like `healthcheck` and `labels`, `ulimits` is **not** part of drift detection — changing it does not recreate a running container; the new limit takes effect on the next recreate (image/env/volumes/ports change) or clean start. If your plugin has a second `ensureRunning` call site (e.g. an in-place "update now" path), set `ulimits` there too so an updated container keeps the limit.
+
+> Availability: `ContainerConfig.ulimits` requires signalk-container ≥ 1.17.0. On older versions the field is ignored — the container still runs, it just inherits the runtime's default ulimits.
+
 ### Optional and required volumes
 
 By default, `volumes` entries with a missing host path are auto-created as empty directories by the runtime — fine for plugin state dirs. When a volume represents a _user-managed_ or _deployment-required_ resource, use the `VolumeSpec` object form with an `ifMissing` policy:
