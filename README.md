@@ -292,6 +292,7 @@ host limit.
 **Check the limit the container actually got:**
 
 ```bash
+# podman, or `docker exec` on Docker
 podman exec <sk-container> cat /proc/1/limits | grep -i "open files"
 # Max open files   524288   524288   ← the per-process cap in effect
 ```
@@ -320,7 +321,7 @@ restart the daemon.
 
 The value cannot exceed the kernel's absolute per-process cap,
 `fs.nr_open` (`cat /proc/sys/fs/nr_open` — typically ~1 billion, so not a
-practical limit). Verify after re-login with the `podman exec ... /proc/1/limits`
+practical limit). Verify after re-login with the `<runtime> exec ... /proc/1/limits`
 check above.
 
 ### Watch out for systemd auto-restart (Quadlet / `Restart=always`)
