@@ -14,7 +14,7 @@ Instead of each plugin implementing its own container orchestration, they delega
 - **Update detection** -- centralized "is there a newer image?" service for all consumer plugins. Auto-detects semver vs floating tags (`:latest`, `:main`), offline-tolerant with persistent cache, emits Signal K notifications, visible inline in the config panel. See the [developer guide](doc/plugin-developer-guide.md#update-detection).
 - **Resource limits editor** -- interactive UI in the config panel for setting CPU/memory/PID caps per container. Values are applied live via `podman update` when possible (no downtime), falls back to recreate when needed. Stored overrides are minimized against the consumer plugin's defaults so a future default bump flows through automatically. See the [developer guide](doc/plugin-developer-guide.md#resource-limits).
 - **Reset to plugin default** -- one-click restore of a container's original resource limits, clearing any user override.
-- **Per-process ulimits** -- `ContainerConfig.ulimits` pins per-process limits (`nofile`, `nproc`, …) on a container. A containerized process inherits these from the runtime, not the host sysctl, so raising the host `fs.file-max` alone does not lift a database's open-files limit; setting `ulimits` does. See the [developer guide](doc/plugin-developer-guide.md#per-process-ulimits-nofile-).
+- **Per-process ulimits** -- `ContainerConfig.ulimits` pins per-process limits (`nofile`, `nproc`, …) on a container. A containerized process inherits these from the runtime, not the host sysctl, so raising the host `fs.file-max` alone does not lift a database's open-files limit; setting `ulimits` does. A `nofile` request over the host ceiling is clamped (not rejected) so the container still starts. See the [developer guide](doc/plugin-developer-guide.md#per-process-ulimits-nofile-) and, for raising the host limit, [Raising the open-files limit](#raising-the-open-files-limit-nofile).
 - **Image management** -- scheduled pruning of dangling images (weekly/monthly)
 - **Zero-config data dir sharing** -- `signalkDataMount` mounts the SignalK data directory into any managed container automatically, whether Signal K runs bare-metal, in Docker (named volume), or in Podman (named volume or bind mount). No host paths to configure.
 - **Zero-config config root sharing** -- `signalkConfigRootMount` mounts the entire SignalK installation config (`~/.signalk/`) — for backup, audit, or config-sync tools that need the whole tree, not the per-plugin subdirectory.
@@ -271,6 +271,58 @@ revert instructions: **[doc/cgroup-memory-on-raspberry-pi-os.md](doc/cgroup-memo
 The deployment doctor at `/api/doctor/deployment` also detects this
 scenario and surfaces the same kernel-cmdline fix in its `remediation`
 array, so you don't have to guess which layer is broken first.
+
+### Raising the open-files limit (`nofile`)
+
+Some managed containers ask for a high per-process open-files limit
+(`RLIMIT_NOFILE`). QuestDB is the common case — it recommends
+`nofile=1048576` and otherwise logs an open-files warning and risks WAL
+corruption under heavy ingestion.
+
+A containerized process inherits `nofile` from the **container runtime**,
+not from the host's `fs.file-max` sysctl — so raising `fs.file-max` does
+**not** help here. And under **rootless Podman** a container can never
+raise its hard limit above the limit of the user that runs the runtime.
+When a plugin requests more than the host allows, signalk-container clamps
+the request to the host ceiling so the container still starts (you'll see
+an advisory in the requesting plugin's config panel, e.g. QuestDB's
+"open-files limit capped by the host"). To grant the full value, raise the
+host limit.
+
+**Check the limit the container actually got:**
+
+```bash
+# podman, or `docker exec` on Docker
+podman exec <sk-container> cat /proc/1/limits | grep -i "open files"
+# Max open files   524288   524288   ← the per-process cap in effect
+```
+
+**Rootless Podman** runs under the systemd user session, so the lever is
+`user@.service`'s `LimitNOFILE` (which defaults to the system-manager's
+`DefaultLimitNOFILE`, often 524288). Editing `/etc/security/limits.conf`
+alone usually does **not** work for rootless containers — the user session
+manager, not a login shell, sets the limit. One-time, requires sudo:
+
+```bash
+sudo mkdir -p /etc/systemd/system/user@.service.d
+sudo tee /etc/systemd/system/user@.service.d/nofile.conf <<'EOF'
+[Service]
+LimitNOFILE=1048576
+EOF
+sudo systemctl daemon-reload
+# Log the SK-owning user out and back in (or reboot) so a fresh user@.service starts,
+# then restart the managed container so it re-reads the limit at startup.
+```
+
+**Rootful Podman / Docker** read the limit from the daemon's own service.
+For Docker, set `LimitNOFILE=1048576` in a `docker.service` drop-in
+(`/etc/systemd/system/docker.service.d/nofile.conf`), `daemon-reload`, and
+restart the daemon.
+
+The value cannot exceed the kernel's absolute per-process cap,
+`fs.nr_open` (`cat /proc/sys/fs/nr_open` — typically ~1 billion, so not a
+practical limit). Verify after re-login with the `<runtime> exec ... /proc/1/limits`
+check above.
 
 ### Watch out for systemd auto-restart (Quadlet / `Restart=always`)
 
