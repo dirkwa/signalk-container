@@ -297,11 +297,16 @@ podman exec <sk-container> cat /proc/1/limits | grep -i "open files"
 # Max open files   524288   524288   ← the per-process cap in effect
 ```
 
-**Rootless Podman** runs under the systemd user session, so the lever is
-`user@.service`'s `LimitNOFILE` (which defaults to the system-manager's
-`DefaultLimitNOFILE`, often 524288). Editing `/etc/security/limits.conf`
-alone usually does **not** work for rootless containers — the user session
-manager, not a login shell, sets the limit. One-time, requires sudo:
+**Rootless Podman** runs under the systemd user session, so the lever is the
+user manager's open-files limit, which a rootless container can never exceed.
+There are two places to set it; on stock Debian / Raspberry Pi OS you usually
+need the **second**. Editing `/etc/security/limits.conf` does **not** help —
+`pam_limits` only touches login shells, not the user manager that parents the
+podman socket. `LimitNOFILE` takes a `soft:hard` form; a single number sets
+soft = hard, and the container's hard ceiling is the user manager's _hard_
+limit.
+
+**1. Per-user-manager drop-in.** One-time, requires sudo:
 
 ```bash
 sudo mkdir -p /etc/systemd/system/user@.service.d
@@ -310,8 +315,30 @@ sudo tee /etc/systemd/system/user@.service.d/nofile.conf <<'EOF'
 LimitNOFILE=1048576
 EOF
 sudo systemctl daemon-reload
-# Log the SK-owning user out and back in (or reboot) so a fresh user@.service starts,
-# then restart the managed container so it re-reads the limit at startup.
+```
+
+The new limit only applies once the **user manager itself restarts** — and
+`daemon-reload` does **not** restart an already-running `user@<uid>.service`.
+On a headless boat the SK user has linger enabled (`loginctl enable-linger`),
+so logging out and back in does not tear it down. Force a fresh user manager,
+then restart the container:
+
+```bash
+sudo systemctl restart user@$(id -u <sk-user>).service   # or just reboot
+```
+
+**2. System-wide default (Raspberry Pi OS / openplotter, and the reliable
+fallback).** Stock Debian / Pi OS ships `/etc/systemd/system.conf` with a
+commented `#DefaultLimitNOFILE=1024:524288` — that 524288 _hard_ default is
+what bounds the per-unit request when step 1 doesn't take. Raise the system
+(PID 1) manager's default directly:
+
+```bash
+sudo sed -i 's/^#\?DefaultLimitNOFILE=.*/DefaultLimitNOFILE=1048576:1048576/' /etc/systemd/system.conf
+sudo systemctl daemon-reexec   # NOT daemon-reload — manager-global defaults
+                               # are only re-read when PID 1 re-executes itself
+sudo reboot                    # respawns the lingering user@.service + podman
+                               # under the raised default
 ```
 
 **Rootful Podman / Docker** read the limit from the daemon's own service.
@@ -319,10 +346,16 @@ For Docker, set `LimitNOFILE=1048576` in a `docker.service` drop-in
 (`/etc/systemd/system/docker.service.d/nofile.conf`), `daemon-reload`, and
 restart the daemon.
 
-The value cannot exceed the kernel's absolute per-process cap,
-`fs.nr_open` (`cat /proc/sys/fs/nr_open` — typically ~1 billion, so not a
-practical limit). Verify after re-login with the `<runtime> exec ... /proc/1/limits`
-check above.
+The value cannot exceed the kernel's absolute per-process cap, `fs.nr_open`
+(`cat /proc/sys/fs/nr_open` — typically ~1 billion, so not a practical limit).
+Verify (either path):
+
+```bash
+systemctl show user@$(id -u <sk-user>).service -p LimitNOFILE
+# LimitNOFILE=1048576   ← the user manager now allows it
+<runtime> exec <sk-container> cat /proc/1/limits | grep -i "open files"
+# Max open files   1048576   1048576   ← the container actually got it
+```
 
 ### Watch out for systemd auto-restart (Quadlet / `Restart=always`)
 
