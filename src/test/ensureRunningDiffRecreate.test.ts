@@ -118,6 +118,58 @@ describe("ensureRunning — config drift triggers automatic recreate", () => {
     );
   });
 
+  it("keeps a running container (no startup failure) when removal fails with a permission error", async () => {
+    // A rootless container can wedge unkillable in `Stopping` — podman's
+    // remove returns "operation not permitted". With drift present, the
+    // recreate must NOT propagate that into a startup failure; the existing
+    // running container is kept and the recreate is deferred.
+    const calls = new Map<string, unknown[]>();
+    const client = makeMockClient({
+      containers: {
+        "sk-questdb": {
+          // The real wedge shape observed live: Status=stopping, Running=false,
+          // but a live Pid — getContainerState ORs on the live PID and reports
+          // "running", which is exactly what the guard relies on. Drifted env
+          // so a recreate is attempted; never goes missing (remove fails).
+          inspect: () =>
+            Promise.resolve(
+              buildLiveInspect({
+                state: { status: "stopping", running: false, pid: 12345 },
+                image: "questdb/questdb:9.0.0",
+                env: ["FOO=1"],
+              }),
+            ),
+          remove: () => Promise.reject(new Error("operation not permitted")),
+        },
+      },
+      images: { "questdb/questdb:9.0.0": { Id: "sha256:abc" } },
+      calls,
+    });
+    const debugLines: string[] = [];
+    // Must resolve, not reject.
+    await ensureRunning(
+      docker,
+      "questdb",
+      requested,
+      (m) => debugLines.push(m),
+      undefined,
+      client,
+    );
+    assert.ok(
+      (calls.get("remove") ?? []).length > 0,
+      "remove should have been attempted",
+    );
+    assert.equal(
+      (calls.get("createContainer") ?? []).length,
+      0,
+      "must NOT create a new container when the old one can't be removed",
+    );
+    assert.ok(
+      debugLines.some((l) => l.includes("keeping it and")),
+      `expected the keep-and-defer debug line, got: ${debugLines.join(" | ")}`,
+    );
+  });
+
   it("does NOT recreate when no drift (early-return path preserved)", async () => {
     const calls = new Map<string, unknown[]>();
     const client = makeMockClient({

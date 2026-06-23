@@ -29,6 +29,7 @@ import {
   safeInspect,
   type ContainerClient,
 } from "./client.js";
+import type { ErrorKind } from "./errors.js";
 import { resourcePayloadForRun } from "./resources.js";
 import { classifyTag } from "./updates/tagClassifier.js";
 import { isOfflineError } from "./updates/offline.js";
@@ -1847,7 +1848,33 @@ export async function ensureRunning(
     debug(
       `Container ${fullName} config drift detected (${drifted.join(", ")}); recreating`,
     );
-    await removeContainer(runtime, name, client);
+    return recreateUnlessWedged(drifted.join(", "));
+  };
+
+  // Remove + recreate the container to apply a detected drift — but if removal
+  // fails because the container is wedged unkillable in `Stopping` (the
+  // rootless "sending SIGKILL … operation not permitted" condition) AND it is
+  // still running, keep it and defer the recreate to the next start rather than
+  // failing startup. Returns true if recreated, false if deferred. Shared by
+  // the config-drift and digest-drift paths so both survive the wedge.
+  const recreateUnlessWedged = async (driftDesc: string): Promise<boolean> => {
+    try {
+      await removeContainer(runtime, name, client);
+    } catch (err) {
+      if (
+        err instanceof ContainerRemovalError &&
+        err.kind === "permission" &&
+        (await getContainerState(runtime, name, client)) === "running"
+      ) {
+        debug(
+          `Container ${fullName} could not be removed to apply drift ` +
+            `(${driftDesc}) — it is still running; keeping it and deferring ` +
+            `the recreate. ${err.message}`,
+        );
+        return false;
+      }
+      throw err;
+    }
     await ensureRunning(
       runtime,
       name,
@@ -1907,19 +1934,9 @@ export async function ensureRunning(
     debug(
       `Container ${fullName} floating-tag digest drift detected (${liveId.slice(0, 19)}… → ${remoteId.slice(0, 19)}…); recreating`,
     );
-    await removeContainer(runtime, name, client);
-    await ensureRunning(
-      runtime,
-      name,
-      config,
-      debug,
-      options,
-      client,
-      prior,
-      true,
-      _pull,
+    return recreateUnlessWedged(
+      `digest ${liveId.slice(0, 19)}… → ${remoteId.slice(0, 19)}…`,
     );
-    return true;
   };
 
   switch (state) {
@@ -2141,9 +2158,32 @@ export async function removeContainer(
   );
   // 404 = already gone; that's success for a remove.
   if (!result.ok && result.error.kind !== "not-found") {
-    throw new Error(
-      `Failed to remove ${fullName}: ${result.error.userMessage}`,
+    // Surface the raw runtime error, not just the generic userMessage — a
+    // hidden raw (e.g. podman's "sending SIGKILL … operation not permitted"
+    // when a rootless container wedges in `Stopping`) is undiagnosable from
+    // the report. Carry the kind so callers can react to a permission/wedge
+    // failure (keep a healthy container running) vs hard-fail.
+    throw new ContainerRemovalError(
+      `Failed to remove ${fullName}: ${result.error.userMessage} (${result.error.raw})`,
+      result.error.kind,
     );
+  }
+}
+
+/**
+ * Thrown by `removeContainer` when the runtime refuses to remove a container.
+ * Carries the classified `kind` so callers can distinguish a `permission`
+ * failure (a rootless container wedged unkillable in `Stopping`) — where
+ * keeping a healthy existing container beats failing startup — from other
+ * removal failures that should propagate.
+ */
+export class ContainerRemovalError extends Error {
+  constructor(
+    message: string,
+    readonly kind: ErrorKind,
+  ) {
+    super(message);
+    this.name = "ContainerRemovalError";
   }
 }
 
