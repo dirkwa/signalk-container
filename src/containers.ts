@@ -2173,11 +2173,15 @@ function isOwnershipError(err: unknown): boolean {
  * check on top, where it has the data/config roots to compare against.
  */
 function assertWipablePath(hostPath: string): void {
-  const normalized = path.resolve(hostPath || "");
+  // Require an absolute path: a relative value would `path.resolve` to a
+  // cwd-relative dir and quietly pass the root check, risking an rm -rf of
+  // the wrong tree. The data/config sources signalk-container deals with are
+  // always absolute, so reject anything else outright.
   if (
     !hostPath ||
     hostPath.trim() === "" ||
-    normalized === path.parse(normalized).root
+    !path.isAbsolute(hostPath) ||
+    hostPath === path.parse(hostPath).root
   ) {
     throw new Error(
       `removeManagedData: refusing to delete unsafe path ${JSON.stringify(hostPath)}`,

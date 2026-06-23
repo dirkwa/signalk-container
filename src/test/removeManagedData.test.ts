@@ -80,6 +80,18 @@ describe("removeManagedData", () => {
         /refusing to delete unsafe path/,
       );
     });
+
+    it("refuses a relative path (would resolve against cwd)", async () => {
+      const client = makeMockClient({});
+      await assert.rejects(
+        removeManagedData(runtime, "x", "../data", failIfCalled, client),
+        /refusing to delete unsafe path/,
+      );
+      await assert.rejects(
+        removeManagedData(runtime, "x", "foo", failIfCalled, client),
+        /refusing to delete unsafe path/,
+      );
+    });
   });
 
   describe("container removal", () => {

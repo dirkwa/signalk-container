@@ -304,6 +304,21 @@ export default (app: App) => {
     }
   }
 
+  // Shared post-removal teardown for every path that removes a container
+  // (`remove`, `removeManagedData`): release reserved host ports, then tear
+  // down the log-stream broker so SSE clients get `event: end` and the
+  // underlying `logs -f` stops. Keeping this in one place stops the paths
+  // from drifting (e.g. a future broker-teardown change reaching only one).
+  function afterContainerRemoved(name: string): void {
+    evictContainerAddresses(name);
+    const broker = logStreamBrokers.get(name);
+    if (broker) {
+      broker.close("container-removed");
+      logStreamBrokers.delete(name);
+    }
+    perCallOnContainerLogUnsub.delete(name);
+  }
+
   const effectiveResources = new Map<string, ContainerResourceLimits>();
   // Pristine plugin-default resource limits, captured at the top of the
   // `api.ensureRunning` wrapper BEFORE the override merge. Lets the
@@ -1189,16 +1204,7 @@ export default (app: App) => {
     async remove(name: string) {
       if (!runtimeInfo) throw new Error("No container runtime available");
       await removeContainer(runtimeInfo, name);
-      evictContainerAddresses(name);
-      // Tear down the log-stream broker — notifies any SSE clients
-      // with `event: end` and stops the underlying `podman logs -f`.
-      // Plugin `onContainerLog` callbacks just stop receiving lines.
-      const broker = logStreamBrokers.get(name);
-      if (broker) {
-        broker.close("container-removed");
-        logStreamBrokers.delete(name);
-      }
-      perCallOnContainerLogUnsub.delete(name);
+      afterContainerRemoved(name);
     },
 
     async removeManagedData(
@@ -1233,13 +1239,7 @@ export default (app: App) => {
         };
       };
       await removeManagedData(runtime, name, hostPath, runWipeJob);
-      evictContainerAddresses(name);
-      const broker = logStreamBrokers.get(name);
-      if (broker) {
-        broker.close("container-removed");
-        logStreamBrokers.delete(name);
-      }
-      perCallOnContainerLogUnsub.delete(name);
+      afterContainerRemoved(name);
     },
 
     async getState(name: string): Promise<ContainerState> {
