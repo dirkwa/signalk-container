@@ -29,6 +29,7 @@ import {
   safeInspect,
   type ContainerClient,
 } from "./client.js";
+import type { ErrorKind } from "./errors.js";
 import { resourcePayloadForRun } from "./resources.js";
 import { classifyTag } from "./updates/tagClassifier.js";
 import { isOfflineError } from "./updates/offline.js";
@@ -1847,14 +1848,19 @@ export async function ensureRunning(
     debug(
       `Container ${fullName} config drift detected (${drifted.join(", ")}); recreating`,
     );
+    return recreateUnlessWedged(drifted.join(", "));
+  };
+
+  // Remove + recreate the container to apply a detected drift — but if removal
+  // fails because the container is wedged unkillable in `Stopping` (the
+  // rootless "sending SIGKILL … operation not permitted" condition) AND it is
+  // still running, keep it and defer the recreate to the next start rather than
+  // failing startup. Returns true if recreated, false if deferred. Shared by
+  // the config-drift and digest-drift paths so both survive the wedge.
+  const recreateUnlessWedged = async (driftDesc: string): Promise<boolean> => {
     try {
       await removeContainer(runtime, name, client);
     } catch (err) {
-      // A rootless container can wedge unkillable in `Stopping` (podman's
-      // "sending SIGKILL … operation not permitted"), so removal fails with a
-      // permission error. If the existing container is still running, keep it
-      // rather than failing startup over a drift we can't apply right now —
-      // the recreate retries on the next start once the wedge clears.
       if (
         err instanceof ContainerRemovalError &&
         err.kind === "permission" &&
@@ -1862,8 +1868,8 @@ export async function ensureRunning(
       ) {
         debug(
           `Container ${fullName} could not be removed to apply drift ` +
-            `(${drifted.join(", ")}) — it is still running; keeping it and ` +
-            `deferring the recreate. ${err.message}`,
+            `(${driftDesc}) — it is still running; keeping it and deferring ` +
+            `the recreate. ${err.message}`,
         );
         return false;
       }
@@ -1928,19 +1934,9 @@ export async function ensureRunning(
     debug(
       `Container ${fullName} floating-tag digest drift detected (${liveId.slice(0, 19)}… → ${remoteId.slice(0, 19)}…); recreating`,
     );
-    await removeContainer(runtime, name, client);
-    await ensureRunning(
-      runtime,
-      name,
-      config,
-      debug,
-      options,
-      client,
-      prior,
-      true,
-      _pull,
+    return recreateUnlessWedged(
+      `digest ${liveId.slice(0, 19)}… → ${remoteId.slice(0, 19)}…`,
     );
-    return true;
   };
 
   switch (state) {
@@ -2184,7 +2180,7 @@ export async function removeContainer(
 export class ContainerRemovalError extends Error {
   constructor(
     message: string,
-    readonly kind: string,
+    readonly kind: ErrorKind,
   ) {
     super(message);
     this.name = "ContainerRemovalError";
