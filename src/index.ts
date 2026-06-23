@@ -59,7 +59,9 @@ import {
   pullImage,
   qualifyImage as qualifyImageForRuntime,
   removeContainer,
+  removeManagedData,
   removeNetwork,
+  WIPE_MOUNT_PATH,
   findAvailablePort,
   releaseReservedPort,
   resolveHostPath,
@@ -300,6 +302,21 @@ export default (app: App) => {
     for (const key of registeredPorts) {
       if (key.startsWith(`${name}:`)) registeredPorts.delete(key);
     }
+  }
+
+  // Shared post-removal teardown for every path that removes a container
+  // (`remove`, `removeManagedData`): release reserved host ports, then tear
+  // down the log-stream broker so SSE clients get `event: end` and the
+  // underlying `logs -f` stops. Keeping this in one place stops the paths
+  // from drifting (e.g. a future broker-teardown change reaching only one).
+  function afterContainerRemoved(name: string): void {
+    evictContainerAddresses(name);
+    const broker = logStreamBrokers.get(name);
+    if (broker) {
+      broker.close("container-removed");
+      logStreamBrokers.delete(name);
+    }
+    perCallOnContainerLogUnsub.delete(name);
   }
 
   const effectiveResources = new Map<string, ContainerResourceLimits>();
@@ -1187,16 +1204,55 @@ export default (app: App) => {
     async remove(name: string) {
       if (!runtimeInfo) throw new Error("No container runtime available");
       await removeContainer(runtimeInfo, name);
-      evictContainerAddresses(name);
-      // Tear down the log-stream broker — notifies any SSE clients
-      // with `event: end` and stops the underlying `podman logs -f`.
-      // Plugin `onContainerLog` callbacks just stop receiving lines.
-      const broker = logStreamBrokers.get(name);
-      if (broker) {
-        broker.close("container-removed");
-        logStreamBrokers.delete(name);
-      }
-      perCallOnContainerLogUnsub.delete(name);
+      afterContainerRemoved(name);
+    },
+
+    async removeManagedData(
+      name: string,
+      hostPath: string,
+      options?: { ownerPluginId?: string },
+    ): Promise<void> {
+      if (!runtimeInfo) throw new Error("No container runtime available");
+      const runtime = runtimeInfo;
+      // The in-userns fallback runs the container's OWN image (already on
+      // disk) so cleanup never pulls. The wipe job mounts the data dir as an
+      // output (read-write, no `:ro`) and clears its contents — including
+      // dotfiles — from inside the userns as in-container root, which owns the
+      // subuid-owned files. `rm -rf` on the mount POINT itself would fail with
+      // "device or resource busy", so we delete the contents and let
+      // removeManagedData drop the now-empty host-owned parent host-side.
+      const runWipeJob = async (image: string, dir: string) => {
+        const result = await runJob(runtime, {
+          image,
+          // Override the image's ENTRYPOINT: the wipe reuses the managed
+          // container's own image (e.g. questdb, whose entrypoint launches the
+          // DB), so the shell command must run directly, not as args to that
+          // entrypoint.
+          entrypoint: ["sh", "-c"],
+          command: [
+            `rm -rf "${WIPE_MOUNT_PATH}"/* "${WIPE_MOUNT_PATH}"/.[!.]* "${WIPE_MOUNT_PATH}"/..?* 2>/dev/null; true`,
+          ],
+          outputs: { [WIPE_MOUNT_PATH]: dir },
+          label: "remove-managed-data",
+          ownerPluginId: options?.ownerPluginId,
+        });
+        return {
+          ok: result.status === "completed",
+          error: result.error,
+        };
+      };
+      // afterContainerRemoved is passed as onRemoved so it fires exactly when
+      // the container is removed — not on a pre-removal failure (unsafe path,
+      // a non-404 inspect error) where the container is still running, and
+      // still on a post-removal data-delete failure where it is already gone.
+      await removeManagedData(
+        runtime,
+        name,
+        hostPath,
+        runWipeJob,
+        undefined,
+        () => afterContainerRemoved(name),
+      );
     },
 
     async getState(name: string): Promise<ContainerState> {
