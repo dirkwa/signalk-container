@@ -133,6 +133,57 @@ describe("removeManagedData", () => {
       await removeManagedData(runtime, "ghost", dataDir, failIfCalled, client);
       assert.equal(existsSync(dataDir), false);
     });
+
+    it("fires onRemoved after the container is removed", async () => {
+      const dataDir = path.join(scratch, "data");
+      mkdirSync(dataDir);
+      const client = makeMockClient({
+        containers: {
+          "sk-questdb": { inspect: { Config: { Image: "questdb/questdb" } } },
+        },
+      });
+      let removedCalled = false;
+      await removeManagedData(
+        runtime,
+        "questdb",
+        dataDir,
+        failIfCalled,
+        client,
+        () => {
+          removedCalled = true;
+        },
+      );
+      assert.equal(removedCalled, true);
+    });
+
+    it("does NOT fire onRemoved when a pre-removal inspect error rethrows", async () => {
+      const dataDir = path.join(scratch, "data");
+      mkdirSync(dataDir);
+      // A non-404 inspect error rethrows through safeInspect before the
+      // container is removed — the container is still running, so teardown
+      // must not fire.
+      const client = makeMockClient({
+        containers: {
+          "sk-questdb": { inspect: new Error("daemon connection reset") },
+        },
+      });
+      let removedCalled = false;
+      await assert.rejects(
+        removeManagedData(
+          runtime,
+          "questdb",
+          dataDir,
+          failIfCalled,
+          client,
+          () => {
+            removedCalled = true;
+          },
+        ),
+      );
+      assert.equal(removedCalled, false);
+      // Data dir untouched — nothing was removed.
+      assert.equal(existsSync(dataDir), true);
+    });
   });
 
   describe("host-side delete path (docker / rootful)", () => {

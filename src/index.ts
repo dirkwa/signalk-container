@@ -60,7 +60,6 @@ import {
   qualifyImage as qualifyImageForRuntime,
   removeContainer,
   removeManagedData,
-  assertWipablePath,
   removeNetwork,
   WIPE_MOUNT_PATH,
   findAvailablePort,
@@ -1239,17 +1238,18 @@ export default (app: App) => {
           error: result.error,
         };
       };
-      // Validate the path up front, before anything is removed: an unsafe path
-      // must reject without tearing down the still-running container's state.
-      assertWipablePath(hostPath);
-      // Past validation, removeManagedData removes the container first and then
-      // deletes data — so if the data step throws, the container is already
-      // gone and its port/broker state must be torn down regardless.
-      try {
-        await removeManagedData(runtime, name, hostPath, runWipeJob);
-      } finally {
-        afterContainerRemoved(name);
-      }
+      // afterContainerRemoved is passed as onRemoved so it fires exactly when
+      // the container is removed — not on a pre-removal failure (unsafe path,
+      // a non-404 inspect error) where the container is still running, and
+      // still on a post-removal data-delete failure where it is already gone.
+      await removeManagedData(
+        runtime,
+        name,
+        hostPath,
+        runWipeJob,
+        undefined,
+        () => afterContainerRemoved(name),
+      );
     },
 
     async getState(name: string): Promise<ContainerState> {

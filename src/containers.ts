@@ -2233,6 +2233,11 @@ export async function removeManagedData(
   hostPath: string,
   runWipeJob: (image: string, hostPath: string) => Promise<WipeJobOutcome>,
   client: ContainerClient = getClient(),
+  // Invoked exactly once, the instant the container is removed (before the data
+  // delete). Lets the caller tear down container-scoped state (ports, log
+  // broker) only when removal actually happened — not on a pre-removal failure
+  // such as a non-404 inspect error, when the container is still running.
+  onRemoved: () => void = () => {},
 ): Promise<void> {
   assertWipablePath(hostPath);
 
@@ -2244,6 +2249,7 @@ export async function removeManagedData(
     typeof info?.Config?.Image === "string" ? info.Config.Image : null;
 
   await removeContainer(runtime, name, client);
+  onRemoved();
 
   // Docker / rootful Podman: bind-mount files are host-owned, plain rm works.
   try {
