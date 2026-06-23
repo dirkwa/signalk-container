@@ -127,11 +127,14 @@ describe("ensureRunning — config drift triggers automatic recreate", () => {
     const client = makeMockClient({
       containers: {
         "sk-questdb": {
-          // Always running + drifted (env differs); never goes missing because
-          // remove fails.
+          // The real wedge shape observed live: Status=stopping, Running=false,
+          // but a live Pid — getContainerState ORs on the live PID and reports
+          // "running", which is exactly what the guard relies on. Drifted env
+          // so a recreate is attempted; never goes missing (remove fails).
           inspect: () =>
             Promise.resolve(
               buildLiveInspect({
+                state: { status: "stopping", running: false, pid: 12345 },
                 image: "questdb/questdb:9.0.0",
                 env: ["FOO=1"],
               }),
