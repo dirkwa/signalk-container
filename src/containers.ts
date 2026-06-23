@@ -2176,12 +2176,14 @@ function assertWipablePath(hostPath: string): void {
   // Require an absolute path: a relative value would `path.resolve` to a
   // cwd-relative dir and quietly pass the root check, risking an rm -rf of
   // the wrong tree. The data/config sources signalk-container deals with are
-  // always absolute, so reject anything else outright.
+  // always absolute, so reject anything else outright. Normalize first so a
+  // root-equivalent like `/..` collapses to the root and is rejected too.
+  const normalized = path.normalize(hostPath || "");
   if (
     !hostPath ||
     hostPath.trim() === "" ||
     !path.isAbsolute(hostPath) ||
-    hostPath === path.parse(hostPath).root
+    normalized === path.parse(normalized).root
   ) {
     throw new Error(
       `removeManagedData: refusing to delete unsafe path ${JSON.stringify(hostPath)}`,

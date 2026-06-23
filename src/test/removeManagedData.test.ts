@@ -154,81 +154,99 @@ describe("removeManagedData", () => {
     });
   });
 
-  describe("EACCES fallback (rootless-Podman subuid)", () => {
-    it("invokes the wipe job, then drops the now-empty parent", async () => {
-      // A read-only parent forces fs.rm of the child to throw EACCES,
-      // standing in for the subuid-ownership case (host user can't delete).
-      const dataDir = path.join(scratch, "data");
-      mkdirSync(dataDir);
-      writeFileSync(path.join(dataDir, "subuid-owned"), "x");
-      chmodSync(scratch, 0o555);
+  // These tests force EACCES via a read-only parent dir (`chmod 0o555`), which
+  // is POSIX-only — on Windows chmod doesn't make a dir undeletable, so fs.rm
+  // succeeds and the fallback never triggers. The rootless-Podman subuid
+  // scenario they cover is Linux-only anyway, so skip them on Windows.
+  describe(
+    "EACCES fallback (rootless-Podman subuid)",
+    { skip: process.platform === "win32" },
+    () => {
+      it("invokes the wipe job, then drops the now-empty parent", async () => {
+        // A read-only parent forces fs.rm of the child to throw EACCES,
+        // standing in for the subuid-ownership case (host user can't delete).
+        const dataDir = path.join(scratch, "data");
+        mkdirSync(dataDir);
+        writeFileSync(path.join(dataDir, "subuid-owned"), "x");
+        chmodSync(scratch, 0o555);
 
-      let wipeArgs: { image: string; dir: string } | undefined;
-      const runWipeJob = async (
-        image: string,
-        dir: string,
-      ): Promise<WipeJobOutcome> => {
-        wipeArgs = { image, dir };
-        // Simulate the in-userns wipe: it can delete the subuid-owned files
-        // and (re)gain write on the parent so the host-side retry succeeds.
-        chmodSync(scratch, 0o755);
-        rmSync(path.join(dataDir, "subuid-owned"), { force: true });
-        return { ok: true };
-      };
+        let wipeArgs: { image: string; dir: string } | undefined;
+        const runWipeJob = async (
+          image: string,
+          dir: string,
+        ): Promise<WipeJobOutcome> => {
+          wipeArgs = { image, dir };
+          // Simulate the in-userns wipe: it can delete the subuid-owned files
+          // and (re)gain write on the parent so the host-side retry succeeds.
+          chmodSync(scratch, 0o755);
+          rmSync(path.join(dataDir, "subuid-owned"), { force: true });
+          return { ok: true };
+        };
 
-      const client = makeMockClient({
-        containers: {
-          "sk-questdb": { inspect: { Config: { Image: "questdb/questdb:8" } } },
-        },
+        const client = makeMockClient({
+          containers: {
+            "sk-questdb": {
+              inspect: { Config: { Image: "questdb/questdb:8" } },
+            },
+          },
+        });
+
+        await removeManagedData(
+          runtime,
+          "questdb",
+          dataDir,
+          runWipeJob,
+          client,
+        );
+
+        assert.deepEqual(wipeArgs, {
+          image: "questdb/questdb:8",
+          dir: dataDir,
+        });
+        assert.equal(existsSync(dataDir), false);
       });
 
-      await removeManagedData(runtime, "questdb", dataDir, runWipeJob, client);
+      it("throws a descriptive error when the wipe job fails", async () => {
+        const dataDir = path.join(scratch, "data");
+        mkdirSync(dataDir);
+        writeFileSync(path.join(dataDir, "f"), "x");
+        chmodSync(scratch, 0o555);
 
-      assert.deepEqual(wipeArgs, {
-        image: "questdb/questdb:8",
-        dir: dataDir,
+        const runWipeJob = async (): Promise<WipeJobOutcome> => ({
+          ok: false,
+          error: "Container exited with code 1",
+        });
+
+        const client = makeMockClient({
+          containers: {
+            "sk-questdb": {
+              inspect: { Config: { Image: "questdb/questdb:8" } },
+            },
+          },
+        });
+
+        await assert.rejects(
+          removeManagedData(runtime, "questdb", dataDir, runWipeJob, client),
+          /in-userns wipe of .* failed: Container exited with code 1/,
+        );
       });
-      assert.equal(existsSync(dataDir), false);
-    });
 
-    it("throws a descriptive error when the wipe job fails", async () => {
-      const dataDir = path.join(scratch, "data");
-      mkdirSync(dataDir);
-      writeFileSync(path.join(dataDir, "f"), "x");
-      chmodSync(scratch, 0o555);
+      it("throws when fallback is needed but the image is unknown", async () => {
+        const dataDir = path.join(scratch, "data");
+        mkdirSync(dataDir);
+        writeFileSync(path.join(dataDir, "f"), "x");
+        chmodSync(scratch, 0o555);
 
-      const runWipeJob = async (): Promise<WipeJobOutcome> => ({
-        ok: false,
-        error: "Container exited with code 1",
+        // No `containers` entry → inspect 404s → no image captured.
+        const client = makeMockClient({});
+
+        await assert.rejects(
+          removeManagedData(runtime, "ghost", dataDir, failIfCalled, client),
+          /container's image is unknown/,
+        );
       });
-
-      const client = makeMockClient({
-        containers: {
-          "sk-questdb": { inspect: { Config: { Image: "questdb/questdb:8" } } },
-        },
-      });
-
-      await assert.rejects(
-        removeManagedData(runtime, "questdb", dataDir, runWipeJob, client),
-        /in-userns wipe of .* failed: Container exited with code 1/,
-      );
-    });
-
-    it("throws when fallback is needed but the image is unknown", async () => {
-      const dataDir = path.join(scratch, "data");
-      mkdirSync(dataDir);
-      writeFileSync(path.join(dataDir, "f"), "x");
-      chmodSync(scratch, 0o555);
-
-      // No `containers` entry → inspect 404s → no image captured.
-      const client = makeMockClient({});
-
-      await assert.rejects(
-        removeManagedData(runtime, "ghost", dataDir, failIfCalled, client),
-        /container's image is unknown/,
-      );
-    });
-  });
+    },
+  );
 
   describe("wipe mount path", () => {
     it("exposes the helper mount path constant", () => {

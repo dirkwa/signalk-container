@@ -1238,8 +1238,14 @@ export default (app: App) => {
           error: result.error,
         };
       };
-      await removeManagedData(runtime, name, hostPath, runWipeJob);
-      afterContainerRemoved(name);
+      // removeManagedData removes the container first, then deletes data — if
+      // the data step throws, the container is already gone, so tear down its
+      // port/broker state regardless of how the data delete went.
+      try {
+        await removeManagedData(runtime, name, hostPath, runWipeJob);
+      } finally {
+        afterContainerRemoved(name);
+      }
     },
 
     async getState(name: string): Promise<ContainerState> {
