@@ -1847,7 +1847,28 @@ export async function ensureRunning(
     debug(
       `Container ${fullName} config drift detected (${drifted.join(", ")}); recreating`,
     );
-    await removeContainer(runtime, name, client);
+    try {
+      await removeContainer(runtime, name, client);
+    } catch (err) {
+      // A rootless container can wedge unkillable in `Stopping` (podman's
+      // "sending SIGKILL … operation not permitted"), so removal fails with a
+      // permission error. If the existing container is still running, keep it
+      // rather than failing startup over a drift we can't apply right now —
+      // the recreate retries on the next start once the wedge clears.
+      if (
+        err instanceof ContainerRemovalError &&
+        err.kind === "permission" &&
+        (await getContainerState(runtime, name, client)) === "running"
+      ) {
+        debug(
+          `Container ${fullName} could not be removed to apply drift ` +
+            `(${drifted.join(", ")}) — it is still running; keeping it and ` +
+            `deferring the recreate. ${err.message}`,
+        );
+        return false;
+      }
+      throw err;
+    }
     await ensureRunning(
       runtime,
       name,
@@ -2141,9 +2162,32 @@ export async function removeContainer(
   );
   // 404 = already gone; that's success for a remove.
   if (!result.ok && result.error.kind !== "not-found") {
-    throw new Error(
-      `Failed to remove ${fullName}: ${result.error.userMessage}`,
+    // Surface the raw runtime error, not just the generic userMessage — a
+    // hidden raw (e.g. podman's "sending SIGKILL … operation not permitted"
+    // when a rootless container wedges in `Stopping`) is undiagnosable from
+    // the report. Carry the kind so callers can react to a permission/wedge
+    // failure (keep a healthy container running) vs hard-fail.
+    throw new ContainerRemovalError(
+      `Failed to remove ${fullName}: ${result.error.userMessage} (${result.error.raw})`,
+      result.error.kind,
     );
+  }
+}
+
+/**
+ * Thrown by `removeContainer` when the runtime refuses to remove a container.
+ * Carries the classified `kind` so callers can distinguish a `permission`
+ * failure (a rootless container wedged unkillable in `Stopping`) — where
+ * keeping a healthy existing container beats failing startup — from other
+ * removal failures that should propagate.
+ */
+export class ContainerRemovalError extends Error {
+  constructor(
+    message: string,
+    readonly kind: string,
+  ) {
+    super(message);
+    this.name = "ContainerRemovalError";
   }
 }
 
