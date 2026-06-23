@@ -967,14 +967,16 @@ export interface ContainerManagerApi {
    *
    * Use this for plugin teardown / uninstall cleanup. A plain
    * `fs.rmSync(dataDir)` from the Signal K process (host uid, e.g. 1000)
-   * fails with EACCES when the managed container ran under rootless Podman
-   * with signalk-container's default `--userns=keep-id:uid=0,gid=0` mapping.
-   * That EXPLICIT `uid=0,gid=0` form (distinct from bare `keep-id`, which
-   * would map in-image root to the host user) maps the container's writes to
-   * a host SUBUID (e.g. 110000) instead — so files the container creates are
-   * owned by a subordinate uid the host user cannot delete. Verified live on
-   * rootless Podman 5.4.2. Stopping the container first does not help — it is
-   * file ownership, not a held mount.
+   * fails with EACCES when a rootless-Podman container wrote its data as a
+   * NON-root in-container uid. Under the userns mapping, a non-zero
+   * in-container uid lands in the host's subordinate-uid range (e.g. 110000),
+   * which the host user cannot delete. This is common: many images start as
+   * root but drop to a service user before writing — QuestDB, for instance,
+   * runs as root only to `chown` then `gosu`-drops to its own uid, so its
+   * data files are subuid-owned. (Files written as in-container root map back
+   * to the host user and would delete fine; it's the dropped-privilege writes
+   * that get trapped.) Verified live on rootless Podman 5.4.2. Stopping the
+   * container first does not help — it is file ownership, not a held mount.
    *
    * What it does:
    *   1. Stops + removes the container `name` (idempotent — a

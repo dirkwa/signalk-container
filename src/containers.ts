@@ -2172,7 +2172,7 @@ function isOwnershipError(err: unknown): boolean {
  * caller layers any deployment-specific "must be under the Signal K tree"
  * check on top, where it has the data/config roots to compare against.
  */
-function assertWipablePath(hostPath: string): void {
+export function assertWipablePath(hostPath: string): void {
   // Require an absolute path: a relative value would `path.resolve` to a
   // cwd-relative dir and quietly pass the root check, risking an rm -rf of
   // the wrong tree. The data/config sources signalk-container deals with are
