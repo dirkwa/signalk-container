@@ -59,7 +59,9 @@ import {
   pullImage,
   qualifyImage as qualifyImageForRuntime,
   removeContainer,
+  removeManagedData,
   removeNetwork,
+  WIPE_MOUNT_PATH,
   findAvailablePort,
   releaseReservedPort,
   resolveHostPath,
@@ -1191,6 +1193,47 @@ export default (app: App) => {
       // Tear down the log-stream broker — notifies any SSE clients
       // with `event: end` and stops the underlying `podman logs -f`.
       // Plugin `onContainerLog` callbacks just stop receiving lines.
+      const broker = logStreamBrokers.get(name);
+      if (broker) {
+        broker.close("container-removed");
+        logStreamBrokers.delete(name);
+      }
+      perCallOnContainerLogUnsub.delete(name);
+    },
+
+    async removeManagedData(
+      name: string,
+      hostPath: string,
+      options?: { ownerPluginId?: string },
+    ): Promise<void> {
+      if (!runtimeInfo) throw new Error("No container runtime available");
+      const runtime = runtimeInfo;
+      // The in-userns fallback runs the container's OWN image (already on
+      // disk) so cleanup never pulls. The wipe job mounts the data dir as an
+      // output (read-write, no `:ro`) and clears its contents — including
+      // dotfiles — from inside the userns as in-container root, which owns the
+      // subuid-owned files. `rm -rf` on the mount POINT itself would fail with
+      // "device or resource busy", so we delete the contents and let
+      // removeManagedData drop the now-empty host-owned parent host-side.
+      const runWipeJob = async (image: string, dir: string) => {
+        const result = await runJob(runtime, {
+          image,
+          command: [
+            "sh",
+            "-c",
+            `rm -rf "${WIPE_MOUNT_PATH}"/* "${WIPE_MOUNT_PATH}"/.[!.]* "${WIPE_MOUNT_PATH}"/..?* 2>/dev/null; true`,
+          ],
+          outputs: { [WIPE_MOUNT_PATH]: dir },
+          label: "remove-managed-data",
+          ownerPluginId: options?.ownerPluginId,
+        });
+        return {
+          ok: result.status === "completed",
+          error: result.error,
+        };
+      };
+      await removeManagedData(runtime, name, hostPath, runWipeJob);
+      evictContainerAddresses(name);
       const broker = logStreamBrokers.get(name);
       if (broker) {
         broker.close("container-removed");

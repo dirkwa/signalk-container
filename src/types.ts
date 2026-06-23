@@ -961,6 +961,60 @@ export interface ContainerManagerApi {
   start(name: string): Promise<void>;
   stop(name: string): Promise<void>;
   remove(name: string): Promise<void>;
+  /**
+   * Remove a managed container AND delete its bind-mount data directory,
+   * correctly handling the rootless-Podman ownership trap.
+   *
+   * Use this for plugin teardown / uninstall cleanup. A plain
+   * `fs.rmSync(dataDir)` from the Signal K process (host uid, e.g. 1000)
+   * fails with EACCES when the managed container ran under rootless Podman
+   * with the default `--userns=keep-id:uid=0,gid=0` mapping: the
+   * container's in-image root writes its files owned by a host SUBUID
+   * (e.g. 110000), which the host user cannot delete. Stopping the
+   * container first does not help — it is file ownership, not a held mount.
+   *
+   * What it does:
+   *   1. Stops + removes the container `name` (idempotent — a
+   *      missing container is not an error).
+   *   2. Tries a direct host-side recursive delete of `hostPath`. On
+   *      docker / rootful Podman the files are host-owned and this is all
+   *      that runs.
+   *   3. On EACCES/EPERM (the rootless-Podman subuid case) it runs a
+   *      one-shot helper container under the default userns mapping (so
+   *      it runs as in-container root, which owns the subuid files),
+   *      bind-mounts `hostPath`, and `rm -rf`s its contents from inside
+   *      the userns. The now-empty host-owned parent dir is then removed
+   *      host-side.
+   *
+   * Helper-image choice: the helper reuses the **container's own image**,
+   * captured by inspecting it before removal. That image is already on
+   * disk (the container was just running it), so cleanup never triggers a
+   * registry pull — important on an offline boat. The one case the
+   * in-userns fallback can't cover is a container that was already gone
+   * AND a dir the host user can't delete: there is then no known image to
+   * run, so the call throws asking the operator to delete the dir manually
+   * rather than silently leaving data behind.
+   *
+   * Path safety: refuses to operate on an empty path or a filesystem root.
+   * Pass an absolute path under the Signal K data tree
+   * (`app.getDataDirPath()` or below).
+   *
+   * Errors: never reports success while data remains. If the in-userns
+   * wipe also fails, the rejection carries the runtime reason so the
+   * caller can surface it.
+   *
+   * Available in signalk-container 1.18.0+.
+   *
+   * @param name      Managed container name (without the `sk-` prefix).
+   * @param hostPath  Absolute host path of the bind-mount data to delete.
+   * @param options   `ownerPluginId` labels the cleanup helper job so a
+   *                  crash mid-wipe can be reaped by `cleanupOrphanedJobs`.
+   */
+  removeManagedData(
+    name: string,
+    hostPath: string,
+    options?: { ownerPluginId?: string },
+  ): Promise<void>;
   getState(name: string): Promise<ContainerState>;
   /**
    * Run a one-shot helper container to completion, streaming its output

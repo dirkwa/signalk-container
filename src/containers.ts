@@ -1,7 +1,9 @@
 import * as net from "node:net";
+import * as path from "node:path";
 import { PassThrough } from "node:stream";
 import type Docker from "dockerode";
 import { existsSync, readFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import {
   ContainerConfig,
   ContainerInfo,
@@ -2144,6 +2146,144 @@ export async function removeContainer(
     );
   }
 }
+
+/**
+ * Container path the wipe helper mounts the data directory at. Arbitrary —
+ * the only requirement is that it not collide with image-baked paths the
+ * helper's `rm` might depend on; a dedicated top-level dir avoids that.
+ */
+const WIPE_MOUNT = "/sk-wipe-target";
+
+/** Posix error codes that signal "the host user can't delete this" and so
+ * warrant the in-userns fallback rather than a hard failure. */
+const OWNERSHIP_ERROR_CODES = new Set(["EACCES", "EPERM"]);
+
+/** True for the EACCES/EPERM ownership errors that the in-userns wipe can fix.
+ * Anything else (ENOENT, ENOTEMPTY from a live mount, …) is not an ownership
+ * problem and should surface unchanged. */
+function isOwnershipError(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException | undefined)?.code;
+  return code !== undefined && OWNERSHIP_ERROR_CODES.has(code);
+}
+
+/**
+ * Reject host paths that must never be recursively wiped. The guard is the
+ * cheap, always-correct floor (empty / `/` / a non-absolute path); the
+ * caller layers any deployment-specific "must be under the Signal K tree"
+ * check on top, where it has the data/config roots to compare against.
+ */
+function assertWipablePath(hostPath: string): void {
+  const normalized = path.resolve(hostPath || "");
+  if (
+    !hostPath ||
+    hostPath.trim() === "" ||
+    normalized === path.parse(normalized).root
+  ) {
+    throw new Error(
+      `removeManagedData: refusing to delete unsafe path ${JSON.stringify(hostPath)}`,
+    );
+  }
+}
+
+/**
+ * Result of one wipe-job run, mirroring the bits of `ContainerJobResult`
+ * that `removeManagedData` reasons about. Keeps `containers.ts` free of a
+ * `jobs.ts` import (jobs.ts already imports from here — the cycle would be
+ * real) while staying fully testable via an injected runner.
+ */
+export interface WipeJobOutcome {
+  ok: boolean;
+  error?: string;
+}
+
+/**
+ * Delete a managed container's bind-mount data, working around the
+ * rootless-Podman subuid-ownership trap.
+ *
+ * Sequence:
+ *   1. Remove the container `name` (idempotent — a missing container is fine)
+ *      so nothing holds the mount.
+ *   2. Try a direct host-side `fs.rm(hostPath, {recursive, force})`. On
+ *      docker / rootful Podman the files are host-owned and this succeeds.
+ *   3. On EACCES/EPERM (the rootless-Podman case — files are owned by a
+ *      subuid the host user can't touch) run `runWipeJob`: a one-shot helper
+ *      that bind-mounts `hostPath` and `rm -rf`s its CONTENTS from inside the
+ *      userns as in-container root, then retry the host-side delete to drop
+ *      the now-empty host-owned parent dir.
+ *
+ * `runWipeJob(image, hostPath)` is injected so the runtime logic stays out
+ * of the `jobs.ts` import cycle and so unit tests can drive every branch
+ * without a real runtime. The wrapper in `index.ts` wires it to `runJob`
+ * with the container's own (already-present) image.
+ *
+ * `wipeImage` is the container's own image, captured from `inspect` BEFORE
+ * removal so the helper reuses bits already on disk — no registry pull on a
+ * possibly-offline boat. `null` when the container was already gone; the
+ * fallback then can't run, so a still-undeletable dir surfaces as an error.
+ */
+export async function removeManagedData(
+  runtime: ContainerRuntimeInfo,
+  name: string,
+  hostPath: string,
+  runWipeJob: (image: string, hostPath: string) => Promise<WipeJobOutcome>,
+  client: ContainerClient = getClient(),
+): Promise<void> {
+  assertWipablePath(hostPath);
+
+  // Capture the image before removal so the in-userns fallback can reuse it
+  // (guaranteed present locally — the container was just running it).
+  const fullName = prefixedName(name);
+  const info = await safeInspect(() => client.getContainer(fullName).inspect());
+  const wipeImage =
+    typeof info?.Config?.Image === "string" ? info.Config.Image : null;
+
+  await removeContainer(runtime, name, client);
+
+  // Docker / rootful Podman: bind-mount files are host-owned, plain rm works.
+  try {
+    await rm(hostPath, { recursive: true, force: true });
+    return;
+  } catch (err) {
+    if (!isOwnershipError(err)) throw err;
+  }
+
+  // Rootless-Podman subuid case: the host user can't delete subuid-owned
+  // files. Wipe the dir contents from inside the userns (as in-container
+  // root, which owns them) using the container's own image, then retry the
+  // host-side delete to drop the now-empty host-owned parent.
+  if (!wipeImage) {
+    throw new Error(
+      `removeManagedData: ${hostPath} is not deletable by the Signal K user ` +
+        `and the container's image is unknown (it was already removed), so the ` +
+        `in-userns cleanup helper cannot run. Delete ${hostPath} manually.`,
+    );
+  }
+
+  const wipe = await runWipeJob(wipeImage, hostPath);
+  if (!wipe.ok) {
+    throw new Error(
+      `removeManagedData: in-userns wipe of ${hostPath} failed: ${wipe.error ?? "unknown error"}`,
+    );
+  }
+
+  try {
+    await rm(hostPath, { recursive: true, force: true });
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code ?? "unknown";
+    throw new Error(
+      `removeManagedData: ${hostPath} still not removable after in-userns wipe (${code}). ` +
+        `Delete it manually.`,
+      { cause: err },
+    );
+  }
+}
+
+/**
+ * Container path the wipe helper mounts the data directory at — re-exported
+ * for the wrapper that builds the `runJob` config and for tests asserting the
+ * mount/command shape.
+ */
+export const WIPE_MOUNT_PATH = WIPE_MOUNT;
 
 export async function listContainers(
   runtime: ContainerRuntimeInfo,

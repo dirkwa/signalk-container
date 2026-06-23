@@ -498,6 +498,27 @@ Stops a running container. Idempotent.
 
 Stops and removes a container. Idempotent.
 
+### `removeManagedData(name, hostPath, options?): Promise<void>`
+
+Removes a managed container **and** deletes its bind-mount data directory. Use this for plugin teardown / uninstall data cleanup — not the plain `fs.rmSync(dataDir)` you might reach for first.
+
+Why it exists: on **rootless Podman** with the default `--userns=keep-id:uid=0,gid=0` mapping, a container process that writes as a non-root in-container UID (QuestDB is the canonical case) creates bind-mount files owned by a host **subuid** (e.g. `110000`), not by the Signal K user. A host-side `fs.rmSync` from the Signal K process (uid 1000) then fails with `EACCES`, and the data directory survives the uninstall. Stopping the container first does not help — it is file ownership, not a held mount.
+
+What it does:
+
+1. Stops + removes the container `name` (idempotent — a missing container is fine).
+2. Tries a direct host-side recursive delete of `hostPath`. On docker / rootful Podman the files are host-owned and this is all that runs.
+3. On `EACCES`/`EPERM` it runs a one-shot helper under the default userns mapping (so it runs as in-container root, which owns the subuid files), bind-mounts `hostPath`, and `rm -rf`s its contents from inside the userns. The now-empty host-owned parent dir is then removed host-side.
+
+The helper reuses the **container's own image** (captured by inspecting it before removal), so cleanup never triggers a registry pull — important on an offline boat. Pass `options.ownerPluginId` so a crash mid-wipe can be reaped by [`cleanupOrphanedJobs`](#cleanuporphanedjobsfilter-promisecleanuporphansresult). The call refuses to operate on an empty path or a filesystem root; pass an absolute path under your plugin's data dir. It never reports success while data remains — if the in-userns wipe also fails, it rejects with the runtime reason. The one case it cannot cover is a container that was already gone _and_ a directory the host user can't delete (no known image to run the helper); it then throws asking the operator to delete the directory manually. Available in signalk-container 1.18.0+.
+
+```ts
+// plugin uninstall / "delete all data" path
+await containers.removeManagedData("questdb", questdbDataDir, {
+  ownerPluginId: "signalk-questdb",
+});
+```
+
 ### `getState(name): Promise<ContainerState>`
 
 Returns `'running'`, `'stopped'`, `'missing'`, or `'no-runtime'`.
