@@ -134,35 +134,45 @@ describe("removeManagedData", () => {
       assert.equal(existsSync(dataDir), false);
     });
 
-    it("fires onRemoved after the container is removed", async () => {
+    it("fires onRemoved AFTER the container is removed", async () => {
       const dataDir = path.join(scratch, "data");
       mkdirSync(dataDir);
+      const events: string[] = [];
+      const calls = new Map<string, unknown[]>();
       const client = makeMockClient({
+        calls,
         containers: {
           "sk-questdb": { inspect: { Config: { Image: "questdb/questdb" } } },
         },
       });
-      let removedCalled = false;
       await removeManagedData(
         runtime,
         "questdb",
         dataDir,
         failIfCalled,
         client,
-        () => {
-          removedCalled = true;
-        },
+        () => events.push("onRemoved"),
       );
-      assert.equal(removedCalled, true);
+      // The mock records each remove() in `calls`; assert remove happened and
+      // onRemoved fired after it (not before, not without removal).
+      assert.ok(
+        (calls.get("remove") ?? []).some(
+          (r) => (r as { id?: string }).id === "sk-questdb",
+        ),
+        "expected sk-questdb to be removed",
+      );
+      assert.deepEqual(events, ["onRemoved"]);
     });
 
-    it("does NOT fire onRemoved when a pre-removal inspect error rethrows", async () => {
+    it("does NOT fire onRemoved or reach remove() when a pre-removal inspect error rethrows", async () => {
       const dataDir = path.join(scratch, "data");
       mkdirSync(dataDir);
       // A non-404 inspect error rethrows through safeInspect before the
-      // container is removed — the container is still running, so teardown
-      // must not fire.
+      // container is removed — the container is still running, so neither
+      // remove() nor the teardown callback must run.
+      const calls = new Map<string, unknown[]>();
       const client = makeMockClient({
+        calls,
         containers: {
           "sk-questdb": { inspect: new Error("daemon connection reset") },
         },
@@ -181,6 +191,7 @@ describe("removeManagedData", () => {
         ),
       );
       assert.equal(removedCalled, false);
+      assert.equal(calls.get("remove"), undefined, "remove() must not run");
       // Data dir untouched — nothing was removed.
       assert.equal(existsSync(dataDir), true);
     });

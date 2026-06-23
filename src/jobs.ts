@@ -166,6 +166,11 @@ export async function runJob(
       Labels: labels,
       HostConfig: hostConfig,
     };
+    // Override the image's baked ENTRYPOINT when the caller needs `command` to
+    // run directly (not as arguments to the image's entrypoint). Required when
+    // reusing an application image as a generic helper — e.g. wiping data with
+    // a shell command in an image whose entrypoint launches the app.
+    if (config.entrypoint) createOpts.Entrypoint = [...config.entrypoint];
     if (env.length > 0) createOpts.Env = env;
     // UID/GID alignment so files written into bind-mounted output dirs land
     // owned by the host caller. See `userMappingFlags` for the per-runtime

@@ -457,6 +457,13 @@ export interface ContainerInfo {
 export interface ContainerJobConfig {
   image: string;
   command: string[];
+  /**
+   * Override the image's baked `ENTRYPOINT`. When omitted, `command` runs as
+   * arguments to whatever entrypoint the image declares. Set this when reusing
+   * an application image as a generic helper — e.g. `["sh", "-c"]` so a shell
+   * `command` runs directly instead of being passed to the app's entrypoint.
+   */
+  entrypoint?: string[];
   inputs?: Record<string, string>;
   outputs?: Record<string, string>;
   env?: Record<string, string>;

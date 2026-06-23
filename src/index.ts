@@ -1224,9 +1224,12 @@ export default (app: App) => {
       const runWipeJob = async (image: string, dir: string) => {
         const result = await runJob(runtime, {
           image,
+          // Override the image's ENTRYPOINT: the wipe reuses the managed
+          // container's own image (e.g. questdb, whose entrypoint launches the
+          // DB), so the shell command must run directly, not as args to that
+          // entrypoint.
+          entrypoint: ["sh", "-c"],
           command: [
-            "sh",
-            "-c",
             `rm -rf "${WIPE_MOUNT_PATH}"/* "${WIPE_MOUNT_PATH}"/.[!.]* "${WIPE_MOUNT_PATH}"/..?* 2>/dev/null; true`,
           ],
           outputs: { [WIPE_MOUNT_PATH]: dir },
