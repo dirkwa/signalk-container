@@ -35,18 +35,24 @@ const UNRELATED_TAG = "1.36";
 const CONTAINER_NAME = "reap-e2e-test";
 
 /**
- * Local image IDs whose tags match `<repo>:<tag>` under any registry
- * spelling. `repo` is a bare name like `alpine`; podman stores it as
- * `docker.io/library/alpine:<tag>` and docker as `alpine:<tag>`, so we
- * match on a tag that ends with `/<repo>:<tag>` or equals `<repo>:<tag>`.
+ * Local image IDs tagged for exactly `<repo>:<tag>` under whatever
+ * registry spelling this runtime uses. `repo` is a bare name like
+ * `alpine`; we resolve it through the same `qualifiedRepoVariants` the
+ * reaper uses (podman → `docker.io/library/alpine`, docker → `alpine`)
+ * and match the full tag exactly, so an unrelated namespaced image like
+ * `ghcr.io/acme/alpine:<tag>` is never counted as the managed one.
  */
-async function localIdsFor(repo: string, tag: string): Promise<string[]> {
-  const want = `${repo}:${tag}`;
+async function localIdsFor(
+  runtime: ContainerRuntimeInfo,
+  repo: string,
+  tag: string,
+): Promise<string[]> {
+  const wants = new Set(
+    qualifiedRepoVariants(repo, runtime).map((variant) => `${variant}:${tag}`),
+  );
   const images = await getClient().listImages();
   return images
-    .filter((i) =>
-      (i.RepoTags ?? []).some((rt) => rt === want || rt.endsWith(`/${want}`)),
-    )
+    .filter((i) => (i.RepoTags ?? []).some((rt) => wants.has(rt)))
     .map((i) => i.Id);
 }
 
@@ -110,9 +116,13 @@ describe("reapSupersededImages — real runtime", () => {
     assert.ok(runningImageId, "should resolve the running image id");
 
     // Sanity: both alpine versions and the unrelated image are present.
-    const oldBefore = await localIdsFor(REPO, OLD_TAG);
-    const newBefore = await localIdsFor(REPO, NEW_TAG);
-    const unrelatedBefore = await localIdsFor(UNRELATED, UNRELATED_TAG);
+    const oldBefore = await localIdsFor(runtime, REPO, OLD_TAG);
+    const newBefore = await localIdsFor(runtime, REPO, NEW_TAG);
+    const unrelatedBefore = await localIdsFor(
+      runtime,
+      UNRELATED,
+      UNRELATED_TAG,
+    );
     assert.equal(oldBefore.length, 1, "alpine:3.18 should be present pre-reap");
     assert.equal(newBefore.length, 1, "alpine:3.19 should be present pre-reap");
     assert.equal(
@@ -127,9 +137,9 @@ describe("reapSupersededImages — real runtime", () => {
 
     assert.equal(result.imagesRemoved, 1, "exactly one image reaped (3.18)");
 
-    const oldAfter = await localIdsFor(REPO, OLD_TAG);
-    const newAfter = await localIdsFor(REPO, NEW_TAG);
-    const unrelatedAfter = await localIdsFor(UNRELATED, UNRELATED_TAG);
+    const oldAfter = await localIdsFor(runtime, REPO, OLD_TAG);
+    const newAfter = await localIdsFor(runtime, REPO, NEW_TAG);
+    const unrelatedAfter = await localIdsFor(runtime, UNRELATED, UNRELATED_TAG);
 
     assert.equal(oldAfter.length, 0, "alpine:3.18 must be removed");
     assert.equal(newAfter.length, 1, "alpine:3.19 (running) must survive");
@@ -153,7 +163,7 @@ describe("reapSupersededImages — real runtime", () => {
 
     // Re-pull 3.18 so there is a superseded version to (not) reap.
     await pullImage(runtime, `${REPO}:${OLD_TAG}`);
-    const oldBefore = await localIdsFor(REPO, OLD_TAG);
+    const oldBefore = await localIdsFor(runtime, REPO, OLD_TAG);
     assert.equal(oldBefore.length, 1, "alpine:3.18 re-present");
 
     // runningImageId null -> unanchored repo -> reap nothing.
@@ -161,7 +171,7 @@ describe("reapSupersededImages — real runtime", () => {
     const result = await reapSupersededImages(runtime, managed, 0);
 
     assert.equal(result.imagesRemoved, 0, "no reap without a running anchor");
-    const oldAfter = await localIdsFor(REPO, OLD_TAG);
+    const oldAfter = await localIdsFor(runtime, REPO, OLD_TAG);
     assert.equal(oldAfter.length, 1, "alpine:3.18 must survive");
   });
 

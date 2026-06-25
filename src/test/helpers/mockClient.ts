@@ -174,10 +174,22 @@ export function makeMockClient(spec: MockClientSpec = {}): ContainerClient {
       record(spec, "createNetwork", opts);
       return Promise.resolve({});
     },
-    listContainers: () =>
-      spec.listContainers instanceof Error
-        ? Promise.reject(spec.listContainers)
-        : Promise.resolve(spec.listContainers ?? []),
+    listContainers: (opts?: { all?: boolean }) => {
+      if (spec.listContainers instanceof Error) {
+        return Promise.reject(spec.listContainers);
+      }
+      const containers = spec.listContainers ?? [];
+      // Mirror the real daemon: without `all`, only non-exited containers
+      // are returned. The reaper relies on `all: true` to see stopped
+      // containers; this makes a regression that drops the flag fail here.
+      return Promise.resolve(
+        opts?.all
+          ? containers
+          : containers.filter(
+              (c) => (c as { State?: string }).State !== "exited",
+            ),
+      );
+    },
     listImages: () =>
       spec.listImages instanceof Error
         ? Promise.reject(spec.listImages)

@@ -2527,13 +2527,21 @@ export function selectImagesToReap(
   const toKeep = new Set<string>();
 
   for (const repo of new Set(managed.map((m) => m.image))) {
-    if (unanchoredRepos.has(repo)) continue;
     const candidates = images.filter(
       (img) =>
         img.inUseCount === 0 &&
         !runningIds.has(img.id) &&
         img.repoTags.some((rt) => splitRepoTag(rt)?.repo === repo),
     );
+
+    // An unanchored repo (running image unresolved) keeps every version.
+    // Add its images to `toKeep` rather than skipping the repo — a digest
+    // shared with an anchored repo would otherwise be reaped for that
+    // repo and, via `force` removal, untagged from this protected one.
+    if (unanchoredRepos.has(repo)) {
+      candidates.forEach((img) => toKeep.add(img.id));
+      continue;
+    }
 
     const ordered = [...candidates].sort((a, b) => {
       const tagOrder = compareTagsNewestFirst(

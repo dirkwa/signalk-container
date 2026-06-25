@@ -219,6 +219,30 @@ describe("selectImagesToReap", () => {
     assert.deepEqual(reaped(images, refs, 1), ["id-old-a", "id-old-b"]);
   });
 
+  it("keeps a shared image when one of its repos is unanchored (null running id)", () => {
+    const REPO_B = "ghcr.io/dirkwa/other-image";
+    const images: LocalImageSummary[] = [
+      // shared id: a SUPERSEDED version of REPO_A, but also REPO_B's only
+      // local copy. REPO_B is unanchored (container missing).
+      {
+        id: "id-shared",
+        repoTags: [`${REPO}:0.9.0`, `${REPO_B}:1.0.0`],
+        created: 5,
+        size: 100,
+        inUseCount: 0,
+      },
+      // REPO_A's running version (newer).
+      img("id-running-a", "1.0.0", { created: 10 }),
+    ];
+    const refs = [
+      managed("id-running-a", REPO), // anchored
+      managed(null, REPO_B), // unanchored -> keep everything for REPO_B
+    ];
+    // Even at keep=0, id-shared must survive: REPO_B is protected, and a
+    // force-removal for REPO_A would untag REPO_B's only copy.
+    assert.deepEqual(reaped(images, refs, 0), []);
+  });
+
   it("reaps a Docker Hub library image under its docker.io/library/ tag", () => {
     // podman stores `alpine` as `docker.io/library/alpine`; the executor
     // qualifies the managed repo to that form before calling the selector.
