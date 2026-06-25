@@ -36,7 +36,8 @@ export interface MockClientSpec {
   networks?: Record<string, { inspect?: Json | Error }>;
   version?: Json;
   info?: Json;
-  listContainers?: Json[];
+  /** Container summaries for `listContainers()`; an `Error` rejects. */
+  listContainers?: Json[] | Error;
   /** Image summaries for `listImages()`; an `Error` rejects the call. */
   listImages?: Json[] | Error;
   /** Per-image-id `remove()` result, keyed by id. An `Error` rejects. */
@@ -173,7 +174,10 @@ export function makeMockClient(spec: MockClientSpec = {}): ContainerClient {
       record(spec, "createNetwork", opts);
       return Promise.resolve({});
     },
-    listContainers: () => Promise.resolve(spec.listContainers ?? []),
+    listContainers: () =>
+      spec.listContainers instanceof Error
+        ? Promise.reject(spec.listContainers)
+        : Promise.resolve(spec.listContainers ?? []),
     listImages: () =>
       spec.listImages instanceof Error
         ? Promise.reject(spec.listImages)

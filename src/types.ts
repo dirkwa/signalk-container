@@ -625,7 +625,11 @@ export interface LocalImageSummary {
   /** Unix seconds; tie-breaker and fallback ordering for non-semver tags. */
   created: number;
   size: number;
-  /** Daemon reference count: >0 means in use by a running or stopped container. */
+  /**
+   * >0 when some container (running or stopped) references this image.
+   * Derived by the executor from the container list — not the unreliable
+   * `Containers` field of a listImages summary, which Docker leaves as -1.
+   */
   inUseCount: number;
 }
 

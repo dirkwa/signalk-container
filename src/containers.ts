@@ -2567,15 +2567,24 @@ export async function reapSupersededImages(
   const listed = await safe(() => client.listImages());
   if (!listed.ok) return { imagesRemoved: 0, spaceReclaimed: "0b" };
 
+  // The `Containers` field on a listImages summary is unreliable across
+  // runtimes — Docker returns -1 ("not computed") by default, which would
+  // make every image look in-use. Derive the in-use set authoritatively
+  // from the container list instead (all containers, running or stopped);
+  // each carries the resolved `ImageID` of the image it references. If the
+  // container list can't be read, fall back to "every image is in use" so
+  // the reaper errs toward keeping images rather than deleting a live one.
+  const containers = await safe(() => client.listContainers({ all: true }));
+  const inUseIds = containers.ok
+    ? new Set(containers.value.map((c) => c.ImageID).filter(Boolean))
+    : null;
+
   const summaries: LocalImageSummary[] = listed.value.map((info) => ({
     id: info.Id,
     repoTags: (info.RepoTags ?? []).filter((t) => t && t !== "<none>:<none>"),
     created: info.Created ?? 0,
     size: info.Size ?? 0,
-    // dockerode/podman report -1 when the reference count wasn't
-    // computed; treat that as "possibly in use" so the reaper never
-    // removes an image whose usage it couldn't confirm.
-    inUseCount: info.Containers < 0 ? 1 : info.Containers,
+    inUseCount: inUseIds === null || inUseIds.has(info.Id) ? 1 : 0,
   }));
   const bySize = new Map(summaries.map((s) => [s.id, s.size]));
 

@@ -224,4 +224,78 @@ describe("reapSupersededImages", () => {
     assert.equal(calls.get("image.remove"), undefined);
     assert.equal(result.imagesRemoved, 0);
   });
+
+  it("still reaps when listImages reports Containers: -1 (Docker default)", async () => {
+    // Docker leaves the per-image `Containers` count at -1; the reaper
+    // must not treat that as "in use" or it never reaps anything there.
+    const calls = new Map<string, unknown[]>();
+    const result = await reapSupersededImages(
+      podman,
+      managed("id-0.6.7"),
+      0,
+      makeMockClient({
+        calls,
+        listImages: [
+          imageInfo("id-0.6.6", "0.6.6", { Containers: -1 }),
+          imageInfo("id-0.6.7", "0.6.7", { Containers: -1 }),
+        ],
+        // no listContainers -> nothing actually in use
+      }),
+    );
+
+    const removed = (calls.get("image.remove") ?? []).map(
+      (c) => (c as { name: string }).name,
+    );
+    assert.deepEqual(removed, ["id-0.6.6"]);
+    assert.equal(result.imagesRemoved, 1);
+  });
+
+  it("excludes an image referenced by a stopped container", async () => {
+    const calls = new Map<string, unknown[]>();
+    const result = await reapSupersededImages(
+      podman,
+      managed("id-0.6.7"),
+      0,
+      makeMockClient({
+        calls,
+        listImages: [
+          imageInfo("id-0.6.5", "0.6.5"),
+          imageInfo("id-0.6.6", "0.6.6"),
+          imageInfo("id-0.6.7", "0.6.7"),
+        ],
+        // a stopped container still pins 0.6.5 via its resolved ImageID
+        listContainers: [
+          { Id: "ctr-old", ImageID: "id-0.6.5", State: "exited" },
+        ],
+      }),
+    );
+
+    const removed = (calls.get("image.remove") ?? []).map(
+      (c) => (c as { name: string }).name,
+    );
+    assert.deepEqual(removed, ["id-0.6.6"]);
+    assert.equal(result.imagesRemoved, 1);
+  });
+
+  it("keeps everything when the container list cannot be read", async () => {
+    // If we can't enumerate containers we can't prove what's in use, so
+    // the reaper must err toward keeping images rather than risk a live one.
+    const calls = new Map<string, unknown[]>();
+    const result = await reapSupersededImages(
+      podman,
+      managed("id-0.6.7"),
+      0,
+      makeMockClient({
+        calls,
+        listImages: [
+          imageInfo("id-0.6.5", "0.6.5"),
+          imageInfo("id-0.6.6", "0.6.6"),
+        ],
+        listContainers: new Error("daemon glitch"),
+      }),
+    );
+
+    assert.equal(calls.get("image.remove"), undefined);
+    assert.equal(result.imagesRemoved, 0);
+  });
 });
