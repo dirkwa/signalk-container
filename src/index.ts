@@ -852,11 +852,13 @@ export default (app: App) => {
       // Capture the prior call's config before overwriting so the diff
       // inside ensureRunning can detect "unset" drift (env key removed,
       // command previously set and now undefined). undefined on first call.
+      // The cache itself is only advanced AFTER the inner ensureRunning
+      // succeeds (below) — writing it here would let a failed transition
+      // leave `lastConfigs`/`effectiveResources` claiming a state the
+      // container never reached, so a retry's provenance check
+      // (`priorConfig.resources`) would miss a stale cap the new config
+      // removes.
       const priorConfig = lastConfigs.get(name);
-      // Cache for later updateResources() recreate-fallback path. Post-
-      // filter shape — drift detection sees consistent state across calls.
-      lastConfigs.set(name, effectiveConfig);
-      effectiveResources.set(name, filteredMerged);
       // `aborted` is always empty here — we'd have thrown above otherwise —
       // but we store the variable verbatim for clarity.
       lastVolumeIssues.set(name, { skipped, aborted });
@@ -899,6 +901,14 @@ export default (app: App) => {
         }
         throw err;
       }
+
+      // Advance the provenance/recreate-fallback caches only now that the
+      // inner transition has succeeded. Post-filter shape — drift detection
+      // sees consistent state across calls. On a failed transition above we
+      // rethrew, so these keep their prior values and the next attempt's
+      // unset check still sees the genuine prior limits.
+      lastConfigs.set(name, effectiveConfig);
+      effectiveResources.set(name, filteredMerged);
 
       // Commit port-address mappings only after the container has been
       // successfully started.  Populating portAddressMap before this
@@ -1033,9 +1043,35 @@ export default (app: App) => {
         // ensureRunning's "already running" branch — that would
         // surprise the consumer plugin. Instead, log a clear warning
         // pointing the user to the explicit recreate path.
+        //
+        // Provenance source: what the consumer requested on the PRIOR
+        // ensureRunning (the previous post-filter `filteredMerged`, cached
+        // in `lastConfigs` and read into `priorConfig` above, before this
+        // call overwrote it). A field present in `postLimits` but never in
+        // any prior request is a runtime artifact, not a user unset —
+        // notably the `oom_score_adj` rootless Podman clamps onto a child
+        // container when signalk-server's own oom_score_adj is non-zero;
+        // the plugin never sets it, so once provenance is known it is no
+        // longer mistaken for an unset, and the spurious warning stops.
+        // Using the prior request (not the current `filteredMerged`) still
+        // flags a genuine unset reached via this path: when a user
+        // lowers/removes a `memory` cap by editing signalk-container's
+        // `containerOverrides` config, the field was in the prior request
+        // and the recreate warning still fires.
+        //
+        // When `priorConfig` is absent we have NO provenance — this is the
+        // first ensureRunning of this process, but the container may be a
+        // pre-existing one carrying a stale cap. Pass `undefined` (not
+        // `{}`): an empty object would assert "nothing was ever requested"
+        // and silently suppress a real stale `memory`/`memorySwap` cap the
+        // current config removes. `undefined` falls back to the plain
+        // current-vs-live check, so a genuine unset is still surfaced; the
+        // only cost is the inherited oom_score_adj warning may fire once
+        // per process start, until the cache warms on the next call.
         const cannotUnset = fieldsRequiringRecreateForUnset(
           postLimits,
           filteredMerged,
+          priorConfig?.resources,
         );
         if (cannotUnset.length > 0) {
           app.error(
@@ -1402,9 +1438,21 @@ export default (app: App) => {
       // update". Memory limits and oom-score-adj are the offenders —
       // podman/docker can lower or raise them, but not return them to
       // the unlimited/default state without a recreate.
+      //
+      // Provenance guard: only force a recreate for a field the consumer
+      // actually requested before this update (plugin default ⊕ the
+      // stored override). A field that shows up in `liveBefore` purely
+      // because the runtime injected it (a rootless-Podman-inherited
+      // oom_score_adj) was never the user's to unset, so clearing the
+      // override must not trigger a (futile, on rootless) recreate.
+      const priorRequested = mergeResourceLimits(
+        pluginDefault,
+        currentOverrides[name],
+      );
       const mustRecreateForUnset = fieldsRequiringRecreateForUnset(
         liveBefore,
         filteredLimits,
+        priorRequested,
       );
       const forceRecreate = mustRecreateForUnset.length > 0;
       if (forceRecreate) {
