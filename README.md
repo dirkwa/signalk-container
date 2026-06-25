@@ -15,7 +15,7 @@ Instead of each plugin implementing its own container orchestration, they delega
 - **Resource limits editor** -- interactive UI in the config panel for setting CPU/memory/PID caps per container. Values are applied live via `podman update` when possible (no downtime), falls back to recreate when needed. Stored overrides are minimized against the consumer plugin's defaults so a future default bump flows through automatically. See the [developer guide](doc/plugin-developer-guide.md#resource-limits).
 - **Reset to plugin default** -- one-click restore of a container's original resource limits, clearing any user override.
 - **Per-process ulimits** -- `ContainerConfig.ulimits` pins per-process limits (`nofile`, `nproc`, …) on a container. A containerized process inherits these from the runtime, not the host sysctl, so raising the host `fs.file-max` alone does not lift a database's open-files limit; setting `ulimits` does. A `nofile` request over the host ceiling is clamped (not rejected) so the container still starts. See the [developer guide](doc/plugin-developer-guide.md#per-process-ulimits-nofile-) and, for raising the host limit, [Raising the open-files limit](#raising-the-open-files-limit-nofile).
-- **Image management** -- scheduled pruning of dangling images (weekly/monthly)
+- **Image management** -- scheduled pruning of dangling images (weekly/monthly), plus optional cleanup of superseded versions of managed-container images
 - **Zero-config data dir sharing** -- `signalkDataMount` mounts the SignalK data directory into any managed container automatically, whether Signal K runs bare-metal, in Docker (named volume), or in Podman (named volume or bind mount). No host paths to configure.
 - **Zero-config config root sharing** -- `signalkConfigRootMount` mounts the entire SignalK installation config (`~/.signalk/`) — for backup, audit, or config-sync tools that need the whole tree, not the per-plugin subdirectory.
 - **Zero-config container service connectivity** -- `signalkAccessiblePorts` lets the SignalK process connect back to a service running inside a managed container (e.g. an HTTP or TCP server). signalk-container picks the right networking strategy automatically — port binding on the host loopback for bare-metal deployments, or a shared Docker network with DNS for containerised ones. No host ports are exposed unnecessarily.
@@ -393,7 +393,8 @@ The plugin embeds a React config panel in the Signal K Admin UI (via Module Fede
 ### Settings
 
 - **Preferred runtime** -- auto-detect, or force `podman`/`docker`
-- **Auto-prune images** -- off, weekly, or monthly scheduled cleanup of dangling images
+- **Auto-prune images** -- off, weekly, or monthly scheduled cleanup of dangling (`<none>`) images. Setting this to `off` also disables the version cleanup below.
+- **Keep N prior managed-image versions** -- on the prune schedule above, also remove superseded versions of images belonging to managed containers, keeping this many prior versions in addition to the running one (default `1`; `0` keeps only the running image). Only touches images of containers this plugin manages — never your other images (e.g. a hand-pulled questdb/grafana), the running image, or any image in use by a container. See [Image version cleanup](#image-version-cleanup).
 - **Update check interval** -- how often to check consumer plugins for new container images (1h to 1 week, default 24h)
 - **Background update checks** -- toggle for metered connections; manual checks still work when off
 - **Disable user-namespace remap (ZFS escape hatch)** -- off by default. Secondary fix for ZFS / id-map-less hosts; prefer the host-side `fuse-overlayfs` storage driver first ([ZFS host notes](#zfs-and-other-idmap-incompatible-filesystems)). Enable only if container creation fails with `crun: writing file /proc/<pid>/gid_map: Invalid argument` and you cannot switch storage drivers. With the flag on, signalk-container stops emitting `--userns=keep-id` for rootless Podman; bind-mount file ownership still lands on the host caller for root-by-default images (questdb, grafana, mayara), but non-root images lose host-caller ownership in exchange for being able to start at all.
@@ -805,15 +806,16 @@ All mounted at `/plugins/signalk-container/api/`:
 
 ## Configuration
 
-| Setting                      | Default  | Description                                                                                                                                                                                                                                                                          |
-| ---------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Preferred runtime            | `auto`   | Auto-detect, or force `podman`/`docker`                                                                                                                                                                                                                                              |
-| Auto-prune images            | `weekly` | `off`, `weekly`, or `monthly`                                                                                                                                                                                                                                                        |
-| Max concurrent jobs          | `2`      | Limit parallel one-shot job executions                                                                                                                                                                                                                                               |
-| Update check interval        | `24h`    | How often to check for container image updates (e.g. `24h`, `12h`, `1h`). Min 1h.                                                                                                                                                                                                    |
-| Background update checks     | `true`   | Periodically check for updates in the background. Disable on metered connections — manual checks via the UI button still work.                                                                                                                                                       |
-| Disable user-namespace remap | `false`  | Suppress rootless-Podman `--userns=keep-id` on filesystems that cannot be id-mapped (ZFS, some encrypted FS). Secondary escape hatch only — the recommended primary fix is host-side `fuse-overlayfs` storage (see [ZFS host notes](#zfs-and-other-idmap-incompatible-filesystems)). |
-| Container overrides          | `{}`     | Per-container resource limits (CPU, memory, PIDs). Field-level merged on top of consumer plugin defaults. See dev guide.                                                                                                                                                             |
+| Setting                             | Default  | Description                                                                                                                                                                                                                                                                                     |
+| ----------------------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Preferred runtime                   | `auto`   | Auto-detect, or force `podman`/`docker`                                                                                                                                                                                                                                                         |
+| Auto-prune images                   | `weekly` | `off`, `weekly`, or `monthly` scheduled cleanup of dangling images. `off` also disables the version cleanup below.                                                                                                                                                                              |
+| Keep N prior managed-image versions | `1`      | On the prune schedule, also remove superseded versions of managed-container images, keeping this many prior versions besides the running one (`0` = running only). Never touches unregistered images, the running image, or in-use images. See [Image version cleanup](#image-version-cleanup). |
+| Max concurrent jobs                 | `2`      | Limit parallel one-shot job executions                                                                                                                                                                                                                                                          |
+| Update check interval               | `24h`    | How often to check for container image updates (e.g. `24h`, `12h`, `1h`). Min 1h.                                                                                                                                                                                                               |
+| Background update checks            | `true`   | Periodically check for updates in the background. Disable on metered connections — manual checks via the UI button still work.                                                                                                                                                                  |
+| Disable user-namespace remap        | `false`  | Suppress rootless-Podman `--userns=keep-id` on filesystems that cannot be id-mapped (ZFS, some encrypted FS). Secondary escape hatch only — the recommended primary fix is host-side `fuse-overlayfs` storage (see [ZFS host notes](#zfs-and-other-idmap-incompatible-filesystems)).            |
+| Container overrides                 | `{}`     | Per-container resource limits (CPU, memory, PIDs). Field-level merged on top of consumer plugin defaults. See dev guide.                                                                                                                                                                        |
 
 ### ZFS and other idmap-incompatible filesystems
 
@@ -825,6 +827,22 @@ The doctor (`GET /plugins/signalk-container/api/doctor/deployment`) flags this p
 2. **Enable the "Disable user-namespace remap" setting** in this plugin's config panel. Escape hatch for hosts that cannot switch storage drivers. Bind-mount ownership stays correct for root-by-default managed containers (questdb, grafana, mayara); non-root images give up host-caller ownership in exchange for being able to start at all.
 
 If the host runs a recent-enough kernel + Podman + ZFS combination that supports kernel-level idmapped mounts natively, neither workaround is required — the doctor advisory will fall silent on its own once the hazard heuristic no longer matches.
+
+## Image version cleanup
+
+Two distinct kinds of image clutter accumulate over a long-lived install, and the plugin handles them on the same prune schedule (**Auto-prune images**: weekly/monthly):
+
+- **Dangling (`<none>`) images** — left behind when a floating tag like `latest` is re-pulled to a new digest. The old image loses its tag and becomes `<none>:<none>`. These are reclaimed by the standard prune (and by the **Prune Dangling Images** button).
+- **Superseded tagged versions** — when a managed container's image is bumped to a new version (e.g. `…/foo:0.6.7` replaces `:0.6.6`), the prior version stays fully tagged and unreferenced. The **Keep N prior managed-image versions** setting (`keepImageVersions`, default `1`) removes these, keeping the running version plus this many prior ones for rollback. Set it to `0` to keep only the running version.
+
+The version cleanup is deliberately conservative. It only ever removes superseded versions of images belonging to **containers this plugin manages**, and never:
+
+- images you pulled yourself or that other tools manage (a hand-run questdb, grafana, etc.);
+- the image the container is currently running;
+- any image in use by a container, running **or stopped**;
+- any version of a managed image whose running container can't currently be resolved (it keeps everything for that image rather than risk removing the live one).
+
+Because it shares the prune schedule, setting **Auto-prune images** to `off` disables both the dangling prune and the version cleanup. Each run logs how many images it removed and how much space it reclaimed (visible at the plugin's debug log level).
 
 ## License
 
