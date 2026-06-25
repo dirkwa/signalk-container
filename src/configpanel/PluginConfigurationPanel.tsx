@@ -2,6 +2,10 @@ import React, { CSSProperties, useCallback, useEffect, useState } from "react";
 import LogsModal from "./LogsModal";
 import DoctorModal from "./DoctorModal";
 import { headlineForStatus } from "../doctorReport";
+import {
+  keepImageVersionsSelectValue,
+  keepImageVersionsFromSelectValue,
+} from "../configNormalize";
 import type {
   ContainerInfo,
   ContainerResourceLimits,
@@ -1062,6 +1066,13 @@ export default function PluginConfigurationPanel({
   const [pruneSchedule, setPruneSchedule] = useState<string>(
     cfg.pruneSchedule || "weekly",
   );
+  // Stored as a string for the select widget; coerced back to a number on
+  // save. Normalized through the shared backend contract so a malformed
+  // saved value seeds the default (1), not 0. Like the fields below, it
+  // must be rendered AND included in the save payload or Save would wipe it.
+  const [keepImageVersions, setKeepImageVersions] = useState<string>(
+    keepImageVersionsSelectValue(cfg.keepImageVersions),
+  );
   // v0.1.5 schema fields — previously not rendered in this panel, meaning
   // they were invisible AND silently wiped by Save. v0.1.7 fixes both.
   const [updateCheckInterval, setUpdateCheckInterval] = useState(
@@ -1465,6 +1476,7 @@ export default function PluginConfigurationPanel({
       // union all the way back through `<SelectField>`.
       runtime: runtime as PluginConfig["runtime"],
       pruneSchedule: pruneSchedule as PluginConfig["pruneSchedule"],
+      keepImageVersions: keepImageVersionsFromSelectValue(keepImageVersions),
       maxConcurrentJobs: cfg.maxConcurrentJobs || 2,
       updateCheckInterval,
       backgroundUpdateChecks,
@@ -1654,6 +1666,24 @@ export default function PluginConfigurationPanel({
           { value: "weekly", label: "Weekly" },
           { value: "monthly", label: "Monthly" },
         ]}
+      />
+
+      <SelectField
+        label="Keep old image versions"
+        value={keepImageVersions}
+        onChange={setKeepImageVersions}
+        options={[
+          { value: "0", label: "Running only" },
+          { value: "1", label: "Keep 1 prior" },
+          { value: "2", label: "Keep 2 prior" },
+          { value: "3", label: "Keep 3 prior" },
+          { value: "5", label: "Keep 5 prior" },
+        ]}
+        hint={
+          pruneSchedule === "off"
+            ? "Runs with auto-prune — currently Off"
+            : "Old versions of managed-container images to keep besides the running one"
+        }
       />
 
       <SelectField
