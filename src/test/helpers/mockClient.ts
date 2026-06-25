@@ -36,7 +36,12 @@ export interface MockClientSpec {
   networks?: Record<string, { inspect?: Json | Error }>;
   version?: Json;
   info?: Json;
-  listContainers?: Json[];
+  /** Container summaries for `listContainers()`; an `Error` rejects. */
+  listContainers?: Json[] | Error;
+  /** Image summaries for `listImages()`; an `Error` rejects the call. */
+  listImages?: Json[] | Error;
+  /** Per-image-id `remove()` result, keyed by id. An `Error` rejects. */
+  imageRemove?: Record<string, Json | Error>;
   pruneImages?: Json;
   /** Records calls for assertions: `calls.get("stop")` etc. */
   calls?: Map<string, unknown[]>;
@@ -128,6 +133,12 @@ export function makeMockClient(spec: MockClientSpec = {}): ContainerClient {
           if (img instanceof Error) throw img;
           return Promise.resolve(img);
         },
+        remove: (opts?: unknown) => {
+          record(spec, "image.remove", { name, opts });
+          const r = spec.imageRemove?.[name];
+          if (r instanceof Error) return Promise.reject(r);
+          return Promise.resolve(r ?? { Untagged: name });
+        },
       };
     },
     getNetwork(name: string) {
@@ -163,7 +174,26 @@ export function makeMockClient(spec: MockClientSpec = {}): ContainerClient {
       record(spec, "createNetwork", opts);
       return Promise.resolve({});
     },
-    listContainers: () => Promise.resolve(spec.listContainers ?? []),
+    listContainers: (opts?: { all?: boolean }) => {
+      if (spec.listContainers instanceof Error) {
+        return Promise.reject(spec.listContainers);
+      }
+      const containers = spec.listContainers ?? [];
+      // Mirror the real daemon: without `all`, only non-exited containers
+      // are returned. The reaper relies on `all: true` to see stopped
+      // containers; this makes a regression that drops the flag fail here.
+      return Promise.resolve(
+        opts?.all
+          ? containers
+          : containers.filter(
+              (c) => (c as { State?: string }).State !== "exited",
+            ),
+      );
+    },
+    listImages: () =>
+      spec.listImages instanceof Error
+        ? Promise.reject(spec.listImages)
+        : Promise.resolve(spec.listImages ?? []),
     pull: () => Promise.resolve(streamFrom("")),
     pruneImages: () =>
       Promise.resolve(

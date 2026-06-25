@@ -1,0 +1,199 @@
+import { describe, it, after, before } from "node:test";
+import assert from "node:assert/strict";
+import {
+  ensureRunning,
+  removeContainer,
+  getImageDigest,
+  reapSupersededImages,
+  pullImage,
+  prefixedName,
+  qualifiedRepoVariants,
+} from "../../containers.js";
+import { detectRuntime, setDisableUserns } from "../../runtime.js";
+import { getClient } from "../../client.js";
+import type { ContainerRuntimeInfo, ManagedImageRef } from "../../types.js";
+
+async function hasContainerRuntime(): Promise<ContainerRuntimeInfo | null> {
+  if (process.platform === "win32") return null;
+  return detectRuntime("auto");
+}
+
+// busybox `sleep` ignores SIGTERM; trap so stop is prompt.
+const TRAP_AND_WAIT_CMD = ["sh", "-c", "trap exit TERM; sleep 60 & wait"];
+
+// Bare image names — let each runtime store them under its own naming
+// (podman expands to `docker.io/library/<name>`, docker keeps `<name>`).
+// The managed ref and all lookups derive the actual local form from the
+// runtime so this test passes on both podman and docker CI.
+const REPO = "alpine";
+const OLD_TAG = "3.18";
+const NEW_TAG = "3.19";
+// An image the test pulls but never manages — must survive reaping.
+const UNRELATED = "busybox";
+const UNRELATED_TAG = "1.36";
+
+const CONTAINER_NAME = "reap-e2e-test";
+
+/**
+ * Local image IDs tagged for exactly `<repo>:<tag>` under whatever
+ * registry spelling this runtime uses. `repo` is a bare name like
+ * `alpine`; we resolve it through the same `qualifiedRepoVariants` the
+ * reaper uses (podman → `docker.io/library/alpine`, docker → `alpine`)
+ * and match the full tag exactly, so an unrelated namespaced image like
+ * `ghcr.io/acme/alpine:<tag>` is never counted as the managed one.
+ */
+async function localIdsFor(
+  runtime: ContainerRuntimeInfo,
+  repo: string,
+  tag: string,
+): Promise<string[]> {
+  const wants = new Set(
+    qualifiedRepoVariants(repo, runtime).map((variant) => `${variant}:${tag}`),
+  );
+  const images = await getClient().listImages();
+  return images
+    .filter((i) => (i.RepoTags ?? []).some((rt) => wants.has(rt)))
+    .map((i) => i.Id);
+}
+
+describe("reapSupersededImages — real runtime", () => {
+  let runtime: ContainerRuntimeInfo | null = null;
+
+  before(async () => {
+    runtime = await hasContainerRuntime();
+    if (!runtime) return;
+    // Avoid depending on host-UID idmap support (same rationale as the
+    // recreate integration test) — we're testing reaping, not user-ns.
+    setDisableUserns(true);
+    // Pull both alpine versions + an unrelated image so they exist locally.
+    await pullImage(runtime, `${REPO}:${OLD_TAG}`);
+    await pullImage(runtime, `${REPO}:${NEW_TAG}`);
+    await pullImage(runtime, `${UNRELATED}:${UNRELATED_TAG}`);
+  });
+
+  after(async () => {
+    setDisableUserns(false);
+    if (!runtime) return;
+    try {
+      await removeContainer(runtime, CONTAINER_NAME);
+    } catch {
+      // best-effort
+    }
+  });
+
+  it("removes the superseded version, keeps the running one and unrelated images", async (t) => {
+    if (!runtime) {
+      t.skip("no container runtime available");
+      return;
+    }
+
+    try {
+      await removeContainer(runtime, CONTAINER_NAME);
+    } catch {
+      // OK if absent.
+    }
+
+    // Run a container on the NEW tag — this is the version that must survive.
+    await ensureRunning(
+      runtime,
+      CONTAINER_NAME,
+      {
+        image: REPO,
+        tag: NEW_TAG,
+        command: TRAP_AND_WAIT_CMD,
+        restart: "no",
+      },
+      () => {},
+    );
+
+    // The live container carries the `sk-` prefix, so resolve its image
+    // id through the prefixed name — exactly what collectManagedImageRefs
+    // does in index.ts.
+    const runningImageId = await getImageDigest(
+      runtime,
+      prefixedName(CONTAINER_NAME),
+    );
+    assert.ok(runningImageId, "should resolve the running image id");
+
+    // Sanity: both alpine versions and the unrelated image are present.
+    const oldBefore = await localIdsFor(runtime, REPO, OLD_TAG);
+    const newBefore = await localIdsFor(runtime, REPO, NEW_TAG);
+    const unrelatedBefore = await localIdsFor(
+      runtime,
+      UNRELATED,
+      UNRELATED_TAG,
+    );
+    assert.equal(oldBefore.length, 1, "alpine:3.18 should be present pre-reap");
+    assert.equal(newBefore.length, 1, "alpine:3.19 should be present pre-reap");
+    assert.equal(
+      unrelatedBefore.length,
+      1,
+      "busybox should be present pre-reap",
+    );
+
+    // Only alpine is managed; keep 0 prior versions.
+    const managed: ManagedImageRef[] = [{ image: REPO, runningImageId }];
+    const result = await reapSupersededImages(runtime, managed, 0);
+
+    assert.equal(result.imagesRemoved, 1, "exactly one image reaped (3.18)");
+
+    const oldAfter = await localIdsFor(runtime, REPO, OLD_TAG);
+    const newAfter = await localIdsFor(runtime, REPO, NEW_TAG);
+    const unrelatedAfter = await localIdsFor(runtime, UNRELATED, UNRELATED_TAG);
+
+    assert.equal(oldAfter.length, 0, "alpine:3.18 must be removed");
+    assert.equal(newAfter.length, 1, "alpine:3.19 (running) must survive");
+    assert.deepEqual(
+      newAfter,
+      newBefore,
+      "running image id unchanged after reap",
+    );
+    assert.equal(
+      unrelatedAfter.length,
+      1,
+      "unrelated busybox must never be reaped",
+    );
+  });
+
+  it("never reaps when the running image cannot be resolved (null anchor)", async (t) => {
+    if (!runtime) {
+      t.skip("no container runtime available");
+      return;
+    }
+
+    // Re-pull 3.18 so there is a superseded version to (not) reap.
+    await pullImage(runtime, `${REPO}:${OLD_TAG}`);
+    const oldBefore = await localIdsFor(runtime, REPO, OLD_TAG);
+    assert.equal(oldBefore.length, 1, "alpine:3.18 re-present");
+
+    // runningImageId null -> unanchored repo -> reap nothing.
+    const managed: ManagedImageRef[] = [{ image: REPO, runningImageId: null }];
+    const result = await reapSupersededImages(runtime, managed, 0);
+
+    assert.equal(result.imagesRemoved, 0, "no reap without a running anchor");
+    const oldAfter = await localIdsFor(runtime, REPO, OLD_TAG);
+    assert.equal(oldAfter.length, 1, "alpine:3.18 must survive");
+  });
+
+  it("qualifies a bare managed repo to a form that matches the local tags", async (t) => {
+    if (!runtime) {
+      t.skip("no container runtime available");
+      return;
+    }
+    // The reaper qualifies a bare manifest repo (`alpine`) to whatever
+    // spelling the runtime stores locally before matching tags. Assert at
+    // least one produced variant actually appears in the local image's
+    // RepoTags — podman: `docker.io/library/alpine`, docker: `alpine`.
+    const variants = qualifiedRepoVariants(REPO, runtime);
+    const images = await getClient().listImages();
+    const localRepos = new Set(
+      images
+        .flatMap((i) => i.RepoTags ?? [])
+        .map((rt) => rt.slice(0, rt.lastIndexOf(":"))),
+    );
+    assert.ok(
+      variants.some((v) => localRepos.has(v)),
+      `one of ${JSON.stringify(variants)} should match a local repo tag`,
+    );
+  });
+});

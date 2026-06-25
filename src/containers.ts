@@ -11,6 +11,9 @@ import {
   ContainerState,
   EnsureRunningOptions,
   HealthcheckOverride,
+  LocalImageSummary,
+  ManagedImageRef,
+  PruneResult,
   UlimitClamp,
   VolumeIssue,
   VolumeSpec,
@@ -32,11 +35,12 @@ import {
 import type { ErrorKind } from "./errors.js";
 import { resourcePayloadForRun } from "./resources.js";
 import { classifyTag } from "./updates/tagClassifier.js";
+import { compareVersions } from "./updates/semver.js";
 import { isOfflineError } from "./updates/offline.js";
 
 const CONTAINER_PREFIX = "sk-";
 
-function prefixedName(name: string): string {
+export function prefixedName(name: string): string {
   return name.startsWith(CONTAINER_PREFIX)
     ? name
     : `${CONTAINER_PREFIX}${name}`;
@@ -522,6 +526,30 @@ export function qualifyImage(
     }
   }
   return image;
+}
+
+/**
+ * The qualified repo forms a managed image can appear under in podman's
+ * local `repoTags`. Usually one (the `qualifyImage` result), but a bare
+ * single-name Docker Hub image like `alpine` qualifies to
+ * `docker.io/alpine` while podman stores it as `docker.io/library/alpine`
+ * — so both are returned, letting the reaper match either spelling.
+ */
+export function qualifiedRepoVariants(
+  image: string,
+  runtime: ContainerRuntimeInfo,
+): string[] {
+  const qualified = qualifyImage(image, runtime);
+  const LIBRARY_PREFIX = "docker.io/";
+  const rest = qualified.startsWith(LIBRARY_PREFIX)
+    ? qualified.slice(LIBRARY_PREFIX.length)
+    : null;
+  // Only a single-segment Docker Hub repo (no user/org) gets the
+  // implicit `library/` namespace from podman.
+  if (rest && !rest.includes("/")) {
+    return [qualified, `${LIBRARY_PREFIX}library/${rest}`];
+  }
+  return [qualified];
 }
 
 export async function imageExists(
@@ -2390,6 +2418,217 @@ export async function pruneImages(
     imagesRemoved: removed,
     spaceReclaimed: bytesToString(result.value.SpaceReclaimed ?? 0),
   };
+}
+
+/**
+ * `getImage(id).remove` options for the reaper. `force: true` is needed
+ * because a superseded image can still carry several tags (e.g. `0.6.6`
+ * and `latest`); without it the daemon refuses to delete a multi-tagged
+ * image by ID. It is safe here — the selector already excludes the
+ * running image and anything in use by a container, so a forced removal
+ * can only drop a genuinely superseded, unreferenced image. `noprune:
+ * true` leaves the now-dangling parent layers for `pruneImages`, which
+ * runs in the same scheduled tick.
+ */
+const REAPER_IMAGE_REMOVE_OPTS = { force: true, noprune: true } as const;
+
+/**
+ * Split a `registry/repo:tag` reference into its repo and tag. Returns
+ * null when the string carries no tag (a bare repo) — the trailing
+ * segment is only a tag when it contains no `/` (otherwise the colon
+ * belongs to a `registry:port` host, not a tag).
+ */
+function splitRepoTag(repoTag: string): { repo: string; tag: string } | null {
+  const colon = repoTag.lastIndexOf(":");
+  if (colon === -1) return null;
+  const tag = repoTag.slice(colon + 1);
+  if (tag.includes("/")) return null;
+  return { repo: repoTag.slice(0, colon), tag };
+}
+
+/**
+ * Order two tags newest-first. Semver tags compare by version (so
+ * `0.6.7` sorts ahead of `0.6.6`); a semver tag always sorts ahead of a
+ * non-semver one (a real release is preferred for keeping over a stale
+ * `latest`/date blob). Two non-semver tags are treated as equal here and
+ * fall back to the image `created` tie-breaker in the caller.
+ */
+function compareTagsNewestFirst(a: string, b: string): number {
+  const aSemver = classifyTag(a) === "semver";
+  const bSemver = classifyTag(b) === "semver";
+  if (aSemver && bSemver) return -compareVersions(a, b);
+  if (aSemver) return -1;
+  if (bSemver) return 1;
+  return 0;
+}
+
+/**
+ * The newest tag of an image for a given managed repo, used to order
+ * that image against its siblings. Null when the image carries no tag
+ * for the repo (shouldn't happen once bucketed, but keeps the ordering
+ * total).
+ */
+function newestTagForRepo(
+  image: LocalImageSummary,
+  repo: string,
+): string | null {
+  let best: string | null = null;
+  for (const repoTag of image.repoTags) {
+    const split = splitRepoTag(repoTag);
+    if (!split || split.repo !== repo) continue;
+    if (best === null || compareTagsNewestFirst(split.tag, best) < 0) {
+      best = split.tag;
+    }
+  }
+  return best;
+}
+
+/**
+ * Pure selection: given every local image, the managed repos with their
+ * running image-IDs, and how many prior versions to keep, return the
+ * de-duplicated image-IDs to remove.
+ *
+ * `managed[].image` must already be in the same qualified form the local
+ * `repoTags` use (the executor qualifies via `qualifyImage` at the
+ * boundary), so a bare Docker Hub repo and its `docker.io/`-prefixed
+ * local tag compare equal.
+ *
+ * Guarantees, by construction:
+ *   - unrelated images are never returned (an image is only considered
+ *     under a repo it is actually tagged for, and only managed repos
+ *     are walked);
+ *   - the running image is never returned (excluded by image-ID);
+ *   - an image in use by any container (running OR stopped) is never
+ *     returned (excluded by `inUseCount`);
+ *   - the newest `keepImageVersions` superseded versions per repo survive;
+ *   - an image shared across managed repos survives if ANY repo retains
+ *     it (reaping it for one would untag it from the others).
+ */
+export function selectImagesToReap(
+  images: LocalImageSummary[],
+  managed: ManagedImageRef[],
+  keepImageVersions: number,
+): string[] {
+  const keep = Math.max(0, keepImageVersions);
+  const runningIds = new Set(
+    managed.map((m) => m.runningImageId).filter((id): id is string => !!id),
+  );
+  // A repo whose running image-ID we couldn't resolve (container missing,
+  // inspect failed) has no anchor to reap against — keep every version of
+  // it rather than risk removing the live one.
+  const unanchoredRepos = new Set(
+    managed.filter((m) => m.runningImageId === null).map((m) => m.image),
+  );
+  const toReap = new Set<string>();
+  // An image tagged for more than one managed repo must survive if ANY
+  // repo retains it — reaping it for one repo would untag it from the
+  // others. Collect the "keep" decision across all repos first, then
+  // subtract it from the reap set.
+  const toKeep = new Set<string>();
+
+  for (const repo of new Set(managed.map((m) => m.image))) {
+    const candidates = images.filter(
+      (img) =>
+        img.inUseCount === 0 &&
+        !runningIds.has(img.id) &&
+        img.repoTags.some((rt) => splitRepoTag(rt)?.repo === repo),
+    );
+
+    // An unanchored repo (running image unresolved) keeps every version.
+    // Add its images to `toKeep` rather than skipping the repo — a digest
+    // shared with an anchored repo would otherwise be reaped for that
+    // repo and, via `force` removal, untagged from this protected one.
+    if (unanchoredRepos.has(repo)) {
+      candidates.forEach((img) => toKeep.add(img.id));
+      continue;
+    }
+
+    const ordered = [...candidates].sort((a, b) => {
+      const tagOrder = compareTagsNewestFirst(
+        newestTagForRepo(a, repo) ?? "",
+        newestTagForRepo(b, repo) ?? "",
+      );
+      if (tagOrder !== 0) return tagOrder;
+      return b.created - a.created;
+    });
+
+    ordered.slice(0, keep).forEach((img) => toKeep.add(img.id));
+    ordered.slice(keep).forEach((img) => toReap.add(img.id));
+  }
+
+  return [...toReap].filter((id) => !toKeep.has(id));
+}
+
+/**
+ * Remove superseded versions of managed-container images, keeping the
+ * running one plus `keepImageVersions` prior versions per repo. The
+ * selection is delegated to the pure `selectImagesToReap`; this layer
+ * only does I/O (list, remove) and never throws — a listing failure or a
+ * single stuck image must not abort the rest of the scheduled tick.
+ */
+export async function reapSupersededImages(
+  runtime: ContainerRuntimeInfo,
+  managed: ManagedImageRef[],
+  keepImageVersions: number,
+  client: ContainerClient = getClient(),
+): Promise<PruneResult> {
+  const listed = await safe(() => client.listImages());
+  if (!listed.ok) return { imagesRemoved: 0, spaceReclaimed: "0b" };
+
+  // The `Containers` field on a listImages summary is unreliable across
+  // runtimes — Docker returns -1 ("not computed") by default, which would
+  // make every image look in-use. Derive the in-use set authoritatively
+  // from the container list instead (all containers, running or stopped);
+  // each carries the resolved `ImageID` of the image it references. If the
+  // container list can't be read, fall back to "every image is in use" so
+  // the reaper errs toward keeping images rather than deleting a live one.
+  const containers = await safe(() => client.listContainers({ all: true }));
+  const inUseIds = containers.ok
+    ? new Set(containers.value.map((c) => c.ImageID).filter(Boolean))
+    : null;
+
+  const summaries: LocalImageSummary[] = listed.value.map((info) => ({
+    id: info.Id,
+    repoTags: (info.RepoTags ?? []).filter((t) => t && t !== "<none>:<none>"),
+    created: info.Created ?? 0,
+    size: info.Size ?? 0,
+    inUseCount: inUseIds === null || inUseIds.has(info.Id) ? 1 : 0,
+  }));
+  const bySize = new Map(summaries.map((s) => [s.id, s.size]));
+
+  // Qualify each managed repo the way podman qualifies the local
+  // `repoTags`, so the pure selector's string match lines up across
+  // runtimes. A bare single-name Docker Hub image qualifies to
+  // `docker.io/<name>` here but podman reports it as
+  // `docker.io/library/<name>`; emit BOTH forms (same runningImageId) so
+  // the selector matches whichever the runtime used.
+  const qualifiedManaged = managed.flatMap((m) =>
+    qualifiedRepoVariants(m.image, runtime).map((image) => ({ ...m, image })),
+  );
+
+  const ids = selectImagesToReap(
+    summaries,
+    qualifiedManaged,
+    keepImageVersions,
+  );
+
+  let removed = 0;
+  let reclaimed = 0;
+  for (const id of ids) {
+    const result = await safe(() =>
+      client.getImage(id).remove(REAPER_IMAGE_REMOVE_OPTS),
+    );
+    // A `not-found` means the image is already gone (a concurrent prune,
+    // or another tag of it was removed first) — count it as reaped. Any
+    // other error (e.g. a 409 from a race where it became in-use) skips
+    // this id and leaves the rest of the sweep untouched.
+    if (result.ok || result.error.kind === "not-found") {
+      removed++;
+      reclaimed += bySize.get(id) ?? 0;
+    }
+  }
+
+  return { imagesRemoved: removed, spaceReclaimed: bytesToString(reclaimed) };
 }
 
 /**
