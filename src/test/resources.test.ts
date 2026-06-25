@@ -659,9 +659,10 @@ describe("fieldsRequiringRecreateForUnset (Bug E)", () => {
     assert.deepEqual(result, []);
   });
 
-  it("real-world scenario: removing oomScoreAdj while keeping cpus/memory", () => {
-    // This is the exact case that surfaced Bug E in the smoke test:
-    // mayara had oomScoreAdj: 500 from a prior update, user removes it.
+  it("backward-compat (2-arg, no provenance): removing oomScoreAdj while keeping cpus/memory", () => {
+    // The 2-arg form keeps the original current-vs-target behaviour. Real
+    // call sites now pass a 3rd `priorRequested` arg; the provenance-aware
+    // equivalent of this scenario is covered below.
     const result = fieldsRequiringRecreateForUnset(
       { cpus: 1.5, memory: "512m", memorySwap: "512m", oomScoreAdj: 500 },
       { cpus: 1.5, memory: "512m", memorySwap: "512m" },
@@ -675,6 +676,93 @@ describe("fieldsRequiringRecreateForUnset (Bug E)", () => {
     fieldsRequiringRecreateForUnset(current, target);
     assert.deepEqual(current, { memory: "512m", oomScoreAdj: 500 });
     assert.deepEqual(target, { cpus: 1.0 });
+  });
+
+  describe("priorRequested provenance guard", () => {
+    it("ignores a runtime-injected oomScoreAdj the consumer never requested", () => {
+      // The reported bug: rootless Podman clamps a managed container's
+      // oom_score_adj up to signalk-server's, so getLiveResources reports
+      // oomScoreAdj though no plugin ever set it. priorRequested ({}) has
+      // no oomScoreAdj → not a real unset → no warning/recreate.
+      const result = fieldsRequiringRecreateForUnset(
+        { cpus: 1.5, oomScoreAdj: 200 },
+        { cpus: 1.5 },
+        {},
+      );
+      assert.deepEqual(result, []);
+    });
+
+    it("still flags oomScoreAdj the consumer actually requested then dropped", () => {
+      // User set oomScoreAdj via the UI (prior override), now clears it.
+      const result = fieldsRequiringRecreateForUnset(
+        { cpus: 1.5, oomScoreAdj: 500 },
+        { cpus: 1.5 },
+        { cpus: 1.5, oomScoreAdj: 500 },
+      );
+      assert.deepEqual(result, ["oomScoreAdj"]);
+    });
+
+    it("still flags a genuinely-requested memory unset", () => {
+      const result = fieldsRequiringRecreateForUnset(
+        { memory: "512m" },
+        {},
+        { memory: "512m" },
+      );
+      assert.deepEqual(result, ["memory"]);
+    });
+
+    it("ignores an injected oomScoreAdj even while a real memory unset is flagged", () => {
+      const result = fieldsRequiringRecreateForUnset(
+        { memory: "512m", oomScoreAdj: 200 },
+        {},
+        { memory: "512m" }, // memory requested before, oomScoreAdj never
+      );
+      assert.deepEqual(result, ["memory"]);
+    });
+
+    it("matches the no-provenance behaviour when priorRequested is omitted", () => {
+      assert.deepEqual(
+        fieldsRequiringRecreateForUnset({ oomScoreAdj: 200 }, {}),
+        ["oomScoreAdj"],
+      );
+    });
+
+    // The two scenarios reachable through the ensureRunning no-op call
+    // site, where priorRequested is the PRIOR request (priorConfig.resources),
+    // not the current target. They must not collapse into each other.
+    it("ensureRunning path: suppresses inherited oomScoreAdj (never in prior request)", () => {
+      // postLimits carries the rootless-Podman-inherited value; neither the
+      // current nor the prior request ever asked for it.
+      const result = fieldsRequiringRecreateForUnset(
+        { cpus: 1.5, oomScoreAdj: 200 }, // postLimits
+        { cpus: 1.5 }, // filteredMerged (current request)
+        { cpus: 1.5 }, // priorConfig.resources (prior request)
+      );
+      assert.deepEqual(result, []);
+    });
+
+    it("ensureRunning path: still flags a memory cap removed via containerOverrides edit", () => {
+      // User removed the memory cap by editing signalk-container's config;
+      // the prior request had it, the live container still has it.
+      const result = fieldsRequiringRecreateForUnset(
+        { cpus: 1.5, memory: "1g" }, // postLimits (stale live cap)
+        { cpus: 1.5 }, // filteredMerged (memory now gone)
+        { cpus: 1.5, memory: "1g" }, // priorConfig.resources (had memory)
+      );
+      assert.deepEqual(result, ["memory"]);
+    });
+
+    it("ensureRunning first call (priorConfig undefined → {}): nothing flagged", () => {
+      // priorConfig?.resources ?? {} on the very first ensureRunning. The
+      // container was just created with the current request, so there is no
+      // stale live limit to unset.
+      const result = fieldsRequiringRecreateForUnset(
+        { cpus: 1.5 },
+        { cpus: 1.5 },
+        {},
+      );
+      assert.deepEqual(result, []);
+    });
   });
 });
 

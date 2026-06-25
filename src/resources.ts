@@ -115,15 +115,37 @@ const FIELDS_THAT_CANNOT_LIVE_UNSET: ReadonlySet<
  *
  * `current` is what `getLiveResources()` returned (the actual cgroup
  * state). `target` is the post-merge intended state.
+ *
+ * `priorRequested` (optional) is what the consumer plugin / user
+ * actually *requested* before this reconcile — the pre-merge intent,
+ * not the live cgroup state. When supplied, a field only counts as a
+ * recreate-needing-unset if it was present in `priorRequested`. This
+ * rules out values the runtime *injected* that the consumer never
+ * asked for: rootless Podman clamps a child container's
+ * `oom_score_adj` up to its parent's (it can only raise, never
+ * lower), so a managed container started under a signalk-server whose
+ * own `oom_score_adj` is non-zero (universal-installer Quadlet sets
+ * `OOMScoreAdjust`, a hardened systemd user service, SK-in-a-container)
+ * shows a non-zero `oomScoreAdj` in `current` that no plugin ever
+ * requested. Without provenance, the diff misreads that artifact as
+ * "user wants to unset a limit" and warns on every ensureRunning.
+ * Omit `priorRequested` to keep the original current-vs-target
+ * behaviour.
  */
 export function fieldsRequiringRecreateForUnset(
   current: ContainerResourceLimits,
   target: ContainerResourceLimits,
+  priorRequested?: ContainerResourceLimits,
 ): Array<keyof ContainerResourceLimits> {
   const result: Array<keyof ContainerResourceLimits> = [];
   for (const field of FIELDS_THAT_CANNOT_LIVE_UNSET) {
     const wasSet = isSet(current[field]);
     const willBeSet = isSet(target[field]);
+    if (priorRequested && !isSet(priorRequested[field])) {
+      // The field exists only as a runtime artifact (e.g. an inherited
+      // oom_score_adj), never a consumer request — not a real unset.
+      continue;
+    }
     if (wasSet && !willBeSet) {
       result.push(field);
     }

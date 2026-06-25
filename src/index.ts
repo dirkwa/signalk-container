@@ -1033,9 +1033,27 @@ export default (app: App) => {
         // ensureRunning's "already running" branch — that would
         // surprise the consumer plugin. Instead, log a clear warning
         // pointing the user to the explicit recreate path.
+        //
+        // Provenance source: what the consumer requested on the PRIOR
+        // ensureRunning (the previous post-filter `filteredMerged`, cached
+        // in `lastConfigs` and read into `priorConfig` above, before this
+        // call overwrote it). A field present in `postLimits` but never in
+        // any prior request is a runtime artifact, not a user unset —
+        // notably the `oom_score_adj` rootless Podman clamps onto a child
+        // container when signalk-server's own oom_score_adj is non-zero;
+        // the plugin never sets it, so it would otherwise warn on every
+        // ensureRunning. Using the prior request (not the current
+        // `filteredMerged`) still flags a genuine unset reached via this
+        // path: when a user lowers/removes a `memory` cap by editing
+        // signalk-container's `containerOverrides` config (which restarts
+        // the plugin, so the change arrives here rather than through
+        // updateResources), the field was in the prior request and the
+        // recreate warning still fires. Empty on the first call — there is
+        // no stale live limit to unset then.
         const cannotUnset = fieldsRequiringRecreateForUnset(
           postLimits,
           filteredMerged,
+          priorConfig?.resources ?? {},
         );
         if (cannotUnset.length > 0) {
           app.error(
@@ -1402,9 +1420,21 @@ export default (app: App) => {
       // update". Memory limits and oom-score-adj are the offenders —
       // podman/docker can lower or raise them, but not return them to
       // the unlimited/default state without a recreate.
+      //
+      // Provenance guard: only force a recreate for a field the consumer
+      // actually requested before this update (plugin default ⊕ the
+      // stored override). A field that shows up in `liveBefore` purely
+      // because the runtime injected it (a rootless-Podman-inherited
+      // oom_score_adj) was never the user's to unset, so clearing the
+      // override must not trigger a (futile, on rootless) recreate.
+      const priorRequested = mergeResourceLimits(
+        pluginDefault,
+        currentOverrides[name],
+      );
       const mustRecreateForUnset = fieldsRequiringRecreateForUnset(
         liveBefore,
         filteredLimits,
+        priorRequested,
       );
       const forceRecreate = mustRecreateForUnset.length > 0;
       if (forceRecreate) {
