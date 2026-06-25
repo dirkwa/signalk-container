@@ -2,6 +2,10 @@ import React, { CSSProperties, useCallback, useEffect, useState } from "react";
 import LogsModal from "./LogsModal";
 import DoctorModal from "./DoctorModal";
 import { headlineForStatus } from "../doctorReport";
+import {
+  keepImageVersionsSelectValue,
+  keepImageVersionsFromSelectValue,
+} from "../configNormalize";
 import type {
   ContainerInfo,
   ContainerResourceLimits,
@@ -1063,10 +1067,11 @@ export default function PluginConfigurationPanel({
     cfg.pruneSchedule || "weekly",
   );
   // Stored as a string for the select widget; coerced back to a number on
-  // save. Default 1 mirrors the schema default. Like the fields below, it
+  // save. Normalized through the shared backend contract so a malformed
+  // saved value seeds the default (1), not 0. Like the fields below, it
   // must be rendered AND included in the save payload or Save would wipe it.
   const [keepImageVersions, setKeepImageVersions] = useState<string>(
-    String(cfg.keepImageVersions ?? 1),
+    keepImageVersionsSelectValue(cfg.keepImageVersions),
   );
   // v0.1.5 schema fields — previously not rendered in this panel, meaning
   // they were invisible AND silently wiped by Save. v0.1.7 fixes both.
@@ -1471,10 +1476,7 @@ export default function PluginConfigurationPanel({
       // union all the way back through `<SelectField>`.
       runtime: runtime as PluginConfig["runtime"],
       pruneSchedule: pruneSchedule as PluginConfig["pruneSchedule"],
-      keepImageVersions: Math.max(
-        0,
-        Math.floor(Number(keepImageVersions) || 0),
-      ),
+      keepImageVersions: keepImageVersionsFromSelectValue(keepImageVersions),
       maxConcurrentJobs: cfg.maxConcurrentJobs || 2,
       updateCheckInterval,
       backgroundUpdateChecks,

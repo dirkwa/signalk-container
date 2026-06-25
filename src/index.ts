@@ -84,6 +84,10 @@ import { registerUpdateRoutes } from "./updates/routes.js";
 import { DIGEST_RE, resolveImage } from "./manifest/resolver.js";
 import { ManifestStore } from "./manifest/store.js";
 import {
+  DEFAULT_KEEP_IMAGE_VERSIONS,
+  normalizeKeepImageVersions,
+} from "./configNormalize.js";
+import {
   generateSetupSnippet,
   imageRunsAsUser,
   isDashboardDeploymentError,
@@ -129,25 +133,9 @@ interface App {
  */
 const SSE_HEARTBEAT_MS = 30_000;
 
-/**
- * Prior managed-image versions the reaper keeps by default, in addition
- * to the running one. Shared between the config schema's `default` and
- * the runtime fallback so the two can't drift.
- */
-const DEFAULT_KEEP_IMAGE_VERSIONS = 1;
-
-/**
- * Coerce the `keepImageVersions` config value to a non-negative integer.
- * The schema constrains it for UI saves, but a config edited by hand or
- * supplied by an API caller can still carry a decimal, a negative, or a
- * non-number — none of which the reaper should act on literally.
- */
-export function normalizeKeepImageVersions(value: unknown): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    return DEFAULT_KEEP_IMAGE_VERSIONS;
-  }
-  return Math.max(0, Math.floor(value));
-}
+// `DEFAULT_KEEP_IMAGE_VERSIONS` and `normalizeKeepImageVersions` live in
+// `./configNormalize.js` so the backend and the React config panel share
+// one contract — a browser-safe module with no node-only imports.
 
 export default (app: App) => {
   let runtimeInfo: ContainerRuntimeInfo | null = null;
