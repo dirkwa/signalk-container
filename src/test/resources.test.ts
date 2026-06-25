@@ -752,16 +752,27 @@ describe("fieldsRequiringRecreateForUnset (Bug E)", () => {
       assert.deepEqual(result, ["memory"]);
     });
 
-    it("ensureRunning first call (priorConfig undefined → {}): nothing flagged", () => {
-      // priorConfig?.resources ?? {} on the very first ensureRunning. The
-      // container was just created with the current request, so there is no
-      // stale live limit to unset.
-      const result = fieldsRequiringRecreateForUnset(
+    it("ensureRunning cold cache (priorConfig undefined): falls back to current-vs-live", () => {
+      // On the first ensureRunning of a process, priorConfig is undefined,
+      // so the call site passes priorRequested=undefined. Provenance is
+      // unknown — a pre-existing container may carry a stale cap the new
+      // config removes — so a real memory unset must still be flagged.
+      const memUnset = fieldsRequiringRecreateForUnset(
+        { cpus: 1.5, memory: "1g" },
         { cpus: 1.5 },
-        { cpus: 1.5 },
-        {},
+        undefined,
       );
-      assert.deepEqual(result, []);
+      assert.deepEqual(memUnset, ["memory"]);
+
+      // The cost of unknown provenance: an inherited oomScoreAdj is also
+      // flagged once, until the cache warms on the next call and the
+      // provenance guard kicks in.
+      const oomCold = fieldsRequiringRecreateForUnset(
+        { cpus: 1.5, oomScoreAdj: 200 },
+        { cpus: 1.5 },
+        undefined,
+      );
+      assert.deepEqual(oomCold, ["oomScoreAdj"]);
     });
   });
 });
