@@ -37,6 +37,10 @@ export interface MockClientSpec {
   version?: Json;
   info?: Json;
   listContainers?: Json[];
+  /** Image summaries for `listImages()`; an `Error` rejects the call. */
+  listImages?: Json[] | Error;
+  /** Per-image-id `remove()` result, keyed by id. An `Error` rejects. */
+  imageRemove?: Record<string, Json | Error>;
   pruneImages?: Json;
   /** Records calls for assertions: `calls.get("stop")` etc. */
   calls?: Map<string, unknown[]>;
@@ -128,6 +132,12 @@ export function makeMockClient(spec: MockClientSpec = {}): ContainerClient {
           if (img instanceof Error) throw img;
           return Promise.resolve(img);
         },
+        remove: (opts?: unknown) => {
+          record(spec, "image.remove", { name, opts });
+          const r = spec.imageRemove?.[name];
+          if (r instanceof Error) return Promise.reject(r);
+          return Promise.resolve(r ?? { Untagged: name });
+        },
       };
     },
     getNetwork(name: string) {
@@ -164,6 +174,10 @@ export function makeMockClient(spec: MockClientSpec = {}): ContainerClient {
       return Promise.resolve({});
     },
     listContainers: () => Promise.resolve(spec.listContainers ?? []),
+    listImages: () =>
+      spec.listImages instanceof Error
+        ? Promise.reject(spec.listImages)
+        : Promise.resolve(spec.listImages ?? []),
     pull: () => Promise.resolve(streamFrom("")),
     pruneImages: () =>
       Promise.resolve(

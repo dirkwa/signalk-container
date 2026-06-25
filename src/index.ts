@@ -14,6 +14,7 @@ import {
   DoctorApi,
   EnsureRunningOptions,
   HistoryEntry,
+  ManagedImageRef,
   ManifestApi,
   PluginConfig,
   PruneResult,
@@ -55,8 +56,10 @@ import {
   listContainers,
   findSelfContainerId,
   parsePositiveIntQuery,
+  prefixedName,
   pruneImages,
   pullImage,
+  reapSupersededImages,
   qualifyImage as qualifyImageForRuntime,
   removeContainer,
   removeManagedData,
@@ -126,6 +129,26 @@ interface App {
  */
 const SSE_HEARTBEAT_MS = 30_000;
 
+/**
+ * Prior managed-image versions the reaper keeps by default, in addition
+ * to the running one. Shared between the config schema's `default` and
+ * the runtime fallback so the two can't drift.
+ */
+const DEFAULT_KEEP_IMAGE_VERSIONS = 1;
+
+/**
+ * Coerce the `keepImageVersions` config value to a non-negative integer.
+ * The schema constrains it for UI saves, but a config edited by hand or
+ * supplied by an API caller can still carry a decimal, a negative, or a
+ * non-number — none of which the reaper should act on literally.
+ */
+function normalizeKeepImageVersions(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return DEFAULT_KEEP_IMAGE_VERSIONS;
+  }
+  return Math.max(0, Math.floor(value));
+}
+
 export default (app: App) => {
   let runtimeInfo: ContainerRuntimeInfo | null = null;
   let runtimePreference: RuntimePreference = "auto";
@@ -133,6 +156,32 @@ export default (app: App) => {
   const healthTimers = new Map<string, NodeJS.Timeout>();
   let updateService: UpdateService | null = null;
   let manifestStore: ManifestStore | null = null;
+
+  /**
+   * Build the reaper's view of managed images: every container recorded
+   * in a manifest, paired with the immutable image-ID it is currently
+   * running (or null when missing). The manifest store is the only
+   * registry that survives a restart, so it — not the in-memory
+   * `lastConfigs` — is the source of truth for "what do we manage".
+   */
+  async function collectManagedImageRefs(
+    runtime: ContainerRuntimeInfo,
+  ): Promise<ManagedImageRef[]> {
+    if (!manifestStore) return [];
+    const refs: ManagedImageRef[] = [];
+    for (const manifest of await manifestStore.list()) {
+      for (const [containerName, entry] of Object.entries(
+        manifest.containers,
+      )) {
+        const runningImageId = await getImageDigest(
+          runtime,
+          prefixedName(containerName),
+        );
+        refs.push({ image: entry.image, runningImageId });
+      }
+    }
+    return refs;
+  }
 
   // Re-created on every start() so each plugin-lifecycle gets a fresh
   // promise — without this, whenReady() would resolve immediately on
@@ -1748,6 +1797,16 @@ export default (app: App) => {
           enum: ["off", "weekly", "monthly"],
           default: "weekly",
           title: "Auto-prune dangling images",
+          description:
+            "How often to remove dangling (untagged) images left behind when a floating tag like 'latest' is re-pulled. Off disables both this and the version cleanup below.",
+        },
+        keepImageVersions: {
+          type: "integer",
+          default: DEFAULT_KEEP_IMAGE_VERSIONS,
+          minimum: 0,
+          title: "Keep N prior managed-image versions",
+          description:
+            "On the prune schedule above, also remove superseded versions of images belonging to managed containers, keeping this many prior versions in addition to the running one (0 keeps only the running image). Images not registered by signalk-container, and any image in use by a container, are never touched.",
         },
         maxConcurrentJobs: {
           type: "number",
@@ -1979,9 +2038,32 @@ export default (app: App) => {
             config.pruneSchedule === "weekly"
               ? 7 * 24 * 60 * 60 * 1000
               : 30 * 24 * 60 * 60 * 1000;
+          // Read here (not via a truthiness guard) so an explicit 0 —
+          // "keep only the running image" — is honoured rather than
+          // treated as unset.
+          const keepImageVersions = normalizeKeepImageVersions(
+            config.keepImageVersions,
+          );
           pruneTimer = setInterval(async () => {
             try {
-              const result = await pruneImages(runtimeInfo!);
+              // Snapshot the runtime once so prune, collection, and
+              // reaping all act on the same instance across awaits.
+              const runtime = runtimeInfo;
+              if (!runtime) return;
+              // Reap superseded managed versions first: it untags them,
+              // turning their parent layers dangling, so the prune that
+              // follows reclaims those layers in the same tick rather
+              // than leaving them until the next one.
+              const managed = await collectManagedImageRefs(runtime);
+              const reaped = await reapSupersededImages(
+                runtime,
+                managed,
+                keepImageVersions,
+              );
+              app.debug(
+                `Reaped ${reaped.imagesRemoved} superseded managed images, reclaimed ${reaped.spaceReclaimed}`,
+              );
+              const result = await pruneImages(runtime);
               app.debug(
                 `Pruned ${result.imagesRemoved} images, reclaimed ${result.spaceReclaimed}`,
               );

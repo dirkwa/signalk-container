@@ -600,6 +600,36 @@ export interface PruneResult {
 }
 
 /**
+ * A managed image repo and the image-ID the container is currently
+ * running, fed to the reaper so it can keep the live version and only
+ * remove superseded ones. `runningImageId` is null when the container
+ * is missing or its image can't be resolved — the reaper then keeps
+ * every version of that repo (it has no anchor to reap safely against).
+ */
+export interface ManagedImageRef {
+  /** Registered image repo without a tag, e.g. "ghcr.io/dirkwa/foo". */
+  image: string;
+  /** Immutable image-ID of the running container, or null if unknown. */
+  runningImageId: string | null;
+}
+
+/**
+ * The subset of a dockerode image summary the reaper reasons over.
+ * Flat by design so the pure selection function is testable without
+ * dockerode types — the boundary maps `ImageInfo` into this shape.
+ */
+export interface LocalImageSummary {
+  id: string;
+  /** Fully-qualified `repo:tag` strings; empty for dangling/local builds. */
+  repoTags: string[];
+  /** Unix seconds; tie-breaker and fallback ordering for non-semver tags. */
+  created: number;
+  size: number;
+  /** Daemon reference count: >0 means in use by a running or stopped container. */
+  inUseCount: number;
+}
+
+/**
  * Per-orphan record returned by `cleanupOrphanedJobs`.  One entry per
  * stale `sk-job-*` container that was found running and has been
  * stopped + removed.  The plugin uses this to roll back any
@@ -1347,6 +1377,15 @@ export interface SetupSnippetResult {
 export interface PluginConfig {
   runtime: RuntimePreference;
   pruneSchedule: "off" | "weekly" | "monthly";
+  /**
+   * Prior versions of managed-container images to keep, in addition to
+   * the running one, when the scheduled prune runs. 0 keeps only the
+   * running image. Only superseded versions of images belonging to
+   * managed containers are touched — never unrelated images, the
+   * running image, or any image in use by a container. Shares the
+   * `pruneSchedule` cadence, so it does not run when that is "off".
+   */
+  keepImageVersions?: number;
   maxConcurrentJobs: number;
   updateCheckInterval?: string;
   backgroundUpdateChecks?: boolean;

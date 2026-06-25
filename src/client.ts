@@ -38,6 +38,7 @@ export interface ContainerClient {
   listContainers(
     opts?: Docker.ContainerListOptions,
   ): Promise<Docker.ContainerInfo[]>;
+  listImages(opts?: Docker.ListImagesOptions): Promise<Docker.ImageInfo[]>;
   pull(repoTag: string, opts?: object): Promise<NodeJS.ReadableStream>;
   pruneImages(opts?: object): Promise<Docker.PruneImagesInfo>;
   version(): Promise<Docker.DockerVersion>;
