@@ -142,7 +142,7 @@ const DEFAULT_KEEP_IMAGE_VERSIONS = 1;
  * supplied by an API caller can still carry a decimal, a negative, or a
  * non-number — none of which the reaper should act on literally.
  */
-function normalizeKeepImageVersions(value: unknown): number {
+export function normalizeKeepImageVersions(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return DEFAULT_KEEP_IMAGE_VERSIONS;
   }
@@ -2045,15 +2045,18 @@ export default (app: App) => {
             config.keepImageVersions,
           );
           pruneTimer = setInterval(async () => {
+            // Snapshot the runtime once so reaping and pruning act on the
+            // same instance across awaits.
+            const runtime = runtimeInfo;
+            if (!runtime) return;
+            // Reap superseded managed versions first: it untags them,
+            // turning their parent layers dangling, so the prune that
+            // follows reclaims those layers in the same tick rather than
+            // leaving them until the next one. Isolated in its own
+            // try/catch — collecting refs can throw (manifest read,
+            // digest probe), and that must not stop the dangling prune,
+            // which is the original, more important cleanup.
             try {
-              // Snapshot the runtime once so prune, collection, and
-              // reaping all act on the same instance across awaits.
-              const runtime = runtimeInfo;
-              if (!runtime) return;
-              // Reap superseded managed versions first: it untags them,
-              // turning their parent layers dangling, so the prune that
-              // follows reclaims those layers in the same tick rather
-              // than leaving them until the next one.
               const managed = await collectManagedImageRefs(runtime);
               const reaped = await reapSupersededImages(
                 runtime,
@@ -2063,6 +2066,10 @@ export default (app: App) => {
               app.debug(
                 `Reaped ${reaped.imagesRemoved} superseded managed images, reclaimed ${reaped.spaceReclaimed}`,
               );
+            } catch (err) {
+              app.error("Managed-image reaping failed:", err);
+            }
+            try {
               const result = await pruneImages(runtime);
               app.debug(
                 `Pruned ${result.imagesRemoved} images, reclaimed ${result.spaceReclaimed}`,

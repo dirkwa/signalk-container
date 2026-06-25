@@ -193,6 +193,43 @@ describe("selectImagesToReap", () => {
     assert.deepEqual(reaped(images, [managed(null)], 0), []);
   });
 
+  it("keeps an image shared across two repos when either repo retains it", () => {
+    const REPO_B = "ghcr.io/dirkwa/other-image";
+    const images: LocalImageSummary[] = [
+      // shared id, tagged for BOTH repos at their newest version
+      {
+        id: "id-shared",
+        repoTags: [`${REPO}:1.0.0`, `${REPO_B}:2.0.0`],
+        created: 10,
+        size: 100,
+        inUseCount: 0,
+      },
+      // older version of REPO only
+      img("id-old-a", "0.9.0", { created: 5 }),
+      // older version of REPO_B only
+      img("id-old-b", "1.9.0", { created: 5, repo: REPO_B }),
+    ];
+    // Both repos keep 1: REPO keeps id-shared (its newest), REPO_B keeps
+    // id-shared too. id-old-a and id-old-b are reaped; id-shared survives
+    // because both repos retain it.
+    const refs = [
+      managed("id-running-a", REPO),
+      managed("id-running-b", REPO_B),
+    ];
+    assert.deepEqual(reaped(images, refs, 1), ["id-old-a", "id-old-b"]);
+  });
+
+  it("reaps a Docker Hub library image under its docker.io/library/ tag", () => {
+    // podman stores `alpine` as `docker.io/library/alpine`; the executor
+    // qualifies the managed repo to that form before calling the selector.
+    const LIB = "docker.io/library/alpine";
+    const images: LocalImageSummary[] = [
+      img("id-3.18", "3.18", { repo: LIB, created: 1 }),
+      img("id-3.19", "3.19", { repo: LIB, created: 2 }),
+    ];
+    assert.deepEqual(reaped(images, [managed("id-3.19", LIB)], 0), ["id-3.18"]);
+  });
+
   it("returns nothing when there are no managed refs", () => {
     const images = [img("id-0.6.5", "0.6.5"), img("id-0.6.6", "0.6.6")];
     assert.deepEqual(reaped(images, [], 0), []);

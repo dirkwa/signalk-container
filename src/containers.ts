@@ -528,6 +528,30 @@ export function qualifyImage(
   return image;
 }
 
+/**
+ * The qualified repo forms a managed image can appear under in podman's
+ * local `repoTags`. Usually one (the `qualifyImage` result), but a bare
+ * single-name Docker Hub image like `alpine` qualifies to
+ * `docker.io/alpine` while podman stores it as `docker.io/library/alpine`
+ * — so both are returned, letting the reaper match either spelling.
+ */
+export function qualifiedRepoVariants(
+  image: string,
+  runtime: ContainerRuntimeInfo,
+): string[] {
+  const qualified = qualifyImage(image, runtime);
+  const LIBRARY_PREFIX = "docker.io/";
+  const rest = qualified.startsWith(LIBRARY_PREFIX)
+    ? qualified.slice(LIBRARY_PREFIX.length)
+    : null;
+  // Only a single-segment Docker Hub repo (no user/org) gets the
+  // implicit `library/` namespace from podman.
+  if (rest && !rest.includes("/")) {
+    return [qualified, `${LIBRARY_PREFIX}library/${rest}`];
+  }
+  return [qualified];
+}
+
 export async function imageExists(
   runtime: ContainerRuntimeInfo,
   image: string,
@@ -2476,7 +2500,9 @@ function newestTagForRepo(
  *   - the running image is never returned (excluded by image-ID);
  *   - an image in use by any container (running OR stopped) is never
  *     returned (excluded by `inUseCount`);
- *   - the newest `keepImageVersions` superseded versions per repo survive.
+ *   - the newest `keepImageVersions` superseded versions per repo survive;
+ *   - an image shared across managed repos survives if ANY repo retains
+ *     it (reaping it for one would untag it from the others).
  */
 export function selectImagesToReap(
   images: LocalImageSummary[],
@@ -2494,6 +2520,11 @@ export function selectImagesToReap(
     managed.filter((m) => m.runningImageId === null).map((m) => m.image),
   );
   const toReap = new Set<string>();
+  // An image tagged for more than one managed repo must survive if ANY
+  // repo retains it — reaping it for one repo would untag it from the
+  // others. Collect the "keep" decision across all repos first, then
+  // subtract it from the reap set.
+  const toKeep = new Set<string>();
 
   for (const repo of new Set(managed.map((m) => m.image))) {
     if (unanchoredRepos.has(repo)) continue;
@@ -2513,10 +2544,11 @@ export function selectImagesToReap(
       return b.created - a.created;
     });
 
-    for (const img of ordered.slice(keep)) toReap.add(img.id);
+    ordered.slice(0, keep).forEach((img) => toKeep.add(img.id));
+    ordered.slice(keep).forEach((img) => toReap.add(img.id));
   }
 
-  return [...toReap];
+  return [...toReap].filter((id) => !toKeep.has(id));
 }
 
 /**
@@ -2548,16 +2580,14 @@ export async function reapSupersededImages(
   const bySize = new Map(summaries.map((s) => [s.id, s.size]));
 
   // Qualify each managed repo the way podman qualifies the local
-  // `repoTags` (docker.io/ prefix for bare Docker Hub names), so the
-  // pure selector's string match lines up across runtimes. Bare
-  // single-name official images (podman expands these to
-  // `docker.io/library/<name>`) are not normalized here — consumer
-  // plugins register fully-qualified or `<user>/<repo>` names, never a
-  // bare library image, so the gap is unreachable in practice.
-  const qualifiedManaged = managed.map((m) => ({
-    ...m,
-    image: qualifyImage(m.image, runtime),
-  }));
+  // `repoTags`, so the pure selector's string match lines up across
+  // runtimes. A bare single-name Docker Hub image qualifies to
+  // `docker.io/<name>` here but podman reports it as
+  // `docker.io/library/<name>`; emit BOTH forms (same runningImageId) so
+  // the selector matches whichever the runtime used.
+  const qualifiedManaged = managed.flatMap((m) =>
+    qualifiedRepoVariants(m.image, runtime).map((image) => ({ ...m, image })),
+  );
 
   const ids = selectImagesToReap(
     summaries,

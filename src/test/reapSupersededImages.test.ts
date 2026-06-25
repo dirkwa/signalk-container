@@ -170,6 +170,41 @@ describe("reapSupersededImages", () => {
     assert.equal(result.imagesRemoved, 1);
   });
 
+  it("matches a bare official image against its docker.io/library/ tag on podman", async () => {
+    const calls = new Map<string, unknown[]>();
+    const result = await reapSupersededImages(
+      podman,
+      // manifest stored bare `alpine`; podman lists docker.io/library/alpine
+      [{ image: "alpine", runningImageId: "id-3.19" }],
+      0,
+      makeMockClient({
+        calls,
+        listImages: [
+          {
+            Id: "id-3.18",
+            RepoTags: ["docker.io/library/alpine:3.18"],
+            Created: 1,
+            Size: 1024,
+            Containers: 0,
+          },
+          {
+            Id: "id-3.19",
+            RepoTags: ["docker.io/library/alpine:3.19"],
+            Created: 2,
+            Size: 1024,
+            Containers: 0,
+          },
+        ],
+      }),
+    );
+
+    const removed = (calls.get("image.remove") ?? []).map(
+      (c) => (c as { name: string }).name,
+    );
+    assert.deepEqual(removed, ["id-3.18"]);
+    assert.equal(result.imagesRemoved, 1);
+  });
+
   it("removes nothing when keep retains every version", async () => {
     const calls = new Map<string, unknown[]>();
     const result = await reapSupersededImages(
