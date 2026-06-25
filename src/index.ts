@@ -852,11 +852,13 @@ export default (app: App) => {
       // Capture the prior call's config before overwriting so the diff
       // inside ensureRunning can detect "unset" drift (env key removed,
       // command previously set and now undefined). undefined on first call.
+      // The cache itself is only advanced AFTER the inner ensureRunning
+      // succeeds (below) — writing it here would let a failed transition
+      // leave `lastConfigs`/`effectiveResources` claiming a state the
+      // container never reached, so a retry's provenance check
+      // (`priorConfig.resources`) would miss a stale cap the new config
+      // removes.
       const priorConfig = lastConfigs.get(name);
-      // Cache for later updateResources() recreate-fallback path. Post-
-      // filter shape — drift detection sees consistent state across calls.
-      lastConfigs.set(name, effectiveConfig);
-      effectiveResources.set(name, filteredMerged);
       // `aborted` is always empty here — we'd have thrown above otherwise —
       // but we store the variable verbatim for clarity.
       lastVolumeIssues.set(name, { skipped, aborted });
@@ -899,6 +901,14 @@ export default (app: App) => {
         }
         throw err;
       }
+
+      // Advance the provenance/recreate-fallback caches only now that the
+      // inner transition has succeeded. Post-filter shape — drift detection
+      // sees consistent state across calls. On a failed transition above we
+      // rethrew, so these keep their prior values and the next attempt's
+      // unset check still sees the genuine prior limits.
+      lastConfigs.set(name, effectiveConfig);
+      effectiveResources.set(name, filteredMerged);
 
       // Commit port-address mappings only after the container has been
       // successfully started.  Populating portAddressMap before this
