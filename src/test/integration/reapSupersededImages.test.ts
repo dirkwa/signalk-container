@@ -97,6 +97,21 @@ describe("reapSupersededImages — real runtime", () => {
   // single committed base container, so reaping them never touches a
   // shared image another concurrent test depends on.
   async function buildPrivateImages(): Promise<void> {
+    // Idempotent: drop any existing private refs first. Re-committing a
+    // live repo:tag moves the tag to a new image id and orphans the old
+    // one as a dangling <none> image that teardown (which removes by
+    // repo:tag) would never reclaim. Called from `before` and re-called
+    // by the null-anchor test, so it must not leak across invocations.
+    await removeImageRef(REPO, OLD_TAG);
+    await removeImageRef(REPO, NEW_TAG);
+    await removeImageRef(UNRELATED, UNRELATED_TAG);
+    // A leaked builder from a crashed prior run would make createContainer
+    // fail on the duplicate name; clear it first.
+    try {
+      await raw().getContainer(BUILDER_NAME).remove({ force: true });
+    } catch {
+      // not present
+    }
     const base = qualifiedRepoVariants(BASE, runtime!).find(
       (v) => v.includes("library/") || !v.includes("/"),
     )!;
@@ -238,8 +253,14 @@ describe("reapSupersededImages — real runtime", () => {
       return;
     }
 
-    // Rebuild the private images so there is a superseded version to (not) reap
-    // (the prior test reaped `old`).
+    // Remove the prior test's container so it no longer holds `:new`, then
+    // rebuild the private images (the prior test reaped `old`).
+    // buildPrivateImages is idempotent and frees the refs before recommitting.
+    try {
+      await removeContainer(runtime, CONTAINER_NAME);
+    } catch {
+      // OK if absent.
+    }
     await buildPrivateImages();
     const oldBefore = await localIdsFor(runtime, REPO, OLD_TAG);
     assert.equal(oldBefore.length, 1, "old version re-present");
