@@ -97,6 +97,12 @@ describe("reapSupersededImages — real runtime", () => {
   // single committed base container, so reaping them never touches a
   // shared image another concurrent test depends on.
   async function buildPrivateImages(): Promise<void> {
+    // Remove the managed container first so it can't pin `:new` while we
+    // drop and recommit the refs below. removeContainer treats a missing
+    // container as success and only throws on a real failure — let that
+    // propagate rather than masking it, since a still-pinned `:new` would
+    // re-leak a dangling image.
+    await removeContainer(runtime!, CONTAINER_NAME);
     // Idempotent: drop any existing private refs first. Re-committing a
     // live repo:tag moves the tag to a new image id and orphans the old
     // one as a dangling <none> image that teardown (which removes by
@@ -253,14 +259,9 @@ describe("reapSupersededImages — real runtime", () => {
       return;
     }
 
-    // Remove the prior test's container so it no longer holds `:new`, then
-    // rebuild the private images (the prior test reaped `old`).
-    // buildPrivateImages is idempotent and frees the refs before recommitting.
-    try {
-      await removeContainer(runtime, CONTAINER_NAME);
-    } catch {
-      // OK if absent.
-    }
+    // Rebuild the private images so there is a superseded version to (not)
+    // reap (the prior test reaped `old`). buildPrivateImages removes the
+    // prior test's container itself so `:new` isn't pinned during rebuild.
     await buildPrivateImages();
     const oldBefore = await localIdsFor(runtime, REPO, OLD_TAG);
     assert.equal(oldBefore.length, 1, "old version re-present");
