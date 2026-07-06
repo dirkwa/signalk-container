@@ -122,4 +122,39 @@ describe("ensureRunning — stale-container name conflict on create", () => {
       "no removal should be attempted for an unrelated failure",
     );
   });
+
+  it("does not remove+retry when create is rejected for conflicting options (issue #183)", async () => {
+    // Docker rejects `container:<id>` network mode combined with port
+    // publishing: "conflicting options: port publishing and the container type
+    // network mode". The substring "conflict" lives inside "conflicting", so
+    // the old name-conflict regex misfired here — removing the (perfectly
+    // healthy) container and retrying the identical, still-invalid create.
+    const calls = new Map<string, unknown[]>();
+    let createCount = 0;
+    const conflictingOptions =
+      "conflicting options: port publishing and the container type network mode";
+    const base = makeMockClient({
+      images: { "questdb/questdb:9.0.0": { Id: "sha256:abc" } },
+      calls,
+    });
+    const client = withCreateOverride(base, (opts) => {
+      createCount++;
+      const list = calls.get("createContainer") ?? [];
+      list.push(opts);
+      calls.set("createContainer", list);
+      return Promise.reject(new Error(conflictingOptions));
+    });
+    await assert.rejects(
+      ensureRunning(docker, "questdb", requested, () => {}, undefined, client),
+      // The daemon text must reach the consumer, not a generic "Unexpected
+      // error." — it names the actual misconfiguration.
+      new RegExp(conflictingOptions.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+    );
+    assert.equal(createCount, 1, "create should be attempted exactly once");
+    assert.equal(
+      (calls.get("remove") ?? []).length,
+      0,
+      "a config conflict is not a name collision — nothing should be removed",
+    );
+  });
 });

@@ -18,6 +18,7 @@ export type ErrorKind =
   | "permission"
   | "not-found"
   | "socket-unreachable"
+  | "invalid-config"
   | "unknown";
 
 export interface CategorizedError {
@@ -72,6 +73,21 @@ const PERM_PATTERNS = [
 ];
 
 const NOT_FOUND_PATTERNS = [/no such (image|container|network)/i, /not found/i];
+
+// Rejected-at-create configuration conflicts the daemon reports as a 400 "bad
+// parameter". The canonical case (issue #183): Docker forbids combining port
+// publishing with a `container:<id>` network mode and returns "conflicting
+// options: port publishing and the container type network mode". Classifying
+// these distinctly keeps them out of the "unknown" bucket (which surfaces the
+// useless "Unexpected error. See logs.") and — because it is NOT a name
+// collision — keeps `createAndStart` from mistaking it for a stale-container
+// conflict and pointlessly removing + retrying. `userMessage` deliberately
+// carries no fix text; the raw daemon string is the actionable part and is
+// preserved in `raw`.
+const INVALID_CONFIG_PATTERNS = [
+  /conflicting options/i,
+  /invalid (host)?config/i,
+];
 
 /**
  * Pull a status code off a dockerode error when present. dockerode attaches
@@ -131,6 +147,13 @@ export function categorizeError(err: unknown): CategorizedError {
   }
   if (NOT_FOUND_PATTERNS.some((p) => p.test(raw))) {
     return { kind: "not-found", userMessage: "Resource not found.", raw };
+  }
+  if (INVALID_CONFIG_PATTERNS.some((p) => p.test(raw))) {
+    return {
+      kind: "invalid-config",
+      userMessage: `Container configuration rejected by the runtime: ${raw}`,
+      raw,
+    };
   }
   return {
     kind: "unknown",
