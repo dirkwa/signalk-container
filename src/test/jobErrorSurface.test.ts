@@ -120,3 +120,35 @@ describe("categorizeError — EACCES on the socket is permission, not unreachabl
     );
   });
 });
+
+describe("categorizeError — invalid container config (issue #183)", () => {
+  // Verbatim from Docker 29.6.1 over the socket: creating a container that
+  // shares another container's netns while also publishing a port. Docker
+  // returns HTTP 400 with this exact daemon message.
+  const CONFLICTING_OPTIONS =
+    "conflicting options: port publishing and the container type network mode";
+
+  it("classifies a 'conflicting options' create rejection as invalid-config, not unknown", () => {
+    const c = categorizeError(new Error(CONFLICTING_OPTIONS));
+    assert.equal(c.kind, "invalid-config");
+  });
+
+  it("preserves the raw daemon text and surfaces it in userMessage", () => {
+    const c = categorizeError(new Error(CONFLICTING_OPTIONS));
+    assert.equal(c.raw, CONFLICTING_OPTIONS);
+    // The raw string is the actionable part — it must reach the consumer, not
+    // be swallowed behind a generic "Unexpected error" message.
+    assert.ok(
+      c.userMessage.includes(CONFLICTING_OPTIONS),
+      `userMessage should carry the daemon text, got: ${c.userMessage}`,
+    );
+    assert.notEqual(c.userMessage, "Unexpected error. See logs for details.");
+  });
+
+  it("also classifies an 'invalid HostConfig' rejection as invalid-config", () => {
+    assert.equal(
+      categorizeError(new Error("invalid HostConfig: bad ulimit")).kind,
+      "invalid-config",
+    );
+  });
+});

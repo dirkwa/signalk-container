@@ -2086,10 +2086,17 @@ async function createAndStart(
 ): Promise<{ ok: true } | { ok: false; conflict: boolean; error: string }> {
   const createResult = await safe(() => client.createContainer(opts));
   if (!createResult.ok) {
+    // Only a genuine name collision warrants the stale-container remove+retry.
+    // `not-found` and `invalid-config` (e.g. "conflicting options: port
+    // publishing and the container type network mode", issue #183) are NOT name
+    // collisions — the substring "conflict" lives inside "conflicting options",
+    // so match on the whole "in use"/"409" phrasing, never a bare "conflict",
+    // and never when the error was already categorized as a config rejection.
     const conflict =
-      createResult.error.kind === "not-found"
+      createResult.error.kind === "not-found" ||
+      createResult.error.kind === "invalid-config"
         ? false
-        : /already in use|conflict|409/i.test(createResult.error.raw);
+        : /already in use|name.*conflict|409/i.test(createResult.error.raw);
     return { ok: false, conflict, error: createResult.error.userMessage };
   }
   const startResult = await safe(() => createResult.value.start());
