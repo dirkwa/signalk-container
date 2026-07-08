@@ -393,7 +393,7 @@ The plugin embeds a React config panel in the Signal K Admin UI (via Module Fede
 ### Settings
 
 - **Preferred runtime** -- auto-detect, or force `podman`/`docker`
-- **Auto-prune images** -- off, weekly, or monthly scheduled cleanup of dangling (`<none>`) images. Setting this to `off` also disables the version cleanup below.
+- **Auto-prune images** -- off, weekly, or monthly scheduled cleanup of dangling (`<none>`) images. The interval is measured in wall-clock time and survives server restarts; when a prune is overdue at startup (or has never run), it fires a few minutes after the server comes up. Setting this to `off` also disables the version cleanup below.
 - **Keep N prior managed-image versions** -- on the prune schedule above, also remove superseded versions of images belonging to managed containers, keeping this many prior versions in addition to the running one (default `1`; `0` keeps only the running image). Only touches images of containers this plugin manages — never your other images (e.g. a hand-pulled questdb/grafana), the running image, or any image in use by a container. See [Image version cleanup](#image-version-cleanup).
 - **Update check interval** -- how often to check consumer plugins for new container images (1h to 1 week, default 24h)
 - **Background update checks** -- toggle for metered connections; manual checks still work when off
@@ -809,7 +809,7 @@ All mounted at `/plugins/signalk-container/api/`:
 | Setting                             | Default  | Description                                                                                                                                                                                                                                                                                     |
 | ----------------------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Preferred runtime                   | `auto`   | Auto-detect, or force `podman`/`docker`                                                                                                                                                                                                                                                         |
-| Auto-prune images                   | `weekly` | `off`, `weekly`, or `monthly` scheduled cleanup of dangling images. `off` also disables the version cleanup below.                                                                                                                                                                              |
+| Auto-prune images                   | `weekly` | `off`, `weekly`, or `monthly` scheduled cleanup of dangling images. Wall-clock schedule that survives restarts; an overdue prune runs a few minutes after startup. `off` also disables the version cleanup below.                                                                               |
 | Keep N prior managed-image versions | `1`      | On the prune schedule, also remove superseded versions of managed-container images, keeping this many prior versions besides the running one (`0` = running only). Never touches unregistered images, the running image, or in-use images. See [Image version cleanup](#image-version-cleanup). |
 | Max concurrent jobs                 | `2`      | Limit parallel one-shot job executions                                                                                                                                                                                                                                                          |
 | Update check interval               | `24h`    | How often to check for container image updates (e.g. `24h`, `12h`, `1h`). Min 1h.                                                                                                                                                                                                               |
@@ -843,6 +843,8 @@ The version cleanup is deliberately conservative. It only ever removes supersede
 - any version of a managed image whose running container can't currently be resolved (it keeps everything for that image rather than risk removing the live one).
 
 Because it shares the prune schedule, setting **Auto-prune images** to `off` disables both the dangling prune and the version cleanup. Each run logs how many images it removed and how much space it reclaimed (visible at the plugin's debug log level).
+
+The schedule is anchored to wall-clock time, not process uptime: the timestamp of the last completed run is persisted in the plugin's data directory (`prune-state.json`), so restarting Signal K does not reset the countdown. A machine that never stays up for a full week still prunes weekly — whenever a run comes due while the server is down (or the plugin has never pruned before), it runs a few minutes after the next startup. A failed run is not recorded and is retried the same way.
 
 ## License
 

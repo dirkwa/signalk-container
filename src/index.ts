@@ -59,7 +59,7 @@ import {
   prefixedName,
   pruneImages,
   pullImage,
-  reapSupersededImages,
+  runScheduledPrune,
   qualifyImage as qualifyImageForRuntime,
   removeContainer,
   removeManagedData,
@@ -87,6 +87,7 @@ import {
   DEFAULT_KEEP_IMAGE_VERSIONS,
   normalizeKeepImageVersions,
 } from "./configNormalize.js";
+import { PruneScheduler, FilePruneStateStore } from "./pruneScheduler.js";
 import {
   generateSetupSnippet,
   imageRunsAsUser,
@@ -140,7 +141,7 @@ const SSE_HEARTBEAT_MS = 30_000;
 export default (app: App) => {
   let runtimeInfo: ContainerRuntimeInfo | null = null;
   let runtimePreference: RuntimePreference = "auto";
-  let pruneTimer: NodeJS.Timeout | null = null;
+  let pruneScheduler: PruneScheduler | null = null;
   const healthTimers = new Map<string, NodeJS.Timeout>();
   let updateService: UpdateService | null = null;
   let manifestStore: ManifestStore | null = null;
@@ -1786,7 +1787,7 @@ export default (app: App) => {
           default: "weekly",
           title: "Auto-prune dangling images",
           description:
-            "How often to remove dangling (untagged) images left behind when a floating tag like 'latest' is re-pulled. Off disables both this and the version cleanup below.",
+            "How often to remove dangling (untagged) images left behind when a floating tag like 'latest' is re-pulled. Measured in wall-clock time across restarts; an overdue prune runs a few minutes after startup. Off disables both this and the version cleanup below.",
         },
         keepImageVersions: {
           type: "integer",
@@ -2032,40 +2033,34 @@ export default (app: App) => {
           const keepImageVersions = normalizeKeepImageVersions(
             config.keepImageVersions,
           );
-          pruneTimer = setInterval(async () => {
-            // Snapshot the runtime once so reaping and pruning act on the
-            // same instance across awaits.
-            const runtime = runtimeInfo;
-            if (!runtime) return;
-            // Reap superseded managed versions first: it untags them,
-            // turning their parent layers dangling, so the prune that
-            // follows reclaims those layers in the same tick rather than
-            // leaving them until the next one. Isolated in its own
-            // try/catch — collecting refs can throw (manifest read,
-            // digest probe), and that must not stop the dangling prune,
-            // which is the original, more important cleanup.
-            try {
-              const managed = await collectManagedImageRefs(runtime);
-              const reaped = await reapSupersededImages(
+          pruneScheduler = new PruneScheduler({
+            intervalMs,
+            store: new FilePruneStateStore(
+              path.join(dataDir, "prune-state.json"),
+              (msg) => app.debug(msg),
+            ),
+            debug: (msg) => app.debug(msg),
+            run: async () => {
+              // Snapshot the runtime once so reaping and pruning act on
+              // the same instance across awaits.
+              const runtime = runtimeInfo;
+              if (!runtime) {
+                // Rejecting leaves the run unrecorded, so it is retried
+                // next interval / shortly after the next startup.
+                throw new Error("no container runtime detected");
+              }
+              await runScheduledPrune(
                 runtime,
-                managed,
+                () => collectManagedImageRefs(runtime),
                 keepImageVersions,
+                {
+                  debug: (msg) => app.debug(msg),
+                  error: (msg, err) => app.error(msg, err),
+                },
               );
-              app.debug(
-                `Reaped ${reaped.imagesRemoved} superseded managed images, reclaimed ${reaped.spaceReclaimed}`,
-              );
-            } catch (err) {
-              app.error("Managed-image reaping failed:", err);
-            }
-            try {
-              const result = await pruneImages(runtime);
-              app.debug(
-                `Pruned ${result.imagesRemoved} images, reclaimed ${result.spaceReclaimed}`,
-              );
-            } catch (err) {
-              app.error("Auto-prune failed:", err);
-            }
-          }, intervalMs);
+            },
+          });
+          pruneScheduler.start();
         }
 
         app.debug("Container manager started");
@@ -2079,9 +2074,9 @@ export default (app: App) => {
     },
 
     stop() {
-      if (pruneTimer) {
-        clearInterval(pruneTimer);
-        pruneTimer = null;
+      if (pruneScheduler) {
+        pruneScheduler.stop();
+        pruneScheduler = null;
       }
       for (const timer of healthTimers.values()) {
         clearInterval(timer);

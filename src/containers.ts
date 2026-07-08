@@ -2638,6 +2638,57 @@ export async function reapSupersededImages(
   return { imagesRemoved: removed, spaceReclaimed: bytesToString(reclaimed) };
 }
 
+export interface PruneRunLogger {
+  debug: (msg: string) => void;
+  error: (msg: string, err: unknown) => void;
+}
+
+/**
+ * One scheduled cleanup pass. Reaps superseded managed versions first:
+ * that untags them, turning their parent layers dangling, so the prune
+ * that follows reclaims those layers in the same pass rather than
+ * leaving them until the next one. Each phase is isolated — collecting
+ * managed refs can throw (manifest read, digest probe), and that must
+ * not stop the dangling prune, which is the original, more important
+ * cleanup. A failure in either phase is rethrown after both have run,
+ * so the scheduler leaves the run unrecorded and retries it instead of
+ * waiting out a full interval — both phases are idempotent.
+ */
+export async function runScheduledPrune(
+  runtime: ContainerRuntimeInfo,
+  collectManaged: () => Promise<ManagedImageRef[]>,
+  keepImageVersions: number,
+  log: PruneRunLogger,
+  client: ContainerClient = getClient(),
+): Promise<void> {
+  let firstError: unknown = null;
+  try {
+    const managed = await collectManaged();
+    const reaped = await reapSupersededImages(
+      runtime,
+      managed,
+      keepImageVersions,
+      client,
+    );
+    log.debug(
+      `Reaped ${reaped.imagesRemoved} superseded managed images, reclaimed ${reaped.spaceReclaimed}`,
+    );
+  } catch (err) {
+    log.error("Managed-image reaping failed:", err);
+    firstError = err;
+  }
+  try {
+    const result = await pruneImages(runtime, client);
+    log.debug(
+      `Pruned ${result.imagesRemoved} images, reclaimed ${result.spaceReclaimed}`,
+    );
+  } catch (err) {
+    log.error("Auto-prune failed:", err);
+    firstError ??= err;
+  }
+  if (firstError !== null) throw firstError;
+}
+
 /**
  * Run a command inside a container via the Docker exec API and collect its
  * combined output + exit code. dockerode's exec stream is multiplexed
