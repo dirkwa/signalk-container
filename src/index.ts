@@ -59,7 +59,7 @@ import {
   prefixedName,
   pruneImages,
   pullImage,
-  reapSupersededImages,
+  runScheduledPrune,
   qualifyImage as qualifyImageForRuntime,
   removeContainer,
   removeManagedData,
@@ -2049,41 +2049,15 @@ export default (app: App) => {
                 // next interval / shortly after the next startup.
                 throw new Error("no container runtime detected");
               }
-              // Reap superseded managed versions first: it untags them,
-              // turning their parent layers dangling, so the prune that
-              // follows reclaims those layers in the same tick rather than
-              // leaving them until the next one. Isolated in its own
-              // try/catch — collecting refs can throw (manifest read,
-              // digest probe), and that must not stop the dangling prune,
-              // which is the original, more important cleanup. A failure
-              // in either phase is rethrown after both have run, so the
-              // run stays unrecorded and is retried instead of waiting
-              // out a full interval — both phases are idempotent.
-              let firstError: unknown = null;
-              try {
-                const managed = await collectManagedImageRefs(runtime);
-                const reaped = await reapSupersededImages(
-                  runtime,
-                  managed,
-                  keepImageVersions,
-                );
-                app.debug(
-                  `Reaped ${reaped.imagesRemoved} superseded managed images, reclaimed ${reaped.spaceReclaimed}`,
-                );
-              } catch (err) {
-                app.error("Managed-image reaping failed:", err);
-                firstError = err;
-              }
-              try {
-                const result = await pruneImages(runtime);
-                app.debug(
-                  `Pruned ${result.imagesRemoved} images, reclaimed ${result.spaceReclaimed}`,
-                );
-              } catch (err) {
-                app.error("Auto-prune failed:", err);
-                firstError ??= err;
-              }
-              if (firstError !== null) throw firstError;
+              await runScheduledPrune(
+                runtime,
+                () => collectManagedImageRefs(runtime),
+                keepImageVersions,
+                {
+                  debug: (msg) => app.debug(msg),
+                  error: (msg, err) => app.error(msg, err),
+                },
+              );
             },
           });
           pruneScheduler.start();

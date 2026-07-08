@@ -109,6 +109,8 @@ export const STARTUP_PRUNE_DELAY_MS = 5 * 60 * 1000;
  */
 export const MAX_TIMER_CHUNK_MS = 6 * 60 * 60 * 1000;
 
+const MS_PER_MINUTE = 60 * 1000;
+
 export interface PruneSchedulerOptions {
   intervalMs: number;
   /**
@@ -165,7 +167,7 @@ export class PruneScheduler {
     const dueAt = lastRunAt === null ? now : lastRunAt + this.intervalMs;
     const runAt = Math.max(dueAt, now + this.startupDelayMs);
     this.debug(
-      `[prune] next run in ${Math.round((runAt - now) / 60000)} minutes`,
+      `[prune] next run in ${Math.round((runAt - now) / MS_PER_MINUTE)} minutes`,
     );
     this.scheduleAt(runAt);
   }
