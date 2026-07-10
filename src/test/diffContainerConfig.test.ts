@@ -490,6 +490,20 @@ describe("diffContainerConfig — extraHosts", () => {
     assert.ok(drifted.includes("extraHosts"));
   });
 
+  it("no drift on docker under container: netns where the injection is skipped", () => {
+    // buildCreateOptions skips the host-gateway injection under a
+    // `container:` network mode (Docker rejects the combination), so the
+    // live container legitimately has no ExtraHosts. The diff mirror must
+    // skip the injection too or every reconcile would recreate the
+    // container.
+    const { drifted } = diffContainerConfig(
+      reqBase({ networkMode: "container:abc123" }),
+      liveBase({ networkMode: "container:abc123" }),
+      docker,
+    );
+    assert.ok(!drifted.includes("extraHosts"));
+  });
+
   it("no drift on podman when neither side has extraHosts (podman auto-adds, doesn't record)", () => {
     // Podman auto-adds host.containers.internal natively but doesn't
     // record it in HostConfig.ExtraHosts. The diff code only injects

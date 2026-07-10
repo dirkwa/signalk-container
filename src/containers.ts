@@ -1225,6 +1225,16 @@ function canonicalNetworkMode(mode: string | undefined): string {
   return RUNTIME_DEFAULT_NETWORK_MODES.has(m) ? "" : m;
 }
 
+/**
+ * A `container:<id>` network mode shares another container's netns. Docker
+ * rejects ExtraHosts in that mode ("conflicting options: custom host-to-IP
+ * mapping and the network mode"), so the host-gateway injection and its
+ * drift mirror must both skip it.
+ */
+function sharesContainerNetns(mode: string | undefined): boolean {
+  return (mode ?? "").startsWith("container:");
+}
+
 function stripTrailingSlash(p: string): string {
   return p.length > 1 && p.endsWith("/") ? p.slice(0, -1) : p;
 }
@@ -1419,10 +1429,12 @@ export function diffContainerConfig(
   // same way Podman does natively. Mirror that here so the live
   // ExtraHosts (which records the flag) doesn't fire false drift —
   // but only when the user didn't supply their own override for the
-  // same key.
+  // same key, and never under a `container:` network mode where the
+  // injection is skipped (Docker rejects the combination).
   if (
     runtime.runtime === "docker" &&
-    !requestedExtraHosts.has("host.containers.internal")
+    !requestedExtraHosts.has("host.containers.internal") &&
+    !sharesContainerNetns(requested.networkMode)
   ) {
     requestedExtraHosts.set("host.containers.internal", "host-gateway");
   }
@@ -1745,7 +1757,9 @@ function buildCreateOptions(
   // host.containers.internal:host-gateway mapping Podman provides
   // natively. Skip the Docker injection if the user already supplied
   // their own value for the same key to avoid duplicate /etc/hosts
-  // entries and the implicit first-match-wins override.
+  // entries and the implicit first-match-wins override, and under a
+  // `container:` network mode, which Docker rejects in combination
+  // with ExtraHosts.
   const userHasInternalOverride =
     !!config.extraHosts &&
     Object.prototype.hasOwnProperty.call(
@@ -1758,7 +1772,11 @@ function buildCreateOptions(
       extraHosts.push(`${hostname}:${ip}`);
     }
   }
-  if (runtime.runtime === "docker" && !userHasInternalOverride) {
+  if (
+    runtime.runtime === "docker" &&
+    !userHasInternalOverride &&
+    !sharesContainerNetns(config.networkMode)
+  ) {
     extraHosts.push("host.containers.internal:host-gateway");
   }
   if (extraHosts.length > 0) hostConfig.ExtraHosts = extraHosts;
@@ -3420,11 +3438,13 @@ export function userDefinedDnsNetworks(networkNames: string[]): string[] {
  * via DNS name without exposing any host port.
  *
  * Returns:
- *   - `null`    when running bare-metal, or when self-container detection
- *               fails (`SIGNALK_CONTAINER_ID` unset, HOSTNAME unusable
- *               under `network_mode: host`, and `/proc/self/cgroup` not
- *               parseable).  Callers should treat this like bare-metal
- *               and publish ports instead.
+ *   - `null`    when running bare-metal, when the SignalK container itself
+ *               uses `network_mode: host` (the host loopback IS SignalK's
+ *               loopback, so published ports are directly reachable), or
+ *               when self-container detection fails (`SIGNALK_CONTAINER_ID`
+ *               unset, HOSTNAME unusable under `network_mode: host`, and
+ *               `/proc/self/cgroup` not parseable).  Callers should treat
+ *               this like bare-metal and publish ports instead.
  *   - `string[]` (possibly empty) when inspect succeeds.  An empty array means
  *               SignalK is only on the default bridge — callers should fall
  *               back to `networkMode: container:<self-container-id>`.  A non-empty
@@ -3452,6 +3472,19 @@ export async function resolveSignalkNetworks(
   if (info === null) {
     debug(
       `resolveSignalkNetworks: inspect ${selfId} failed — treating as bare-metal`,
+    );
+    return null;
+  }
+
+  // A host-networked SignalK container shares the host netns, so ports
+  // published on the host loopback are directly reachable — exactly the
+  // bare-metal strategy. Falling through to the netns-join fallback
+  // instead would put managed containers on the host network (and on
+  // Docker the create is outright rejected because the injected
+  // host-gateway ExtraHosts conflicts with `container:` network mode).
+  if (info.HostConfig?.NetworkMode?.trim() === "host") {
+    debug(
+      `resolveSignalkNetworks: ${selfId} uses host networking — treating as bare-metal (publish ports on 127.0.0.1)`,
     );
     return null;
   }

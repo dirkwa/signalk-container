@@ -272,6 +272,8 @@ export interface ContainerConfig {
    *
    * Note: Podman automatically maps `host.containers.internal` to `host-gateway`,
    * but Docker does not, so this plugin adds that mapping for Docker automatically.
+   * The automatic mapping is skipped under a `container:<id>` networkMode —
+   * Docker rejects ExtraHosts combined with container netns sharing.
    */
   extraHosts?: Record<string, string>;
   /**

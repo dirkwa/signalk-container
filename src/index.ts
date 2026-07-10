@@ -234,8 +234,9 @@ export default (app: App) => {
   let pendingConfigRootSource: Promise<string> | null = null;
   // Cached SignalK user-defined networks (resolved once, cleared on stop).
   // `pendingNetworks` collapses concurrent resolutions onto one inspect.
-  // `undefined` = not yet resolved; `null` = resolved but inspect failed
-  // (bare-metal or host-network); `string[]` = resolved successfully.
+  // `undefined` = not yet resolved; `null` = bare-metal semantics (not
+  // containerized, SignalK itself host-networked, or inspect failed);
+  // `string[]` = resolved successfully.
   let cachedSignalkNetworks: string[] | null | undefined = undefined;
   let pendingNetworks: Promise<string[] | null> | null = null;
   async function ensureCachedSignalkNetworks(): Promise<string[] | null> {
@@ -646,11 +647,12 @@ export default (app: App) => {
           registeredPorts.add(`${name}:${containerPort}`);
         }
 
-        // resolveSignalkNetworks returns null when running bare-metal OR when
-        // docker inspect fails (e.g. host-network mode where HOSTNAME is the
-        // machine name, not a container ID). In both cases we fall back to
-        // publishing ports on 127.0.0.1 — the SignalK process can reach them
-        // on the loopback whether it is bare-metal or on the host network.
+        // resolveSignalkNetworks returns null when running bare-metal, when
+        // the SignalK container itself uses host networking, or when docker
+        // inspect fails (e.g. self-id undetectable). In all cases we fall
+        // back to publishing ports on 127.0.0.1 — the SignalK process can
+        // reach them on the loopback whether it is bare-metal or on the
+        // host network.
         const networks = isContainerized()
           ? await ensureCachedSignalkNetworks()
           : null;
@@ -661,12 +663,43 @@ export default (app: App) => {
           // Bind each port to 127.0.0.1. Prefer the declared port number;
           // step over it if already in use.
           const portMappings: Record<string, string> = {};
+          // The port cache dies with the plugin, so on the first call after
+          // a server restart consult the live container's actual bindings
+          // before probing: findAvailablePort() would collide with the very
+          // port our own running container publishes, allocate a fresh one,
+          // and the resulting ports drift would recreate the container on
+          // every restart.
+          let liveBindings: Awaited<ReturnType<typeof getActualPortBindings>> =
+            new Map();
+          if (
+            signalkAccessiblePorts.some(
+              (p) => !portAddressMap.has(`${name}:${p}`),
+            )
+          ) {
+            try {
+              liveBindings = await getActualPortBindings(runtimeInfo, name);
+            } catch {
+              // Non-fatal: fall through to probing.
+            }
+          }
           for (const containerPort of signalkAccessiblePorts) {
             // Reuse a previously COMMITTED host port for this container+port
             // so that idempotent ensureRunning() calls don't trigger a
             // config change (and therefore an unwanted container recreate).
             const cacheKey = `${name}:${containerPort}`;
             let address = portAddressMap.get(cacheKey);
+            if (!address) {
+              const live = liveBindings.get(containerPort);
+              const chosen =
+                live?.find((b) => b.hostIp === "127.0.0.1") ?? live?.[0];
+              if (chosen) {
+                address = `127.0.0.1:${chosen.hostPort}`;
+                pendingPortMap.set(cacheKey, address);
+                app.debug(
+                  `signalkAccessiblePorts(${name}): reusing live host port ${chosen.hostPort} for ${containerPort}`,
+                );
+              }
+            }
             if (!address) {
               const hostPort = await findAvailablePort(containerPort);
               address = `127.0.0.1:${hostPort}`;
