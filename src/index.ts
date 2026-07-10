@@ -663,12 +663,43 @@ export default (app: App) => {
           // Bind each port to 127.0.0.1. Prefer the declared port number;
           // step over it if already in use.
           const portMappings: Record<string, string> = {};
+          // The port cache dies with the plugin, so on the first call after
+          // a server restart consult the live container's actual bindings
+          // before probing: findAvailablePort() would collide with the very
+          // port our own running container publishes, allocate a fresh one,
+          // and the resulting ports drift would recreate the container on
+          // every restart.
+          let liveBindings: Awaited<ReturnType<typeof getActualPortBindings>> =
+            new Map();
+          if (
+            signalkAccessiblePorts.some(
+              (p) => !portAddressMap.has(`${name}:${p}`),
+            )
+          ) {
+            try {
+              liveBindings = await getActualPortBindings(runtimeInfo, name);
+            } catch {
+              // Non-fatal: fall through to probing.
+            }
+          }
           for (const containerPort of signalkAccessiblePorts) {
             // Reuse a previously COMMITTED host port for this container+port
             // so that idempotent ensureRunning() calls don't trigger a
             // config change (and therefore an unwanted container recreate).
             const cacheKey = `${name}:${containerPort}`;
             let address = portAddressMap.get(cacheKey);
+            if (!address) {
+              const live = liveBindings.get(containerPort);
+              const chosen =
+                live?.find((b) => b.hostIp === "127.0.0.1") ?? live?.[0];
+              if (chosen) {
+                address = `127.0.0.1:${chosen.hostPort}`;
+                pendingPortMap.set(cacheKey, address);
+                app.debug(
+                  `signalkAccessiblePorts(${name}): reusing live host port ${chosen.hostPort} for ${containerPort}`,
+                );
+              }
+            }
             if (!address) {
               const hostPort = await findAvailablePort(containerPort);
               address = `127.0.0.1:${hostPort}`;
