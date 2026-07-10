@@ -3438,11 +3438,13 @@ export function userDefinedDnsNetworks(networkNames: string[]): string[] {
  * via DNS name without exposing any host port.
  *
  * Returns:
- *   - `null`    when running bare-metal, or when self-container detection
- *               fails (`SIGNALK_CONTAINER_ID` unset, HOSTNAME unusable
- *               under `network_mode: host`, and `/proc/self/cgroup` not
- *               parseable).  Callers should treat this like bare-metal
- *               and publish ports instead.
+ *   - `null`    when running bare-metal, when the SignalK container itself
+ *               uses `network_mode: host` (the host loopback IS SignalK's
+ *               loopback, so published ports are directly reachable), or
+ *               when self-container detection fails (`SIGNALK_CONTAINER_ID`
+ *               unset, HOSTNAME unusable under `network_mode: host`, and
+ *               `/proc/self/cgroup` not parseable).  Callers should treat
+ *               this like bare-metal and publish ports instead.
  *   - `string[]` (possibly empty) when inspect succeeds.  An empty array means
  *               SignalK is only on the default bridge — callers should fall
  *               back to `networkMode: container:<self-container-id>`.  A non-empty
@@ -3470,6 +3472,19 @@ export async function resolveSignalkNetworks(
   if (info === null) {
     debug(
       `resolveSignalkNetworks: inspect ${selfId} failed — treating as bare-metal`,
+    );
+    return null;
+  }
+
+  // A host-networked SignalK container shares the host netns, so ports
+  // published on the host loopback are directly reachable — exactly the
+  // bare-metal strategy. Falling through to the netns-join fallback
+  // instead would put managed containers on the host network (and on
+  // Docker the create is outright rejected because the injected
+  // host-gateway ExtraHosts conflicts with `container:` network mode).
+  if (info.HostConfig?.NetworkMode?.trim() === "host") {
+    debug(
+      `resolveSignalkNetworks: ${selfId} uses host networking — treating as bare-metal (publish ports on 127.0.0.1)`,
     );
     return null;
   }

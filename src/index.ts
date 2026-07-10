@@ -234,8 +234,9 @@ export default (app: App) => {
   let pendingConfigRootSource: Promise<string> | null = null;
   // Cached SignalK user-defined networks (resolved once, cleared on stop).
   // `pendingNetworks` collapses concurrent resolutions onto one inspect.
-  // `undefined` = not yet resolved; `null` = resolved but inspect failed
-  // (bare-metal or host-network); `string[]` = resolved successfully.
+  // `undefined` = not yet resolved; `null` = bare-metal semantics (not
+  // containerized, SignalK itself host-networked, or inspect failed);
+  // `string[]` = resolved successfully.
   let cachedSignalkNetworks: string[] | null | undefined = undefined;
   let pendingNetworks: Promise<string[] | null> | null = null;
   async function ensureCachedSignalkNetworks(): Promise<string[] | null> {
@@ -646,11 +647,12 @@ export default (app: App) => {
           registeredPorts.add(`${name}:${containerPort}`);
         }
 
-        // resolveSignalkNetworks returns null when running bare-metal OR when
-        // docker inspect fails (e.g. host-network mode where HOSTNAME is the
-        // machine name, not a container ID). In both cases we fall back to
-        // publishing ports on 127.0.0.1 — the SignalK process can reach them
-        // on the loopback whether it is bare-metal or on the host network.
+        // resolveSignalkNetworks returns null when running bare-metal, when
+        // the SignalK container itself uses host networking, or when docker
+        // inspect fails (e.g. self-id undetectable). In all cases we fall
+        // back to publishing ports on 127.0.0.1 — the SignalK process can
+        // reach them on the loopback whether it is bare-metal or on the
+        // host network.
         const networks = isContainerized()
           ? await ensureCachedSignalkNetworks()
           : null;
