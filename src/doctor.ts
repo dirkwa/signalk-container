@@ -15,8 +15,10 @@ import { findSelfContainerId, qualifyImage } from "./containers.js";
 import { isContainerized, userMappingFlags } from "./runtime.js";
 import {
   type ContainerClient,
+  type LibpodNetworkBackendInfo,
   type ResolvedClient,
   getClient,
+  libpodNetworkBackendInfo,
   resolveClient,
   safe,
 } from "./client.js";
@@ -219,6 +221,16 @@ export interface SelfDeploymentProbes {
    * user owning the runtime).
    */
   resolveLingerUser?: () => string | null;
+  /**
+   * Read Podman's `host.networkBackendInfo` via the libpod `/info`
+   * endpoint (the docker-compat `/info` doesn't expose it). Returns
+   * `null` when the endpoint isn't available (Docker, pre-4.0 Podman,
+   * request failure). Defaults to `libpodNetworkBackendInfo` from
+   * `client.ts`; tests inject a fake payload.
+   */
+  readNetworkBackendInfo?: (
+    client: ContainerClient,
+  ) => Promise<LibpodNetworkBackendInfo | null>;
 }
 
 /**
@@ -320,6 +332,13 @@ const REMEDIATION_IDMAP_HAZARD = [
   "  Then: podman system reset && podman system migrate",
   "  (the fuse-overlayfs binary ships in most distros' fuse-overlayfs package).",
   "Secondary fix: enable signalk-container's 'Disable user-namespace remap' setting to drop --userns=keep-id. Root-by-default images keep correct bind-mount ownership; non-root images give up host-caller ownership.",
+];
+
+const REMEDIATION_MISSING_AARDVARK_DNS = [
+  "aardvark-dns is not installed on the host — netavark hands containers on user-defined networks the bridge gateway as nameserver, but nothing listens on :53, so every DNS lookup inside those containers fails with 'connection refused'.",
+  "(On Debian-family hosts aardvark-dns is only a Recommends of netavark; recommends-off installs like Armbian skip it.)",
+  "Install it on the host: sudo apt install aardvark-dns   # dnf install aardvark-dns on Fedora/RHEL",
+  "Then restart the containers on user-defined networks so netavark starts the DNS server.",
 ];
 
 const LINGER_DIR = "/var/lib/systemd/linger";
@@ -467,6 +486,33 @@ async function probeContainerStorage(
 }
 
 /**
+ * Probe the netavark DNS helper (aardvark-dns) via libpod info. Callers
+ * gate on "Podman AND daemon reachable". Returns `null` when the
+ * endpoint gave nothing (Docker-shim confusion, pre-netavark Podman,
+ * request failure) so the advisory can't false-fire. Only the netavark
+ * backend flags a missing helper — CNI installs resolve container names
+ * through the dnsname plugin instead.
+ */
+async function probeNetworkDns(
+  readNetworkBackendInfo: (
+    client: ContainerClient,
+  ) => Promise<LibpodNetworkBackendInfo | null>,
+  client: ContainerClient,
+): Promise<SelfDeploymentResult["networkDns"]> {
+  const info = await readNetworkBackendInfo(client);
+  if (!info) return null;
+  const backend = info.backend ?? null;
+  const helperPath = info.dns?.path ?? null;
+  const dnsBroken = backend === "netavark" && !helperPath;
+  return {
+    backend,
+    helperPath,
+    dnsBroken,
+    advice: dnsBroken ? [...REMEDIATION_MISSING_AARDVARK_DNS] : [],
+  };
+}
+
+/**
  * Diagnose whether this Signal K deployment can drive the container
  * runtime at all, and (when SK is itself containerized) whether the
  * prereqs for the in-container deployment path are met.
@@ -510,6 +556,8 @@ export async function selfDeployment(
   const probeReadLingerDir = probes.readLingerDir ?? defaultReadLingerDir;
   const probeResolveLingerUser =
     probes.resolveLingerUser ?? defaultResolveLingerUser;
+  const probeReadNetworkBackendInfo =
+    probes.readNetworkBackendInfo ?? libpodNetworkBackendInfo;
 
   const containerized = probeIsContainerized();
   const env = {
@@ -544,6 +592,7 @@ export async function selfDeployment(
       cgroupControllers,
       containerStorage: null,
       linger: null,
+      networkDns: null,
       status: "no-runtime",
       remediation: containerized
         ? REMEDIATION_NO_RUNTIME_CONTAINERIZED
@@ -590,6 +639,16 @@ export async function selfDeployment(
         )
       : null;
 
+  // DNS-helper advisory. Podman-only (Docker has its own embedded DNS)
+  // but NOT rootless-only: rootful netavark needs aardvark-dns just the
+  // same. Run it even when everything currently works so the operator
+  // learns about the gap before the first plugin lands on a user-defined
+  // network.
+  const networkDns =
+    binaryName === "podman" && info.reachable
+      ? await probeNetworkDns(probeReadNetworkBackendInfo, apiClient)
+      : null;
+
   // `binary.path` is null — there is no binary concept over the socket.
   // The field shape is retained (name/version still populated from
   // `version()`) so existing consumers reading the daemon report don't
@@ -601,6 +660,7 @@ export async function selfDeployment(
     cgroupControllers,
     containerStorage,
     linger,
+    networkDns,
   };
 
   if (!info.reachable) {

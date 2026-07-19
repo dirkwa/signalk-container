@@ -119,6 +119,13 @@ export function formatDoctorReport(r: SelfDeploymentResult): string {
     );
   }
 
+  if (r.networkDns) {
+    const d = r.networkDns;
+    lines.push(
+      `network DNS helper (${or(d.backend)}): ${d.dnsBroken ? "MISSING — user-defined-network DNS is broken" : or(d.helperPath)}`,
+    );
+  }
+
   const envEntries = Object.entries(r.env).filter(([, v]) => v != null);
   if (envEntries.length > 0) {
     lines.push("");
@@ -126,11 +133,19 @@ export function formatDoctorReport(r: SelfDeploymentResult): string {
     for (const [k, v] of envEntries) lines.push(`  ${k}=${v}`);
   }
 
-  lines.push("");
+  // "No action needed" would contradict a non-empty advisory block below
+  // (storage/linger/network-DNS advice can be actionable while status
+  // stays ok), so it only renders when there is truly nothing to do.
+  const hasAdvisoryAdvice =
+    (r.containerStorage?.advice.length ?? 0) > 0 ||
+    (r.linger?.advice.length ?? 0) > 0 ||
+    (r.networkDns?.advice.length ?? 0) > 0;
   if (r.remediation.length > 0) {
+    lines.push("");
     lines.push("Remediation:");
     for (const line of r.remediation) lines.push(line);
-  } else {
+  } else if (!hasAdvisoryAdvice) {
+    lines.push("");
     lines.push("No action needed (status ok).");
   }
 
@@ -144,6 +159,12 @@ export function formatDoctorReport(r: SelfDeploymentResult): string {
     lines.push("");
     lines.push("Linger advice:");
     for (const line of r.linger.advice) lines.push(line);
+  }
+
+  if (r.networkDns && r.networkDns.advice.length > 0) {
+    lines.push("");
+    lines.push("Network DNS advice:");
+    for (const line of r.networkDns.advice) lines.push(line);
   }
 
   return lines.join("\n");

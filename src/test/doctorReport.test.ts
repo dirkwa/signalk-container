@@ -37,6 +37,7 @@ function baseResult(
     },
     containerStorage: null,
     linger: null,
+    networkDns: null,
     status: "ok",
     remediation: [],
     ...over,
@@ -132,6 +133,51 @@ describe("formatDoctorReport", () => {
     );
     assert.match(out, /systemd linger: enabled/);
     assert.doesNotMatch(out, /Linger advice:/);
+  });
+
+  it("includes the network-DNS line and advice when aardvark-dns is missing", () => {
+    const out = formatDoctorReport(
+      baseResult({
+        networkDns: {
+          backend: "netavark",
+          helperPath: null,
+          dnsBroken: true,
+          advice: ["Install it on the host: sudo apt install aardvark-dns"],
+        },
+      }),
+    );
+    assert.match(
+      out,
+      /network DNS helper \(netavark\): MISSING — user-defined-network DNS is broken/,
+    );
+    assert.match(out, /Network DNS advice:/);
+    assert.match(out, /apt install aardvark-dns/);
+    // status stays ok (advisory-only), but the report must not claim
+    // nothing needs doing right above actionable advice.
+    assert.doesNotMatch(out, /No action needed/);
+  });
+
+  it("renders a healthy network-DNS helper without an advice block", () => {
+    const out = formatDoctorReport(
+      baseResult({
+        networkDns: {
+          backend: "netavark",
+          helperPath: "/usr/lib/podman/aardvark-dns",
+          dnsBroken: false,
+          advice: [],
+        },
+      }),
+    );
+    assert.match(
+      out,
+      /network DNS helper \(netavark\): \/usr\/lib\/podman\/aardvark-dns/,
+    );
+    assert.doesNotMatch(out, /Network DNS advice:/);
+  });
+
+  it("omits the network-DNS line entirely when the probe did not run", () => {
+    const out = formatDoctorReport(baseResult({ networkDns: null }));
+    assert.doesNotMatch(out, /network DNS helper/);
   });
 
   it("includes the daemon error line when the daemon is unreachable", () => {

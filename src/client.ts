@@ -55,7 +55,72 @@ export interface ContainerClient {
       stdout: NodeJS.WritableStream,
       stderr: NodeJS.WritableStream,
     ): void;
+    /**
+     * Raw request against the daemon socket. Optional because test mocks
+     * usually don't provide it; `libpodInfo` degrades to `null` then.
+     */
+    dial?(
+      options: {
+        path: string;
+        method: string;
+        statusCodes: Record<number, boolean | string>;
+      },
+      callback: (err: Error | null, data: unknown) => void,
+    ): void;
   };
+}
+
+/** `host.networkBackendInfo` slice of Podman's libpod `/info` payload. */
+export interface LibpodNetworkBackendInfo {
+  /** "netavark" on Podman >= 4; "cni" on older installs. */
+  backend?: string;
+  /** DNS helper netavark resolved (aardvark-dns). Empty object when the binary is missing. */
+  dns?: { version?: string; package?: string; path?: string };
+}
+
+interface LibpodInfo {
+  host?: { networkBackendInfo?: LibpodNetworkBackendInfo };
+}
+
+/**
+ * Podman's native `/libpod/info` — the docker-compat `/info` the rest of the
+ * plugin uses does NOT expose `networkBackendInfo`, so host-side network
+ * facts (which DNS helper netavark resolved, if any) are only visible here.
+ * The version prefix is required (unversioned libpod paths 404); Podman
+ * accepts any client version for this endpoint. Returns `null` on Docker,
+ * on any request failure, and when the modem can't dial (test mocks).
+ */
+export function libpodNetworkBackendInfo(
+  client: ContainerClient,
+): Promise<LibpodNetworkBackendInfo | null> {
+  return new Promise((resolve) => {
+    const dial = client.modem.dial?.bind(client.modem);
+    if (!dial) {
+      resolve(null);
+      return;
+    }
+    try {
+      dial(
+        {
+          path: "/v4.0.0/libpod/info",
+          method: "GET",
+          statusCodes: { 200: true, 500: "server error" },
+        },
+        (err, data) => {
+          // The callback fires asynchronously — a throw here would escape
+          // the surrounding try and leave the promise pending forever, so
+          // the daemon payload is shape-checked instead of dereferenced.
+          if (err || typeof data !== "object" || data === null) {
+            resolve(null);
+            return;
+          }
+          resolve((data as LibpodInfo).host?.networkBackendInfo ?? null);
+        },
+      );
+    } catch {
+      resolve(null);
+    }
+  });
 }
 
 /** Runtime the caller prefers when more than one socket is reachable. */
