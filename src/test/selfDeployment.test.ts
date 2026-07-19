@@ -157,6 +157,11 @@ function probesWith(overrides: SelfDeploymentProbes): SelfDeploymentProbes {
     // the enabled / not-enabled / absent-dir paths.
     readLingerDir: overrides.readLingerDir ?? (async () => null),
     resolveLingerUser: overrides.resolveLingerUser ?? (() => null),
+    // Default to "libpod info unavailable" so the network-DNS advisory
+    // never fires for tests that don't opt in. Override per-test to
+    // drive the netavark-with/without-aardvark paths.
+    readNetworkBackendInfo:
+      overrides.readNetworkBackendInfo ?? (async () => null),
   };
 }
 
@@ -1350,5 +1355,118 @@ describe("selfDeployment — rootless detection from info()", () => {
       }),
     );
     assert.equal(result.daemon.rootless, false);
+  });
+});
+
+describe("selfDeployment — network DNS helper advisory (podman/netavark)", () => {
+  it("netavark with aardvark-dns resolved → no advisory", async () => {
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({
+        resolveClient: resolveTo(rootlessPodman()),
+        readNetworkBackendInfo: async () => ({
+          backend: "netavark",
+          dns: {
+            version: "aardvark-dns 1.14.0",
+            package: "aardvark-dns_1.14.0-3_amd64",
+            path: "/usr/lib/podman/aardvark-dns",
+          },
+        }),
+      }),
+    );
+    assert.equal(result.status, "ok");
+    assert.deepEqual(result.networkDns, {
+      backend: "netavark",
+      helperPath: "/usr/lib/podman/aardvark-dns",
+      dnsBroken: false,
+      advice: [],
+    });
+  });
+
+  it("netavark without a DNS helper → advisory, status stays ok", async () => {
+    // The 2026-07 Armbian field shape: netavark installed, aardvark-dns
+    // skipped by recommends-off apt. libpod info then reports a dns
+    // object with no path ({"package": "Unknown"}).
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({
+        resolveClient: resolveTo(rootlessPodman()),
+        readNetworkBackendInfo: async () => ({
+          backend: "netavark",
+          dns: { package: "Unknown" },
+        }),
+      }),
+    );
+    assert.equal(result.status, "ok");
+    assert.ok(result.networkDns);
+    assert.equal(result.networkDns.dnsBroken, true);
+    assert.equal(result.networkDns.helperPath, null);
+    assert.ok(result.networkDns.advice.length > 0);
+    assert.match(result.networkDns.advice.join("\n"), /aardvark-dns/);
+    assert.match(
+      result.networkDns.advice.join("\n"),
+      /apt install aardvark-dns/,
+    );
+  });
+
+  it("rootful podman is probed too (aardvark applies beyond rootless)", async () => {
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({
+        resolveClient: resolveTo(rootfulPodman()),
+        readNetworkBackendInfo: async () => ({
+          backend: "netavark",
+          dns: { package: "Unknown" },
+        }),
+      }),
+    );
+    assert.ok(result.networkDns);
+    assert.equal(result.networkDns.dnsBroken, true);
+  });
+
+  it("CNI backend without a dns object → no advisory (dnsname plugin era)", async () => {
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({
+        resolveClient: resolveTo(rootlessPodman()),
+        readNetworkBackendInfo: async () => ({ backend: "cni" }),
+      }),
+    );
+    assert.ok(result.networkDns);
+    assert.equal(result.networkDns.dnsBroken, false);
+    assert.deepEqual(result.networkDns.advice, []);
+  });
+
+  it("libpod info unavailable → networkDns null (no false advisory)", async () => {
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({
+        resolveClient: resolveTo(rootlessPodman()),
+        readNetworkBackendInfo: async () => null,
+      }),
+    );
+    assert.equal(result.networkDns, null);
+  });
+
+  it("docker runtime → probe not consulted, networkDns null", async () => {
+    let called = false;
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({
+        resolveClient: resolveTo(dockerRootful()),
+        readNetworkBackendInfo: async () => {
+          called = true;
+          return { backend: "netavark", dns: { package: "Unknown" } };
+        },
+      }),
+    );
+    assert.equal(result.networkDns, null);
+    assert.equal(called, false);
   });
 });

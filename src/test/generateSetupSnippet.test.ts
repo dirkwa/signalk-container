@@ -29,6 +29,7 @@ function fakeResult(
     },
     containerStorage: null,
     linger: null,
+    networkDns: null,
     status: "ok",
     remediation: [],
     ...overrides,

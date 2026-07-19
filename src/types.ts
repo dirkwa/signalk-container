@@ -1345,6 +1345,35 @@ export interface SelfDeploymentResult {
     /** Operator-facing remediation; empty when `enabled` is true. */
     advice: string[];
   } | null;
+  /**
+   * DNS helper state for Podman's netavark network backend. Probed only
+   * when the daemon is reachable AND the runtime is Podman, via the
+   * libpod `/info` endpoint (the docker-compat `/info` doesn't expose
+   * `networkBackendInfo`). Advisory only — does not escalate `status`.
+   *
+   * On Debian-family hosts aardvark-dns is only a Recommends of
+   * netavark, and recommends-off installs (Armbian is the canonical
+   * case) end up with netavark but no DNS helper: containers on
+   * user-defined networks get the bridge gateway as nameserver with
+   * nothing listening on :53, so every lookup fails with "connection
+   * refused" while the default `podman` network (DNS disabled, host
+   * resolv.conf) keeps working — which makes the breakage look
+   * plugin-specific rather than host-wide.
+   *
+   * `null` when the probe could not run: Docker runtime, unreachable
+   * daemon, a Podman old enough to not report `networkBackendInfo`
+   * (pre-4.0 / CNI), or the libpod endpoint failing.
+   */
+  networkDns: {
+    /** Network backend name from libpod info ("netavark", "cni"). */
+    backend: string | null;
+    /** Resolved aardvark-dns path; null when the helper is missing. */
+    helperPath: string | null;
+    /** True when the backend is netavark and no DNS helper was resolved. */
+    dnsBroken: boolean;
+    /** Operator-facing remediation; empty when `dnsBroken` is false. */
+    advice: string[];
+  } | null;
   status: SelfDeploymentStatus;
   /** Empty when `status === "ok"`. */
   remediation: string[];
