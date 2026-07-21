@@ -34,16 +34,14 @@ import {
 } from "./client.js";
 import type { ErrorKind } from "./errors.js";
 import { resourcePayloadForRun } from "./resources.js";
+import { containerPrefix } from "./namespace.js";
 import { classifyTag } from "./updates/tagClassifier.js";
 import { compareVersions } from "./updates/semver.js";
 import { isOfflineError } from "./updates/offline.js";
 
-const CONTAINER_PREFIX = "sk-";
-
 export function prefixedName(name: string): string {
-  return name.startsWith(CONTAINER_PREFIX)
-    ? name
-    : `${CONTAINER_PREFIX}${name}`;
+  const prefix = containerPrefix();
+  return name.startsWith(prefix) ? name : `${prefix}${name}`;
 }
 
 /**
@@ -699,7 +697,8 @@ export async function getLiveContainerDigest(
   client: ContainerClient = getClient(),
 ): Promise<string | null> {
   // The caller passes the unprefixed name from `ensureRunning`; the
-  // running container always carries the `sk-` prefix.
+  // running container always carries the namespace prefix (`sk-` by
+  // default — see namespace.ts).
   const imageId = await getImageDigest(
     runtime,
     prefixedName(containerName),
@@ -2397,7 +2396,7 @@ export async function listContainers(
   const result = await safe(() =>
     client.listContainers({
       all: true,
-      filters: { name: [CONTAINER_PREFIX] },
+      filters: { name: [containerPrefix()] },
     }),
   );
   if (!result.ok) return [];

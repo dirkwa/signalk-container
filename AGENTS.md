@@ -51,6 +51,16 @@ Do not add error handling, fallbacks, or validation for scenarios that cannot ha
 
 These are non-obvious rules baked into the runtime layer. Breaking them produces silent failures or runtime-specific bugs.
 
+### Container-name namespace
+
+Every managed container, one-shot job container, and job label carries a **namespace prefix** so two Signal K servers sharing one container runtime never collide, reap, or drift-recreate each other's containers. The canonical case is a devcontainer dev instance and a production install on the same host, both talking to the same rootless-Podman socket: without a namespace the dev server's `ensureRunning("questdb")` would inspect the production `sk-questdb`, and its job reaper (`cleanupOrphanedJobs`) could force-remove production `sk-job-*` helpers.
+
+- `src/namespace.ts` is the single source of truth. The namespace token defaults to `sk`, so an install that sets no env var is **byte-for-byte identical** to every prior release: containers `sk-<name>`, jobs `sk-job-<id>`, labels `sk-charts-job` / `sk-job-owner` / `sk-job-label`.
+- `setNamespace(process.env.SIGNALK_CONTAINER_NAMESPACE, onInvalid)` runs once in `plugin.start()`, **before** anything creates or reaps a container. `plugin.stop()` calls `resetNamespace()` (mirrors the `setDisableUserns` lifecycle — see below). The value is boundary-validated: 1–32 lowercase alphanumerics; anything else logs via `app.error` and falls back to `sk` so a typo can't crash startup or produce an invalid container name.
+- Everything derives from the token via the accessors — `containerPrefix()`, `jobPrefix()`, `jobMarkerLabel()`, `jobOwnerLabel()`, `jobNameLabel()`. Never re-hardcode `"sk-"`; `prefixedName()` is the sole place a bare name becomes a container name — call it, never re-implement a `startsWith("sk-")` prefix check.
+- The **label keys** are namespaced too (`<ns>-charts-job`, `<ns>-job-owner`, `<ns>-job-label`), so a dev instance's reap query doesn't even _list_ production's jobs. The name-prefix guard in `orphanFromContainer` (`name.startsWith(jobPrefix())`) remains the unspoofable-by-label trait — and being namespaced, it can never match a foreign-namespace helper.
+- The devcontainer sets `SIGNALK_CONTAINER_NAMESPACE=devpod` (in the installer repo's `dev/dev.sh`), so its containers are `devpod-<name>`. Note the prefix isolates **names and reaping**, not host **ports** — a consumer plugin that publishes a fixed host port still collides port-wise with its production twin; that is handled separately (pick non-colliding ports for dev).
+
 ### Podman SELinux flag
 
 `volumeArg(hostPath, containerPath, runtime)` adds `:Z` for podman bind mounts (Fedora/RHEL SELinux relabel). Named volumes — host strings without a leading `/` or `.` — MUST NOT receive `:Z`; podman rejects them with `"invalid option z for named volume"`. Always go through `volumeArg`, never build `-v host:container[:flags]` strings inline.

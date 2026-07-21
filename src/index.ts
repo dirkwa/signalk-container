@@ -35,6 +35,7 @@ import {
   tryLiveUpdate,
 } from "./resources.js";
 import { detectRuntime, isContainerized, setDisableUserns } from "./runtime.js";
+import { setNamespace, resetNamespace } from "./namespace.js";
 import { resetClient } from "./client.js";
 import {
   classifyVolumeSources,
@@ -730,7 +731,7 @@ export default (app: App) => {
               `signalkAccessiblePorts(${name}): overriding explicit networkMode '${_callerNetworkMode}' with SignalK network '${targetNetwork}'`,
             );
           }
-          const prefixed = name.startsWith("sk-") ? name : `sk-${name}`;
+          const prefixed = prefixedName(name);
           for (const containerPort of signalkAccessiblePorts) {
             pendingPortMap.set(
               `${name}:${containerPort}`,
@@ -1106,7 +1107,7 @@ export default (app: App) => {
       // tryLiveUpdate against an already-correct container.
       const postLimits = await getLiveResources(runtimeInfo, name);
       if (!resourceLimitsEqual(postLimits, filteredMerged)) {
-        const fullName = name.startsWith("sk-") ? name : `sk-${name}`;
+        const fullName = prefixedName(name);
 
         // Bug E: if any field is being UNSET and it can't be unset
         // via live update (memory, oomScoreAdj, etc.), the live path
@@ -1430,7 +1431,7 @@ export default (app: App) => {
     ): Promise<UpdateResourcesResult> {
       if (!runtimeInfo) throw new Error("No container runtime available");
 
-      const fullName = name.startsWith("sk-") ? name : `sk-${name}`;
+      const fullName = prefixedName(name);
       const warnings: string[] = [];
 
       // Bug Y: `limits` is the user's intent for fields they want to
@@ -1925,6 +1926,20 @@ export default (app: App) => {
       // to stop+start this plugin, so the new overrides take effect
       // on the next ensureRunning() call from each consumer.
       currentOverrides = config.containerOverrides ?? {};
+      // Resolve the container-name namespace from the environment before
+      // any container is created or reaped. Unset → the default `sk`
+      // namespace (production parity); the devcontainer sets
+      // `SIGNALK_CONTAINER_NAMESPACE=devpod` so its managed containers and
+      // job reaper can't touch a production `sk-*` stack on the same host.
+      // Reset on stop() below so a restart re-reads the environment cleanly.
+      setNamespace(process.env.SIGNALK_CONTAINER_NAMESPACE, (value) =>
+        app.error(
+          `Ignoring invalid SIGNALK_CONTAINER_NAMESPACE=${JSON.stringify(
+            value,
+          )} (expected 1-32 lowercase alphanumerics); using default 'sk'`,
+        ),
+      );
+
       // Propagate the ZFS-style opt-out from plugin config into the
       // runtime layer. Default `false` is restored on stop() below
       // so the toggle does not leak across plugin restarts.
@@ -2138,6 +2153,9 @@ export default (app: App) => {
       // omits the flag (older saved config) does not inherit the
       // previous run's toggle.
       setDisableUserns(false);
+      // Restore the default namespace symmetrically; start() re-reads the
+      // env var, so this only matters as a defensive reset.
+      resetNamespace();
       cachedDataSource = null;
       pendingDataSource = null;
       cachedConfigRootSource = null;
