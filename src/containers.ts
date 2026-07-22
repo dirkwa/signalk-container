@@ -34,16 +34,14 @@ import {
 } from "./client.js";
 import type { ErrorKind } from "./errors.js";
 import { resourcePayloadForRun } from "./resources.js";
+import { containerPrefix } from "./namespace.js";
 import { classifyTag } from "./updates/tagClassifier.js";
 import { compareVersions } from "./updates/semver.js";
 import { isOfflineError } from "./updates/offline.js";
 
-const CONTAINER_PREFIX = "sk-";
-
 export function prefixedName(name: string): string {
-  return name.startsWith(CONTAINER_PREFIX)
-    ? name
-    : `${CONTAINER_PREFIX}${name}`;
+  const prefix = containerPrefix();
+  return name.startsWith(prefix) ? name : `${prefix}${name}`;
 }
 
 /**
@@ -699,7 +697,8 @@ export async function getLiveContainerDigest(
   client: ContainerClient = getClient(),
 ): Promise<string | null> {
   // The caller passes the unprefixed name from `ensureRunning`; the
-  // running container always carries the `sk-` prefix.
+  // running container always carries the namespace prefix (`sk-` by
+  // default — see namespace.ts).
   const imageId = await getImageDigest(
     runtime,
     prefixedName(containerName),
@@ -2394,35 +2393,45 @@ export async function listContainers(
   runtime: ContainerRuntimeInfo,
   client: ContainerClient = getClient(),
 ): Promise<ContainerInfo[]> {
+  const prefix = containerPrefix();
   const result = await safe(() =>
     client.listContainers({
       all: true,
-      filters: { name: [CONTAINER_PREFIX] },
+      filters: { name: [prefix] },
     }),
   );
   if (!result.ok) return [];
 
-  return result.value.map((c) => {
-    // dockerode `Names` carries a leading slash; strip it to match the
-    // bare names the rest of the plugin uses.
-    const name = (c.Names?.[0] ?? "").replace(/^\//, "");
-    const state: ContainerState = c.State === "running" ? "running" : "stopped";
-    const ports = (c.Ports ?? [])
-      .map((p) =>
-        p.PublicPort
-          ? `${p.IP ?? "0.0.0.0"}:${p.PublicPort}->${p.PrivatePort}/${p.Type}`
-          : `${p.PrivatePort}/${p.Type}`,
-      )
-      .filter(Boolean);
-    return {
-      name,
-      image: c.Image ?? "",
-      state,
-      created: c.Created ? String(c.Created) : "",
-      ports,
-      managedBy: "",
-    };
-  });
+  // The daemon `name` filter is a substring match, not a prefix match, so a
+  // foreign container whose name merely *contains* the token (or another
+  // namespace's container) can slip through. Anchor client-side so the
+  // managed list only ever holds this namespace's containers.
+  return result.value
+    .filter((c) => (c.Names?.[0] ?? "").replace(/^\//, "").startsWith(prefix))
+    .map((c) => {
+      // dockerode `Names` carries a leading slash; strip it to match the
+      // bare names the rest of the plugin uses.
+      const name = (c.Names?.[0] ?? "").replace(/^\//, "");
+      const state: ContainerState =
+        c.State === "running" ? "running" : "stopped";
+      const ports = (c.Ports ?? [])
+        .map((p) =>
+          p.PublicPort
+            ? `${p.IP ?? "0.0.0.0"}:${p.PublicPort}->${p.PrivatePort}/${p.Type}`
+            : `${p.PrivatePort}/${p.Type}`,
+        )
+        .filter(Boolean);
+      return {
+        name,
+        // The filter above guarantees `name` starts with `prefix`.
+        unprefixedName: name.slice(prefix.length),
+        image: c.Image ?? "",
+        state,
+        created: c.Created ? String(c.Created) : "",
+        ports,
+        managedBy: "",
+      };
+    });
 }
 
 export async function pruneImages(

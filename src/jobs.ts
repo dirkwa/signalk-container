@@ -9,6 +9,12 @@ import {
   OrphanJobInfo,
 } from "./types.js";
 import { userMappingFlags } from "./runtime.js";
+import {
+  jobPrefix,
+  jobMarkerLabel,
+  jobOwnerLabel,
+  jobNameLabel,
+} from "./namespace.js";
 import { volumeArg, qualifyImage } from "./containers.js";
 import { resourcePayloadForRun } from "./resources.js";
 import {
@@ -26,8 +32,6 @@ import { describeError } from "./errors.js";
 export { userMappingFlags, _setCurrentHostIdsForTesting } from "./runtime.js";
 
 const JOB_LOG_MAX_LINES = 200;
-/** Name prefix that marks a container as a one-shot helper job (see runJob). */
-const JOB_NAME_PREFIX = "sk-job-";
 
 /**
  * Run a one-shot helper container to completion, streaming progress.
@@ -41,7 +45,7 @@ export async function runJob(
   client: ContainerClient = getClient(),
 ): Promise<ContainerJobResult> {
   const id = randomUUID();
-  const jobName = `${JOB_NAME_PREFIX}${id.slice(0, 8)}`;
+  const jobName = `${jobPrefix()}${id.slice(0, 8)}`;
   const createdAt = new Date().toISOString();
   const image = qualifyImage(config.image, runtime);
 
@@ -115,15 +119,17 @@ export async function runJob(
     result.startedAt = new Date().toISOString();
 
     // Label every job container so cleanupOrphanedJobs can find ours after
-    // a Signal K crash. `sk-charts-job=1` is the broad "managed sk-job"
-    // marker; `sk-job-owner` narrows to a specific plugin so multiple
-    // sk-container-using plugins don't reap each other's orphans. Values
+    // a Signal K crash. The marker label (`<ns>-charts-job=1`) is the broad
+    // "managed job" marker; the owner label (`<ns>-job-owner`) narrows to a
+    // specific plugin so multiple sk-container-using plugins don't reap each
+    // other's orphans. The label keys carry the namespace prefix too, so a
+    // dev instance's reap query never even lists production's jobs. Values
     // go in dockerode's native `Labels` object verbatim — NO
     // percent-encoding (the CLI needed it to survive the comma-delimited
     // `ps --format` column; the API returns labels as a structured object).
-    const labels: Record<string, string> = { "sk-charts-job": "1" };
-    if (config.ownerPluginId) labels["sk-job-owner"] = config.ownerPluginId;
-    if (config.label) labels["sk-job-label"] = config.label;
+    const labels: Record<string, string> = { [jobMarkerLabel()]: "1" };
+    if (config.ownerPluginId) labels[jobOwnerLabel()] = config.ownerPluginId;
+    if (config.label) labels[jobNameLabel()] = config.label;
 
     // Deliberately NOT AutoRemove: a short job can exit (and the daemon
     // remove it) before the post-start `logs()`/`wait()` calls attach,
@@ -340,26 +346,30 @@ export function orphanFromContainer(
   const image = c.Image ?? "";
   if (!name || !image) return null;
   // Reap ONLY unmistakable one-shot jobs. `runJob` names every helper
-  // `sk-job-<id>`; a long-running managed container (e.g. a consumer plugin's
-  // service) could carry the same `sk-charts-job`/`sk-job-owner` labels but is
-  // NOT a job, and must never be force-removed on startup. The name prefix is
-  // the defining, unspoofable-by-label trait.
-  if (!name.startsWith(JOB_NAME_PREFIX)) return null;
+  // `<ns>-job-<id>`; a long-running managed container (e.g. a consumer
+  // plugin's service) could carry the same marker/owner labels but is NOT a
+  // job, and must never be force-removed on startup. The name prefix is the
+  // defining, unspoofable-by-label trait — and because it is namespaced, a
+  // dev instance can never match a production `sk-job-*` helper.
+  if (!name.startsWith(jobPrefix())) return null;
   const labels = c.Labels ?? {};
-  // Require a positive owner-label match. The list filter should already
-  // restrict the set, but never trust filter output enough to force-remove
-  // a row that doesn't actively claim our owner.
-  if (labels["sk-job-owner"] !== ownerPluginId) return null;
+  // Re-verify BOTH labels the list filter queried on. The filter should
+  // already restrict the set, but never trust its output enough to
+  // force-remove a row that doesn't actively carry our managed-job marker
+  // AND claim our owner. `runJob` sets the marker unconditionally, so a
+  // `<ns>-job-*` container lacking it is not one of ours.
+  if (labels[jobMarkerLabel()] !== "1") return null;
+  if (labels[jobOwnerLabel()] !== ownerPluginId) return null;
   return {
     name,
     image,
     ownerPluginId,
-    label: labels["sk-job-label"],
+    label: labels[jobNameLabel()],
   };
 }
 
 /**
- * Find every `sk-job-*` container labelled with the given `ownerPluginId`,
+ * Find every `<ns>-job-*` container labelled with the given `ownerPluginId`,
  * force-remove each, and return the list so the caller can roll back any
  * persistent state tied to those jobs.
  *
@@ -378,7 +388,7 @@ export async function cleanupOrphanedJobs(
     client.listContainers({
       all: true,
       filters: {
-        label: ["sk-charts-job=1", `sk-job-owner=${ownerPluginId}`],
+        label: [`${jobMarkerLabel()}=1`, `${jobOwnerLabel()}=${ownerPluginId}`],
       },
     }),
   );

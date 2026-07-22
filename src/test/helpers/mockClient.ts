@@ -175,7 +175,8 @@ export function makeMockClient(spec: MockClientSpec = {}): ContainerClient {
       record(spec, "createNetwork", opts);
       return Promise.resolve({});
     },
-    listContainers: (opts?: { all?: boolean }) => {
+    listContainers: (opts?: { all?: boolean; filters?: unknown }) => {
+      record(spec, "listContainers", opts);
       if (spec.listContainers instanceof Error) {
         return Promise.reject(spec.listContainers);
       }

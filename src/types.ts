@@ -448,7 +448,15 @@ export interface ContainerResourceLimits {
 }
 
 export interface ContainerInfo {
+  /** Full container name as the runtime sees it, e.g. `sk-questdb`. */
   name: string;
+  /**
+   * `name` with the active namespace prefix removed, e.g. `questdb`. This is
+   * the form consumer plugins pass to `ensureRunning`/`getResources` and the
+   * key `containerOverrides` uses. Supplied by the server so callers never
+   * have to know the prefix (which varies with `SIGNALK_CONTAINER_NAMESPACE`).
+   */
+  unprefixedName: string;
   image: string;
   state: ContainerState;
   created: string;
@@ -574,12 +582,7 @@ export interface ContainerJobConfig {
 }
 
 export type ContainerJobStatus =
-  | "pending"
-  | "pulling"
-  | "running"
-  | "completed"
-  | "failed"
-  | "cancelled";
+  "pending" | "pulling" | "running" | "completed" | "failed" | "cancelled";
 
 export interface ContainerJobResult {
   id: string;
