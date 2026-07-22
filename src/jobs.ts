@@ -353,9 +353,12 @@ export function orphanFromContainer(
   // dev instance can never match a production `sk-job-*` helper.
   if (!name.startsWith(jobPrefix())) return null;
   const labels = c.Labels ?? {};
-  // Require a positive owner-label match. The list filter should already
-  // restrict the set, but never trust filter output enough to force-remove
-  // a row that doesn't actively claim our owner.
+  // Re-verify BOTH labels the list filter queried on. The filter should
+  // already restrict the set, but never trust its output enough to
+  // force-remove a row that doesn't actively carry our managed-job marker
+  // AND claim our owner. `runJob` sets the marker unconditionally, so a
+  // `<ns>-job-*` container lacking it is not one of ours.
+  if (labels[jobMarkerLabel()] !== "1") return null;
   if (labels[jobOwnerLabel()] !== ownerPluginId) return null;
   return {
     name,

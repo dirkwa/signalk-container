@@ -12,9 +12,10 @@
  *
  * The namespace is resolved ONCE from `SIGNALK_CONTAINER_NAMESPACE` at
  * plugin.start() via setNamespace(). It defaults to `sk`, so an install
- * that does not set the env var is byte-for-byte identical to every prior
- * release: containers stay `sk-<name>`, jobs `sk-job-<id>`, labels
- * `sk-charts-job` / `sk-job-owner` / `sk-job-label`.
+ * that does not set the env var produces exactly the same container names,
+ * job names, and label keys as prior releases: containers stay `sk-<name>`,
+ * jobs `sk-job-<id>`, labels `sk-charts-job` / `sk-job-owner` /
+ * `sk-job-label`.
  *
  * The devcontainer sets `SIGNALK_CONTAINER_NAMESPACE=devpod`, so its
  * managed containers are `devpod-<name>` and can never touch the

@@ -10,8 +10,8 @@ import {
   jobOwnerLabel,
   jobNameLabel,
 } from "../namespace.js";
-import { prefixedName } from "../containers.js";
-import { orphanFromContainer, cleanupOrphanedJobs } from "../jobs.js";
+import { prefixedName, listContainers } from "../containers.js";
+import { runJob, orphanFromContainer, cleanupOrphanedJobs } from "../jobs.js";
 import type { ContainerRuntimeInfo } from "../types.js";
 import { makeMockClient } from "./helpers/mockClient.js";
 
@@ -99,6 +99,26 @@ describe("prefixedName honours the active namespace", () => {
   });
 });
 
+describe("listContainers is anchored to the active namespace", () => {
+  it("drops names that only contain the token or belong to another namespace", async () => {
+    setNamespace("devpod");
+    // mockClient returns this list verbatim (it does not apply the daemon
+    // substring filter), so this exercises the client-side prefix anchor.
+    const client = makeMockClient({
+      listContainers: [
+        { Names: ["/devpod-questdb"], Image: "questdb", State: "running" },
+        { Names: ["/my-devpod-sidecar"], Image: "x", State: "running" },
+        { Names: ["/sk-questdb"], Image: "y", State: "running" },
+      ],
+    });
+    const list = await listContainers(dummyRuntime, client);
+    assert.deepEqual(
+      list.map((c) => c.name),
+      ["devpod-questdb"],
+    );
+  });
+});
+
 describe("reaping is isolated across namespaces", () => {
   it("a dev instance never claims a production sk-job-* helper", () => {
     setNamespace("devpod");
@@ -137,6 +157,41 @@ describe("reaping is isolated across namespaces", () => {
         label: "tippecanoe",
       },
     );
+  });
+
+  it("runJob names the container and labels it under the active namespace", async () => {
+    setNamespace("devpod");
+    const docker: ContainerRuntimeInfo = {
+      runtime: "docker",
+      version: "27.0.0",
+      isPodmanDockerShim: false,
+      isRootless: false,
+    };
+    const calls = new Map<string, unknown[]>();
+    // Seed the image so runJob skips the pull path and reaches createContainer.
+    const client = makeMockClient({ images: { "alpine:3.19": {} }, calls });
+
+    await runJob(
+      docker,
+      {
+        image: "alpine:3.19",
+        command: ["echo", "hi"],
+        ownerPluginId: "signalk-charts-provider-simple",
+        label: "tippecanoe",
+      },
+      client,
+    );
+
+    const opts = calls.get("createContainer")?.[0] as {
+      name?: string;
+      Labels?: Record<string, string>;
+    };
+    assert.match(opts.name ?? "", /^devpod-job-[0-9a-f]{8}$/);
+    assert.deepEqual(opts.Labels, {
+      "devpod-charts-job": "1",
+      "devpod-job-owner": "signalk-charts-provider-simple",
+      "devpod-job-label": "tippecanoe",
+    });
   });
 
   it("cleanupOrphanedJobs filters the list by the namespaced labels", async () => {

@@ -37,11 +37,25 @@ describe("orphanFromContainer", () => {
       {
         Names: ["/sk-job-abc12345"],
         Image: "docker.io/library/alpine:latest",
-        Labels: { "sk-job-owner": "plugin-x" },
+        Labels: { "sk-charts-job": "1", "sk-job-owner": "plugin-x" },
       },
       "plugin-x",
     );
     assert.equal(parsed?.name, "sk-job-abc12345");
+  });
+
+  it("returns null when the managed-job marker label is absent", () => {
+    // Owner label + name prefix are not enough: without the marker the row
+    // is not one runJob created, so refuse to force-remove it.
+    const parsed = orphanFromContainer(
+      {
+        Names: ["/sk-job-abc12345"],
+        Image: "docker.io/library/alpine:latest",
+        Labels: { "sk-job-owner": "plugin-x" },
+      },
+      "plugin-x",
+    );
+    assert.equal(parsed, null);
   });
 
   it("tolerates a missing user-supplied label", () => {
