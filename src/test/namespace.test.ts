@@ -116,6 +116,13 @@ describe("listContainers is anchored to the active namespace", () => {
       list.map((c) => c.name),
       ["devpod-questdb"],
     );
+    // The server supplies the bare name so the config panel never has to
+    // strip a prefix it doesn't know (the resource-limits editor keys
+    // overrides on this).
+    assert.deepEqual(
+      list.map((c) => c.unprefixedName),
+      ["questdb"],
+    );
   });
 });
 

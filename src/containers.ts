@@ -2423,6 +2423,8 @@ export async function listContainers(
         .filter(Boolean);
       return {
         name,
+        // The filter above guarantees `name` starts with `prefix`.
+        unprefixedName: name.slice(prefix.length),
         image: c.Image ?? "",
         state,
         created: c.Created ? String(c.Created) : "",

@@ -471,15 +471,6 @@ function ToggleField({ label, value, onChange, hint }: ToggleFieldProps) {
 // ---------------------------------------------------------------------------
 
 /**
- * Strip the `sk-` prefix that signalk-container adds to all managed
- * containers. REST endpoints under /api/containers/:name/resources and
- * the containerOverrides config key both use the UNPREFIXED form.
- */
-function unprefixed(name: string): string {
-  return name && name.startsWith("sk-") ? name.slice(3) : name;
-}
-
-/**
  * Describes a single field in the resource-limits editor. The `primary`
  * flag controls whether the field is visible by default; the rest are
  * hidden behind an "Advanced" toggle.
@@ -1203,7 +1194,7 @@ export default function PluginConfigurationPanel({
         > = {};
         await Promise.all(
           ctList.map(async (ct: ContainerInfo) => {
-            const un = unprefixed(ct.name);
+            const un = ct.unprefixedName;
             try {
               const r = await fetch(
                 `/plugins/signalk-container/api/containers/${encodeURIComponent(un)}/resources`,
@@ -1283,8 +1274,7 @@ export default function PluginConfigurationPanel({
     return () => clearInterval(interval);
   }, [fetchStatus]);
 
-  const toggleLimitsExpand = (name: string) => {
-    const un = unprefixed(name);
+  const toggleLimitsExpand = (un: string) => {
     setExpandedLimits((prev) => {
       const next = new Set(prev);
       if (next.has(un)) next.delete(un);
@@ -1718,7 +1708,7 @@ export default function PluginConfigurationPanel({
         </div>
       ) : (
         containers.map((ct) => {
-          const un = unprefixed(ct.name);
+          const un = ct.unprefixedName;
           const eff = effectiveLimits[un] || {};
           // Badge reads from the SERVER response (overrideStates),
           // not from the React containerOverrides state. This makes
@@ -1835,7 +1825,7 @@ export default function PluginConfigurationPanel({
                   <button
                     type="button"
                     style={S.editLimitsBtn}
-                    onClick={() => toggleLimitsExpand(ct.name)}
+                    onClick={() => toggleLimitsExpand(ct.unprefixedName)}
                   >
                     {isExpanded ? "Collapse ▾" : "Edit Limits ▸"}
                   </button>
@@ -1896,7 +1886,7 @@ export default function PluginConfigurationPanel({
                   initialOverride={serverOverride}
                   onApply={(payload) => applyLimits(un, payload)}
                   onResetToDefault={() => resetLimitsToDefault(un)}
-                  onClose={() => toggleLimitsExpand(ct.name)}
+                  onClose={() => toggleLimitsExpand(ct.unprefixedName)}
                 />
               )}
             </div>
