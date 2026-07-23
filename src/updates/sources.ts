@@ -1,13 +1,17 @@
-import type { VersionSource, VersionSourceResult } from "./types.js";
+import type {
+  DockerHubTagsSourceOptions,
+  GithubReleasesSourceOptions,
+  VersionSource,
+  VersionSourceResult,
+} from "./types.js";
 
 export type FetchImpl = typeof fetch;
 
-export interface GithubReleasesOptions {
-  allowPrerelease?: boolean;
-  /** Strip a prefix from tag_name before returning, e.g. "v" → "1.2.3". */
-  tagPrefix?: string;
-  /** GitHub personal access token (Authorization: Bearer …) for higher rate limit. */
-  token?: string;
+// The concrete source functions accept the public consumer options plus
+// test-only injection knobs. Keeping the public fields in one place
+// (updates/types.ts) means the UpdateServiceApi surface can't drift from
+// what these functions actually accept.
+export interface GithubReleasesOptions extends GithubReleasesSourceOptions {
   /** Override fetch for tests. Defaults to globalThis.fetch. */
   fetchImpl?: FetchImpl;
   /** Per-request timeout in ms. Default 10000. */
@@ -90,9 +94,10 @@ export function githubReleases(
   };
 }
 
-export interface DockerHubTagsOptions {
-  filter?: (tag: string) => boolean;
+export interface DockerHubTagsOptions extends DockerHubTagsSourceOptions {
+  /** Override fetch for tests. Defaults to globalThis.fetch. */
   fetchImpl?: FetchImpl;
+  /** Per-request timeout in ms. Default 10000. */
   timeoutMs?: number;
 }
 

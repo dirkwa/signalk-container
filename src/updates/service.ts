@@ -1,5 +1,7 @@
 import type { ContainerRuntimeInfo, ContainerState } from "../types.js";
 import type {
+  DockerHubTagsSourceOptions,
+  GithubReleasesSourceOptions,
   TagKind,
   UpdateCheckResult,
   UpdateRegistration,
@@ -76,14 +78,10 @@ export class UpdateService implements UpdateServiceApi {
   private stopped = false;
 
   readonly sources = {
-    githubReleases: (
-      repo: string,
-      options?: { allowPrerelease?: boolean; tagPrefix?: string },
-    ) => githubReleases(repo, options),
-    dockerHubTags: (
-      image: string,
-      options?: { filter?: (tag: string) => boolean },
-    ) => dockerHubTags(image, options),
+    githubReleases: (repo: string, options?: GithubReleasesSourceOptions) =>
+      githubReleases(repo, options),
+    dockerHubTags: (image: string, options?: DockerHubTagsSourceOptions) =>
+      dockerHubTags(image, options),
   };
 
   constructor(private readonly opts: UpdateServiceOptions) {

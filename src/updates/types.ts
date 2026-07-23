@@ -101,6 +101,29 @@ export interface UpdateCheckResult {
 }
 
 /**
+ * Consumer-facing options for the `githubReleases` version source. The
+ * concrete function in `sources.ts` accepts these plus test-only injection
+ * knobs (`fetchImpl`, `timeoutMs`); those stay out of the public type.
+ */
+export interface GithubReleasesSourceOptions {
+  /** Include prereleases when picking the latest tag. Default false. */
+  allowPrerelease?: boolean;
+  /** Strip a prefix from tag_name before returning, e.g. "v" → "1.2.3". */
+  tagPrefix?: string;
+  /** GitHub personal access token (Authorization: Bearer …) for a higher rate limit. */
+  token?: string;
+}
+
+/**
+ * Consumer-facing options for the `dockerHubTags` version source. As above,
+ * the concrete function also accepts test-only injection knobs.
+ */
+export interface DockerHubTagsSourceOptions {
+  /** Keep only tags this predicate accepts (default: semver-ish tags). */
+  filter?: (tag: string) => boolean;
+}
+
+/**
  * Public API exposed to consumer plugins via
  * containers.updates.register(...) etc.
  */
@@ -114,11 +137,11 @@ export interface UpdateServiceApi {
   sources: {
     githubReleases(
       repo: string,
-      options?: { allowPrerelease?: boolean; tagPrefix?: string },
+      options?: GithubReleasesSourceOptions,
     ): VersionSource;
     dockerHubTags(
       image: string,
-      options?: { filter?: (tag: string) => boolean },
+      options?: DockerHubTagsSourceOptions,
     ): VersionSource;
   };
 }

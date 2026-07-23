@@ -23,6 +23,8 @@ import type {
   VersionSource as PublishedVersionSource,
   VersionSourceResult as PublishedVersionSourceResult,
   TagKind as PublishedTagKind,
+  GithubReleasesSourceOptions as PublishedGithubReleasesSourceOptions,
+  DockerHubTagsSourceOptions as PublishedDockerHubTagsSourceOptions,
 } from "signalk-container/types";
 import type {
   ConsumerManifest as SourceConsumerManifest,
@@ -232,4 +234,34 @@ describe("published subpath: signalk-container/types", () => {
       false,
     );
   });
+
+  it("sources.githubReleases accepts a token through the published type", () => {
+    // Regression guard for the interface-vs-implementation drift: `token`
+    // is honored at runtime, so it must be nameable through the subpath.
+    const gh: PublishedGithubReleasesSourceOptions = {
+      token: "ghp_example",
+      allowPrerelease: true,
+      tagPrefix: "v",
+    };
+    const dh: PublishedDockerHubTagsSourceOptions = {
+      filter: (t) => t.startsWith("9"),
+    };
+    const impl: PublishedUpdateServiceApi["sources"] = updatesImplSources();
+    const ghSrc = impl.githubReleases("questdb/questdb", gh);
+    const dhSrc = impl.dockerHubTags("questdb/questdb", dh);
+    assert.equal(typeof ghSrc.fetch, "function");
+    assert.equal(typeof dhSrc.fetch, "function");
+  });
 });
+
+// A minimal `UpdateServiceApi["sources"]` implementation for the option-type
+// test above — kept out of the `it` body so the option shapes are the focus.
+function updatesImplSources(): PublishedUpdateServiceApi["sources"] {
+  const source: PublishedVersionSource = {
+    fetch: async () => ({ kind: "version", latest: "9.2.0" }),
+  };
+  return {
+    githubReleases: () => source,
+    dockerHubTags: () => source,
+  };
+}
