@@ -1,9 +1,3 @@
-import type {
-  ConsumerManifest,
-  ContainerManifestEntry,
-  HistoryEntry,
-} from "./manifest/schema.js";
-
 export type RuntimeName = "podman" | "docker";
 export type RuntimePreference = "auto" | RuntimeName;
 
@@ -1530,9 +1524,55 @@ export interface ManifestApi {
   getContainerHistory(containerName: string): Promise<HistoryEntry[]>;
 }
 
-// Persistent manifest types are defined as TypeBox schemas in
-// src/manifest/schema.ts (single source of truth for the on-disk
-// shape); re-exported here so consumer plugins can import every
-// manifest type from "signalk-container/types". The import lives at
-// the top of the file with the other type imports.
-export type { ConsumerManifest, ContainerManifestEntry, HistoryEntry };
+// Persistent manifest types. These are hand-written here — the public
+// type home — rather than derived from the TypeBox schemas in
+// src/manifest/schema.ts, so that importing "signalk-container/types"
+// pulls in no `typebox` dependency. schema.ts imports these interfaces
+// and asserts (at compile time) that its `Static<>` shapes stay
+// structurally identical, so the two can never silently diverge: the
+// schema is the runtime validator, this is the compile-time contract.
+
+/** Why a manifest history entry was recorded. */
+export type ManifestHistoryReason =
+  | "plugin-install"
+  | "plugin-update"
+  | "user-pull"
+  | "auto-update"
+  | "manual-check";
+
+/** One image-resolution event in a container's manifest history. */
+export interface HistoryEntry {
+  /** ISO-8601 timestamp. */
+  ts: string;
+  /** Prior resolved digest (`sha256:`/`local:`), or null on first record. */
+  from: string | null;
+  /** New resolved digest (`sha256:`/`local:`). */
+  to: string;
+  reason: ManifestHistoryReason;
+  /** Plugin version that triggered the record, when known. */
+  triggeredBy?: string;
+}
+
+/** A single managed container's pinning record within a manifest. */
+export interface ContainerManifestEntry {
+  image: string;
+  declaredTag: string;
+  /** Declared digest (`sha256:`), or null when only a tag was pinned. */
+  declaredDigest: string | null;
+  /** Resolved digest (`sha256:` or the `local:<image-id>` fallback). */
+  resolvedDigest: string;
+  /** ISO-8601 timestamp of the resolution. */
+  resolvedAt: string;
+  updateChannel: string;
+  history: HistoryEntry[];
+}
+
+/** Per-plugin image-pinning manifest persisted on disk. */
+export interface ConsumerManifest {
+  schemaVersion: 1;
+  pluginId: string;
+  pluginVersion: string;
+  /** ISO-8601 timestamp. */
+  registeredAt: string;
+  containers: Record<string, ContainerManifestEntry>;
+}

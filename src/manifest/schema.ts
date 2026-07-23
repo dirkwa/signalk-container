@@ -1,5 +1,10 @@
 import * as Type from "typebox";
 import type { Static } from "typebox";
+import type {
+  ConsumerManifest,
+  ContainerManifestEntry,
+  HistoryEntry,
+} from "../types.js";
 
 // Digest formats accepted on disk:
 //   - `sha256:<64-hex>` — the canonical RepoDigest from a registry pull.
@@ -50,8 +55,23 @@ export const ConsumerManifestSchema = Type.Object({
   containers: Type.Record(Type.String(), ContainerManifestEntrySchema),
 });
 
-export type HistoryEntry = Static<typeof HistoryEntrySchema>;
-export type ContainerManifestEntry = Static<
-  typeof ContainerManifestEntrySchema
->;
-export type ConsumerManifest = Static<typeof ConsumerManifestSchema>;
+// The manifest types are hand-written in ../types.ts (the public type
+// home, kept free of any `typebox` dependency so "signalk-container/types"
+// stays self-contained). These assertions fail the build if a schema and
+// its interface ever drift — the schema is the runtime validator, the
+// interface is the compile-time contract, and they must stay identical.
+type Equals<A, B> =
+  (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2
+    ? true
+    : false;
+function assertEquivalent<A, B>(
+  ok: Equals<A, B> extends true ? true : never,
+): void {
+  void ok;
+}
+assertEquivalent<Static<typeof HistoryEntrySchema>, HistoryEntry>(true);
+assertEquivalent<
+  Static<typeof ContainerManifestEntrySchema>,
+  ContainerManifestEntry
+>(true);
+assertEquivalent<Static<typeof ConsumerManifestSchema>, ConsumerManifest>(true);

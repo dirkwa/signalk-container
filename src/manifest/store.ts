@@ -1,14 +1,15 @@
 import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { Check } from "typebox/value";
-import type { ContainerConfig, ResolveResult } from "../types.js";
+import type {
+  ConsumerManifest,
+  ContainerConfig,
+  ContainerManifestEntry,
+  HistoryEntry,
+  ResolveResult,
+} from "../types.js";
 import { atomicWriteJson } from "./atomicWrite.js";
-import {
-  ConsumerManifestSchema,
-  type ConsumerManifest,
-  type ContainerManifestEntry,
-  type HistoryEntry,
-} from "./schema.js";
+import { ConsumerManifestSchema } from "./schema.js";
 
 const MAX_HISTORY = 20;
 
