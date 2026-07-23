@@ -16,6 +16,13 @@ import type {
   ContainerManifestEntry as PublishedContainerManifestEntry,
   HistoryEntry as PublishedHistoryEntry,
   ContainerManagerApi as PublishedContainerManagerApi,
+  UpdateServiceApi as PublishedUpdateServiceApi,
+  UpdateRegistration as PublishedUpdateRegistration,
+  UpdateCheckResult as PublishedUpdateCheckResult,
+  UpdateReason as PublishedUpdateReason,
+  VersionSource as PublishedVersionSource,
+  VersionSourceResult as PublishedVersionSourceResult,
+  TagKind as PublishedTagKind,
 } from "signalk-container/types";
 import type {
   ConsumerManifest as SourceConsumerManifest,
@@ -153,6 +160,76 @@ describe("published subpath: signalk-container/types", () => {
     assert.equal(
       asPublished.containers.questdb.history[0].reason,
       "plugin-install",
+    );
+  });
+
+  it("the subpath exposes the update-service types via ContainerManagerApi", async () => {
+    // These live in ./updates/types.ts. They are reachable through
+    // `ContainerManagerApi.updates`, so they must be nameable through the
+    // subpath too — a consumer plugin declaring its update wiring needs them.
+    // Building a real mock typed as the published shapes is the check: the
+    // file fails to compile if any of these types stop being exported, and
+    // the assertions exercise the wiring at runtime.
+    // Annotate the return so VersionSourceResult must resolve; the tagKind
+    // and reason locals do the same for TagKind and UpdateReason — all three
+    // are re-exports with no other reference in this file.
+    const source: PublishedVersionSource = {
+      fetch: async (): Promise<PublishedVersionSourceResult> => ({
+        kind: "version",
+        latest: "9.2.0",
+      }),
+    };
+    const tagKind: PublishedTagKind = "semver";
+    const reason: PublishedUpdateReason = "up-to-date";
+    const result: PublishedUpdateCheckResult = {
+      pluginId: "signalk-questdb",
+      containerName: "questdb",
+      runningTag: "9.2.0",
+      tagKind,
+      currentVersion: "9.2.0",
+      latestVersion: "9.2.0",
+      updateAvailable: false,
+      reason,
+      checkedAt: "2026-01-01T00:00:00Z",
+      lastSuccessfulCheckAt: "2026-01-01T00:00:00Z",
+      fromCache: false,
+    };
+    const registered: string[] = [];
+    const updatesImpl: PublishedUpdateServiceApi = {
+      register: (reg: PublishedUpdateRegistration) =>
+        void registered.push(reg.pluginId),
+      unregister: () => {},
+      checkOne: async () => result,
+      checkAll: async () => [result],
+      getLastResult: () => result,
+      sources: {
+        githubReleases: () => source,
+        dockerHubTags: () => source,
+      },
+    };
+
+    // Drive the calls through `ContainerManagerApi.updates` specifically:
+    // this only compiles if that member is typed as UpdateServiceApi, so the
+    // test covers the "reachable via ContainerManagerApi" contract, not just
+    // a standalone stub. Assigning the impl to the member's type is the
+    // boundary check; a partial cast avoids mocking every unrelated method.
+    const updates: PublishedContainerManagerApi["updates"] = updatesImpl;
+    const managerUpdates = (
+      { updates } as Pick<PublishedContainerManagerApi, "updates">
+    ).updates;
+
+    managerUpdates.register({
+      pluginId: "signalk-questdb",
+      containerName: "questdb",
+      image: "questdb/questdb",
+      currentTag: () => "9.2.0",
+      versionSource: managerUpdates.sources.githubReleases("questdb/questdb"),
+    });
+
+    assert.deepEqual(registered, ["signalk-questdb"]);
+    assert.equal(
+      (await managerUpdates.checkOne("signalk-questdb")).updateAvailable,
+      false,
     );
   });
 });

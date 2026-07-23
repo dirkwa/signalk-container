@@ -1,3 +1,13 @@
+import type {
+  TagKind,
+  UpdateCheckResult,
+  UpdateReason,
+  UpdateRegistration,
+  UpdateServiceApi,
+  VersionSource,
+  VersionSourceResult,
+} from "./updates/types.js";
+
 export type RuntimeName = "podman" | "docker";
 export type RuntimePreference = "auto" | RuntimeName;
 
@@ -1152,7 +1162,7 @@ export interface ContainerManagerApi {
    * scheduling, caching, and offline-tolerance.
    * See doc/plugin-developer-guide.md "Update detection" for usage.
    */
-  updates: import("./updates/types.js").UpdateServiceApi;
+  updates: UpdateServiceApi;
   /**
    * Image-compliance probes. Use before adopting an image to confirm
    * it runs cleanly under the host UID mapping signalk-container will
@@ -1585,3 +1595,17 @@ export interface ConsumerManifest {
   /** Per-container pinning records, keyed by unprefixed container name. */
   containers: Record<string, ContainerManifestEntry>;
 }
+
+// Update-service types live in ./updates/types.ts but are reachable through
+// the public API (`ContainerManagerApi.updates`), so re-export them here —
+// otherwise a consumer importing "signalk-container/types" can use the
+// `updates` member but cannot name its parameter/result types.
+export type {
+  UpdateServiceApi,
+  UpdateRegistration,
+  UpdateCheckResult,
+  UpdateReason,
+  VersionSource,
+  VersionSourceResult,
+  TagKind,
+};
