@@ -19,7 +19,10 @@ import type {
   UpdateServiceApi as PublishedUpdateServiceApi,
   UpdateRegistration as PublishedUpdateRegistration,
   UpdateCheckResult as PublishedUpdateCheckResult,
+  UpdateReason as PublishedUpdateReason,
   VersionSource as PublishedVersionSource,
+  VersionSourceResult as PublishedVersionSourceResult,
+  TagKind as PublishedTagKind,
 } from "signalk-container/types";
 import type {
   ConsumerManifest as SourceConsumerManifest,
@@ -167,18 +170,26 @@ describe("published subpath: signalk-container/types", () => {
     // Building a real mock typed as the published shapes is the check: the
     // file fails to compile if any of these types stop being exported, and
     // the assertions exercise the wiring at runtime.
+    // Annotate the return so VersionSourceResult must resolve; the tagKind
+    // and reason locals do the same for TagKind and UpdateReason — all three
+    // are re-exports with no other reference in this file.
     const source: PublishedVersionSource = {
-      fetch: async () => ({ kind: "version", latest: "9.2.0" }),
+      fetch: async (): Promise<PublishedVersionSourceResult> => ({
+        kind: "version",
+        latest: "9.2.0",
+      }),
     };
+    const tagKind: PublishedTagKind = "semver";
+    const reason: PublishedUpdateReason = "up-to-date";
     const result: PublishedUpdateCheckResult = {
       pluginId: "signalk-questdb",
       containerName: "questdb",
       runningTag: "9.2.0",
-      tagKind: "semver",
+      tagKind,
       currentVersion: "9.2.0",
       latestVersion: "9.2.0",
       updateAvailable: false,
-      reason: "up-to-date",
+      reason,
       checkedAt: "2026-01-01T00:00:00Z",
       lastSuccessfulCheckAt: "2026-01-01T00:00:00Z",
       fromCache: false,
