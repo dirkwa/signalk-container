@@ -1542,12 +1542,13 @@ export type ManifestHistoryReason =
 
 /** One image-resolution event in a container's manifest history. */
 export interface HistoryEntry {
-  /** ISO-8601 timestamp. */
+  /** ISO-8601 timestamp of the resolution event. */
   ts: string;
   /** Prior resolved digest (`sha256:`/`local:`), or null on first record. */
   from: string | null;
   /** New resolved digest (`sha256:`/`local:`). */
   to: string;
+  /** What caused this record — install, update, user pull, etc. */
   reason: ManifestHistoryReason;
   /** Plugin version that triggered the record, when known. */
   triggeredBy?: string;
@@ -1555,7 +1556,9 @@ export interface HistoryEntry {
 
 /** A single managed container's pinning record within a manifest. */
 export interface ContainerManifestEntry {
+  /** Image repository the container was resolved from, without tag. */
   image: string;
+  /** Tag the consumer plugin declared (before digest resolution). */
   declaredTag: string;
   /** Declared digest (`sha256:`), or null when only a tag was pinned. */
   declaredDigest: string | null;
@@ -1563,16 +1566,22 @@ export interface ContainerManifestEntry {
   resolvedDigest: string;
   /** ISO-8601 timestamp of the resolution. */
   resolvedAt: string;
+  /** Update channel in effect (e.g. `tag:latest`, `digest:explicit`). */
   updateChannel: string;
+  /** Chronological resolution history, oldest first. */
   history: HistoryEntry[];
 }
 
 /** Per-plugin image-pinning manifest persisted on disk. */
 export interface ConsumerManifest {
+  /** On-disk schema version; always `1` for this shape. */
   schemaVersion: 1;
+  /** Owning plugin's id (npm package name). */
   pluginId: string;
+  /** Plugin version that last wrote this manifest. */
   pluginVersion: string;
-  /** ISO-8601 timestamp. */
+  /** ISO-8601 timestamp of first registration. */
   registeredAt: string;
+  /** Per-container pinning records, keyed by unprefixed container name. */
   containers: Record<string, ContainerManifestEntry>;
 }
