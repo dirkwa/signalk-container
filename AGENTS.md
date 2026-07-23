@@ -79,6 +79,10 @@ When a consumer declares `signalkConfigRootMount` and does not set `env.HOME`, t
 
 The injection is in `defaultHomeForConfigRoot()` (`src/containers.ts`) and only fires when the consumer's `env.HOME` is `undefined`. A defined-but-empty `HOME=""` is left alone — that's a deliberate consumer opt-out (tools behave differently with `HOME=""` than unset). Consumers that need HOME to point somewhere _other_ than the config root mount just set it themselves.
 
+### TZ defaulting (host timezone propagation)
+
+Same pattern as HOME defaulting: the wrapper in `src/index.ts` injects `TZ=<host zone>` into `config.env` for both `ensureRunning` (which `recreate` inherits) and `runJob`, via `defaultTimezoneEnv()` in `src/containers.ts`. A consumer-set `env.TZ` — any value, including `""` — always wins. `resolveHostTimezone()` reads the zone via `Intl` (honors the process `TZ` env var, falls back to `/etc/localtime`) and returns `undefined` for UTC-equivalent zones (`UTC_ZONE_NAMES`), so nothing is injected on a UTC host — which is also the in-container deployment where the real host zone is unknowable unless the operator passed it into the SignalK container. Injection happens **before** any other config shaping in the wrapper so the TZ key flows into `lastConfigs` and drift detection like a consumer-set key; do not inject at the `containers.ts`/`buildRunArgs` layer, where the diff would not see it.
+
 ### Container log streaming
 
 Two-layer structure (`src/containers.ts` → `src/log-stream-broker.ts`):

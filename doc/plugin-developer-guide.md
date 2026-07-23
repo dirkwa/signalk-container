@@ -165,6 +165,18 @@ signalk-container adds `:Z` to volume mounts when using Podman (required on Fedo
 
 All containers are prefixed with `sk-` (e.g., `sk-signalk-questdb`). This avoids conflicts with user containers and makes cleanup predictable. Pass just your plugin name to `ensureRunning()` — the prefix is added automatically.
 
+### Host timezone
+
+Container images default to UTC, which makes time-based logic inside a managed container (a cron-style Node-RED flow, Grafana time rendering, log timestamps) disagree with the host clock. signalk-container therefore injects `TZ=<host zone>` into every managed container and one-shot job automatically. Your plugin doesn't need to handle this.
+
+The rules:
+
+- If your plugin sets `env.TZ` itself — any value, including `""` (POSIX for UTC) — that value wins and nothing is injected.
+- If the SignalK process resolves to UTC (a genuinely-UTC host, or a containerized SignalK that wasn't told the host zone), nothing is injected — the container's UTC default already matches.
+- The injected `TZ` participates in drift detection like any other env key, so existing containers on a non-UTC host are recreated once when this feature first applies.
+
+`TZ` names an [IANA zone](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones) (e.g. `Pacific/Fiji`), which the software inside the container resolves through a timezone database. Runtimes that bundle their own tzdb (Node via ICU, Java via the JRE) honor it out of the box; shell-level tools like `date` in minimal glibc/musl images need the image's `tzdata` package.
+
 ---
 
 ## Container Config Changes

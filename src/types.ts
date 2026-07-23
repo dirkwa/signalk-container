@@ -251,6 +251,12 @@ export interface ContainerConfig {
    *   is reachable at the address returned by `resolveContainerAddress()`.
    */
   signalkAccessiblePorts?: number[];
+  /**
+   * Environment variables for the container. When the host timezone is
+   * known and not UTC, `TZ=<zone>` is injected automatically so
+   * wall-clock behaviour inside the container matches the host. Set
+   * `TZ` yourself (any value, including `""`) to override or opt out.
+   */
   env?: Record<string, string>;
   /**
    * Container-runtime restart policy. Forwarded as `--restart=<value>`
@@ -476,6 +482,10 @@ export interface ContainerJobConfig {
   entrypoint?: string[];
   inputs?: Record<string, string>;
   outputs?: Record<string, string>;
+  /**
+   * Environment variables for the job container. `TZ` defaults to the
+   * host timezone the same way it does for `ContainerConfig.env`.
+   */
   env?: Record<string, string>;
   timeout?: number;
   /**
@@ -582,7 +592,12 @@ export interface ContainerJobConfig {
 }
 
 export type ContainerJobStatus =
-  "pending" | "pulling" | "running" | "completed" | "failed" | "cancelled";
+  | "pending"
+  | "pulling"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled";
 
 export interface ContainerJobResult {
   id: string;
