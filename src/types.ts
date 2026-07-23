@@ -582,7 +582,12 @@ export interface ContainerJobConfig {
 }
 
 export type ContainerJobStatus =
-  "pending" | "pulling" | "running" | "completed" | "failed" | "cancelled";
+  | "pending"
+  | "pulling"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled";
 
 export interface ContainerJobResult {
   id: string;
