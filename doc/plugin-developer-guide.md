@@ -1291,6 +1291,10 @@ import type {
   EnsureRunningOptions,
   VolumeIssue,
   ConsumerManifest,
+  UpdateServiceApi,
+  UpdateRegistration,
+  UpdateCheckResult,
+  VersionSource,
   // …every public type
 } from "signalk-container/types";
 ```
