@@ -18,6 +18,13 @@
   "signalk-plugin-enabled-by-default": true,
   "type": "module",
   "main": "dist/index.js",
+  "exports": {
+    ".": "./dist/index.js",
+    "./types": {
+      "types": "./dist/types.d.ts",
+      "import": "./dist/types.js"
+    }
+  },
   "scripts": {
     "clean": "rimraf dist public",
     "build:server": "tsc",

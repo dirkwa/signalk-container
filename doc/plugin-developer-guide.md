@@ -2,6 +2,8 @@
 
 How to use signalk-container from your Signal K plugin to manage Docker/Podman containers. This guide covers the integration patterns, pitfalls, and solutions discovered during real-world development.
 
+> **Prefer the helper library.** Most of the patterns below — manager discovery, tag validation, startup self-heal, `ensureRunning`, update registration, HTTP readiness, clean teardown — are packaged in [signalk-container-helper](https://github.com/hoeken/signalk-container-helper), a typed, zero-dependency wrapper (`ManagedContainer` / `AdoptedContainer`). New plugins should build on it and consult this guide for the underlying mechanics. The rest of this document describes the raw `globalThis.__signalk_containerManager` API the helper is built on.
+
 ## Quick Start
 
 ```typescript
@@ -1280,156 +1282,26 @@ The inline ResourceLimitsEditor updates its form inputs from the server's post-a
 
 ## TypeScript Types
 
-If you want type safety, define a minimal interface in your plugin:
+The complete public API is published as a self-contained, dependency-free type entrypoint. Import it directly instead of hand-maintaining a copy that drifts from the running plugin:
 
 ```typescript
-interface VolumeIssue {
-  containerPath: string;
-  source: string;
-  action: "skipped" | "aborted" | "recovered";
-  reason: string;
-}
-interface EnsureRunningOptions {
-  healthCheck?: () => Promise<boolean>;
-  onUnhealthy?: (name: string, error: string) => void;
-  onVolumeIssue?: (event: VolumeIssue) => void | Promise<void>;
-  onContainerLog?: (line: string) => void | Promise<void>;
-  onContainerLogStartTail?: number;
-  pluginId?: string; // npm package name; opt-in for digest pinning
-  pluginVersion?: string;
-}
-interface ContainerConfig {
-  image: string;
-  tag: string;
-  digest?: string; // "sha256:<64-hex>" — pulls `image@digest`
-  updateChannel?: string; // "tag:<pattern>" | "tag:latest" | "digest:explicit"
-  extraHosts?: Record<string, string>; // hostname → IP or "host-gateway"
-  // Host-UID mapping. Omit for the default (align with Signal K host user,
-  // assuming the image runs as root). Set { inImageUid, inImageGid } when
-  // the image declares a non-root USER. Set false to opt out entirely.
-  user?: { inImageUid?: number; inImageGid?: number } | false;
-  // Explicit healthcheck, for images that ship none (1.14.0+). The object
-  // form emits --health-cmd + timing flags; durations are runtime strings
-  // ("30s"). `false` emits --no-healthcheck. Wins over the image's own
-  // HEALTHCHECK. See "Healthcheck for images that ship none".
-  healthcheck?:
-    | false
-    | {
-        test: string[]; // ["CMD", ...] or ["CMD-SHELL", "<shell string>"]
-        interval?: string;
-        timeout?: string;
-        startPeriod?: string;
-        retries?: number;
-      };
-  // ...remaining fields (ports, volumes, env, networkMode, command, resources, ...)
-}
-interface ConsumerManifest {
-  schemaVersion: 1;
-  pluginId: string;
-  pluginVersion: string;
-  registeredAt: string;
-  containers: Record<
-    string,
-    {
-      image: string;
-      declaredTag: string;
-      declaredDigest: string | null;
-      resolvedDigest: string;
-      resolvedAt: string;
-      updateChannel: string;
-      history: HistoryEntry[];
-    }
-  >;
-}
-interface HistoryEntry {
-  ts: string;
-  from: string | null;
-  to: string;
-  reason:
-    | "plugin-install"
-    | "plugin-update"
-    | "user-pull"
-    | "auto-update"
-    | "manual-check";
-  triggeredBy?: string;
-}
-interface ContainerManagerApi {
-  getRuntime: () => {
-    runtime: "podman" | "docker";
-    version: string;
-    isRootless?: boolean | null;
-    cgroupControllers?: string[] | null;
-    hostUser?: { uid: number; gid: number } | null; // null on Windows
-    socketPath?: string; // resolved runtime socket
-  } | null;
-  whenReady: () => Promise<void>;
-  ensureRunning: (
-    name: string,
-    config: unknown,
-    options?: EnsureRunningOptions,
-  ) => Promise<void>;
-  start: (name: string) => Promise<void>;
-  stop: (name: string) => Promise<void>;
-  remove: (name: string) => Promise<void>;
-  getState: (
-    name: string,
-  ) => Promise<"running" | "stopped" | "missing" | "no-runtime">;
-  pullImage: (
-    image: string,
-    onProgress?: (msg: string) => void,
-  ) => Promise<void>;
-  imageExists: (image: string) => Promise<boolean>;
-  getImageDigest: (imageOrContainer: string) => Promise<string | null>;
-  getLogs: (
-    name: string,
-    options?: { tail?: number; since?: number },
-  ) => Promise<string[]>;
-  updateResources: (
-    name: string,
-    limits: unknown,
-  ) => Promise<{ method: "live" | "recreated"; warnings?: string[] }>;
-  getResources: (name: string) => unknown;
-  runJob: (
-    config: unknown,
-  ) => Promise<{ status: string; exitCode?: number; log: string[] }>;
-  cleanupOrphanedJobs: (filter: { ownerPluginId: string }) => Promise<{
-    reaped: Array<{
-      name: string;
-      image: string;
-      ownerPluginId: string;
-      label?: string;
-    }>;
-  }>;
-  prune: () => Promise<{ imagesRemoved: number; spaceReclaimed: string }>;
-  listContainers: () => Promise<unknown[]>;
-  updates: {
-    register: (reg: unknown) => void;
-    unregister: (pluginId: string) => void;
-    checkOne: (pluginId: string) => Promise<unknown>;
-    getLastResult: (pluginId: string) => unknown | null;
-    sources: {
-      githubReleases: (repo: string, options?: unknown) => unknown;
-      dockerHubTags: (image: string, options?: unknown) => unknown;
-    };
-  };
-  manifest: {
-    get: (pluginId: string) => Promise<ConsumerManifest | null>;
-    list: () => Promise<ConsumerManifest[]>;
-    getContainerHistory: (containerName: string) => Promise<HistoryEntry[]>;
-  };
-  doctor: {
-    imageRunsAsUser: (
-      image: string,
-      user?: { inImageUid?: number; inImageGid?: number } | false,
-    ) => Promise<{ ok: boolean; output: string; error?: string }>;
-    selfDeployment: () => Promise<SelfDeploymentResult>;
-    generateSetupSnippet: (
-      format?: "compose" | "run",
-      result?: SelfDeploymentResult,
-    ) => Promise<SetupSnippetResult>;
-  };
-}
+import type {
+  ContainerManagerApi,
+  ContainerConfig,
+  EnsureRunningOptions,
+  VolumeIssue,
+  ConsumerManifest,
+  // …every public type
+} from "signalk-container/types";
 ```
+
+The subpath ships type declarations plus a types-only runtime stub (`export {}`), so importing it adds no real runtime dependency and no `dependencies`/`peerDependencies` entry (do **not** add `signalk-container` to either; its prereleases break npm semver ranges — declare the relationship with `"signalk": { "requires": ["signalk-container"] }` instead). Runtime access stays via `globalThis.__signalk_containerManager`, exactly as before; only the _types_ come from the import.
+
+The `./types` subpath exists from **signalk-container 1.23.0** onward. The declarations you import describe whatever version you resolved, so a member added in a later plugin release only appears in the type once you upgrade the declaration source too; either way, feature-detect newer members (`typeof manager.recreate === "function"`) at the call site, since the _running_ plugin may be older than your types.
+
+> **Higher-level option:** [signalk-container-helper](https://github.com/hoeken/signalk-container-helper) wraps the whole consumer lifecycle (manager discovery, tag validation, self-heal, `ensureRunning`, update registration, HTTP readiness, teardown) into `ManagedContainer` / `AdoptedContainer` classes and re-exports these same types. If you're building a new containerized plugin, start there rather than wiring the manager by hand.
+
+If you cannot import at all (e.g. a plain-JavaScript plugin with no build step), declare a narrow local interface for the one or two shapes you actually touch and treat the manager global as `unknown` at the boundary — a hand-written mirror lags the real API, so prefer the import above. The authoritative definitions live in [`src/types.ts`](../src/types.ts).
 
 ---
 

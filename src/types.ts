@@ -1,9 +1,3 @@
-import type {
-  ConsumerManifest,
-  ContainerManifestEntry,
-  HistoryEntry,
-} from "./manifest/schema.js";
-
 export type RuntimeName = "podman" | "docker";
 export type RuntimePreference = "auto" | RuntimeName;
 
@@ -1530,9 +1524,64 @@ export interface ManifestApi {
   getContainerHistory(containerName: string): Promise<HistoryEntry[]>;
 }
 
-// Persistent manifest types are defined as TypeBox schemas in
-// src/manifest/schema.ts (single source of truth for the on-disk
-// shape); re-exported here so consumer plugins can import every
-// manifest type from "signalk-container/types". The import lives at
-// the top of the file with the other type imports.
-export type { ConsumerManifest, ContainerManifestEntry, HistoryEntry };
+// Persistent manifest types. These are hand-written here — the public
+// type home — rather than derived from the TypeBox schemas in
+// src/manifest/schema.ts, so that importing "signalk-container/types"
+// pulls in no `typebox` dependency. schema.ts imports these interfaces
+// and asserts (at compile time) that its `Static<>` shapes stay
+// structurally identical, so the two can never silently diverge: the
+// schema is the runtime validator, this is the compile-time contract.
+
+/** Why a manifest history entry was recorded. */
+export type ManifestHistoryReason =
+  | "plugin-install"
+  | "plugin-update"
+  | "user-pull"
+  | "auto-update"
+  | "manual-check";
+
+/** One image-resolution event in a container's manifest history. */
+export interface HistoryEntry {
+  /** ISO-8601 timestamp of the resolution event. */
+  ts: string;
+  /** Prior resolved digest (`sha256:`/`local:`), or null on first record. */
+  from: string | null;
+  /** New resolved digest (`sha256:`/`local:`). */
+  to: string;
+  /** What caused this record — install, update, user pull, etc. */
+  reason: ManifestHistoryReason;
+  /** Plugin version that triggered the record, when known. */
+  triggeredBy?: string;
+}
+
+/** A single managed container's pinning record within a manifest. */
+export interface ContainerManifestEntry {
+  /** Image repository the container was resolved from, without tag. */
+  image: string;
+  /** Tag the consumer plugin declared (before digest resolution). */
+  declaredTag: string;
+  /** Declared digest (`sha256:`), or null when only a tag was pinned. */
+  declaredDigest: string | null;
+  /** Resolved digest (`sha256:` or the `local:<image-id>` fallback). */
+  resolvedDigest: string;
+  /** ISO-8601 timestamp of the resolution. */
+  resolvedAt: string;
+  /** Update channel in effect (e.g. `tag:latest`, `digest:explicit`). */
+  updateChannel: string;
+  /** Chronological resolution history, oldest first. */
+  history: HistoryEntry[];
+}
+
+/** Per-plugin image-pinning manifest persisted on disk. */
+export interface ConsumerManifest {
+  /** On-disk schema version; always `1` for this shape. */
+  schemaVersion: 1;
+  /** Owning plugin's id (npm package name). */
+  pluginId: string;
+  /** Plugin version that last wrote this manifest. */
+  pluginVersion: string;
+  /** ISO-8601 timestamp of first registration. */
+  registeredAt: string;
+  /** Per-container pinning records, keyed by unprefixed container name. */
+  containers: Record<string, ContainerManifestEntry>;
+}
