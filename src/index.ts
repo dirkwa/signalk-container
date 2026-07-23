@@ -41,6 +41,7 @@ import {
   classifyVolumeSources,
   collectRecoveredVolumes,
   defaultHomeForConfigRoot,
+  defaultTimezoneEnv,
   connectToNetwork,
   disconnectFromNetwork,
   ensureNetwork,
@@ -69,6 +70,7 @@ import {
   findAvailablePort,
   releaseReservedPort,
   resolveHostPath,
+  resolveHostTimezone,
   resolveSignalkDataSource,
   resolveSignalkNetworks,
   safeInvokeContainerLog,
@@ -552,6 +554,14 @@ export default (app: App) => {
           `Invalid digest for ${config.image}: expected sha256:<64-hex>, got ${config.digest}`,
         );
       }
+
+      // Propagate the host timezone before any other config shaping so
+      // the injected TZ flows into lastConfigs and drift detection like
+      // any consumer-set env key.
+      config = {
+        ...config,
+        env: defaultTimezoneEnv(config.env, resolveHostTimezone()),
+      };
 
       // Resolve signalkDataMount → inject into volumes before anything else.
       // We strip the field from the config so containers.ts / buildRunArgs
@@ -1370,7 +1380,10 @@ export default (app: App) => {
 
     async runJob(config: ContainerJobConfig): Promise<ContainerJobResult> {
       if (!runtimeInfo) throw new Error("No container runtime available");
-      return runJob(runtimeInfo, config);
+      return runJob(runtimeInfo, {
+        ...config,
+        env: defaultTimezoneEnv(config.env, resolveHostTimezone()),
+      });
     },
 
     async getLogs(

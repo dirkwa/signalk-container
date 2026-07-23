@@ -129,6 +129,58 @@ export function defaultHomeForConfigRoot(
   return { ...env, HOME: configRootMount };
 }
 
+/**
+ * Zone names that mean "no offset from UTC". Container images already
+ * default to UTC, so resolving one of these means there is nothing to
+ * propagate — and, in the in-container deployment, that the real host
+ * zone is unknowable from in here (the container's own /etc/localtime
+ * is UTC unless the operator passed the zone in).
+ */
+const UTC_ZONE_NAMES = new Set([
+  "UTC",
+  "Etc/UTC",
+  "Etc/Universal",
+  "Universal",
+  "GMT",
+  "Etc/GMT",
+  "Greenwich",
+  "Etc/Greenwich",
+  "Zulu",
+  "Etc/Zulu",
+]);
+
+/**
+ * The IANA zone the SignalK process runs in, or `undefined` when it is
+ * UTC (nothing to propagate — containers already default to UTC).
+ * `Intl` honors the `TZ` env var and falls back to the system zone
+ * (/etc/localtime), so both bare-metal and TZ-configured deployments
+ * resolve correctly. `systemZone` is injectable for tests.
+ */
+export function resolveHostTimezone(
+  systemZone: () => string = () =>
+    Intl.DateTimeFormat().resolvedOptions().timeZone,
+): string | undefined {
+  const zone = systemZone();
+  return UTC_ZONE_NAMES.has(zone) ? undefined : zone;
+}
+
+/**
+ * Default the container's `TZ` to the host timezone so wall-clock logic
+ * inside managed containers (cron-style Node-RED flows, log timestamps,
+ * Grafana/QuestDB time rendering) agrees with the host. A consumer that
+ * sets `env.TZ` itself — any value, including "" — wins; an unknown or
+ * UTC host zone injects nothing. Pure and synchronous, mirroring
+ * `defaultHomeForConfigRoot`.
+ */
+export function defaultTimezoneEnv(
+  env: Record<string, string> | undefined,
+  zone: string | undefined,
+): Record<string, string> | undefined {
+  if (!zone) return env;
+  if (env?.TZ !== undefined) return env;
+  return { ...env, TZ: zone };
+}
+
 export function classifyVolumeSources(
   volumes: Record<string, string | VolumeSpec> | undefined,
   probe: (path: string) => boolean = existsSync,
