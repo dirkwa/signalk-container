@@ -28,14 +28,29 @@ describe("qualifyImage", () => {
   });
 
   it("podman prefixes docker.io/ for short repo names", () => {
-    assert.equal(qualifyImage("alpine", podman), "docker.io/alpine");
-    assert.equal(
-      qualifyImage("alpine:latest", podman),
-      "docker.io/alpine:latest",
-    );
     assert.equal(
       qualifyImage("questdb/questdb:9.0.0", podman),
       "docker.io/questdb/questdb:9.0.0",
+    );
+  });
+
+  it("podman canonicalizes single-name repos into library/", () => {
+    // Podman reports `alpine` as `docker.io/library/alpine` in
+    // `Config.Image`; emitting anything else here would look like
+    // image drift on every ensureRunning call.
+    assert.equal(qualifyImage("alpine", podman), "docker.io/library/alpine");
+    assert.equal(
+      qualifyImage("alpine:latest", podman),
+      "docker.io/library/alpine:latest",
+    );
+  });
+
+  it("podman does not mistake a dotted tag for a registry host", () => {
+    // The dot in `3.19` sits in the tag, not a registry component; the
+    // ref must still be qualified (and library-namespaced).
+    assert.equal(
+      qualifyImage("alpine:3.19", podman),
+      "docker.io/library/alpine:3.19",
     );
   });
 
@@ -54,7 +69,7 @@ describe("qualifyImage", () => {
   it("podman handles digest refs on unqualified short names (the @sha256 colon is not a port)", () => {
     assert.equal(
       qualifyImage(`alpine@sha256:${HEX64}`, podman),
-      `docker.io/alpine@sha256:${HEX64}`,
+      `docker.io/library/alpine@sha256:${HEX64}`,
     );
     assert.equal(
       qualifyImage(`questdb/questdb@sha256:${HEX64}`, podman),

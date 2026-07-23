@@ -564,14 +564,25 @@ export function qualifyImage(
     // would otherwise make us think the first segment is `host:port`.
     const refWithoutDigest = image.split("@", 1)[0];
     const parts = refWithoutDigest.split("/");
-    // Treat first component as a registry only if it has a dot, a colon
-    // (port) appearing in a multi-segment ref, or is exactly "localhost".
-    // Otherwise, prefix docker.io/.
+    if (parts.length === 1) {
+      // A single-segment ref can never carry a registry — a dot or
+      // colon here belongs to the tag (`alpine:3.19`), not a host.
+      // Single-name Docker Hub repos get the implicit `library/`
+      // namespace: podman canonicalizes `alpine` to
+      // `docker.io/library/alpine` and reports that form in
+      // `Config.Image`. Emitting anything else here would make
+      // `diffContainerConfig` compare the two spellings as different
+      // images and recreate the container on every ensureRunning call.
+      return `docker.io/library/${image}`;
+    }
+    // Treat the first component as a registry only if it has a dot, a
+    // colon (port), or is exactly "localhost". Otherwise, prefix
+    // docker.io/.
     const looksLikeRegistry =
       parts[0].includes(".") ||
-      (parts.length > 1 && parts[0].includes(":")) ||
+      parts[0].includes(":") ||
       parts[0] === "localhost";
-    if (parts.length <= 2 && !looksLikeRegistry) {
+    if (parts.length === 2 && !looksLikeRegistry) {
       return `docker.io/${image}`;
     }
   }
@@ -580,10 +591,11 @@ export function qualifyImage(
 
 /**
  * The qualified repo forms a managed image can appear under in podman's
- * local `repoTags`. Usually one (the `qualifyImage` result), but a bare
- * single-name Docker Hub image like `alpine` qualifies to
- * `docker.io/alpine` while podman stores it as `docker.io/library/alpine`
- * — so both are returned, letting the reaper match either spelling.
+ * local `repoTags`. `qualifyImage` emits podman's canonical spelling
+ * (including the implicit `library/` namespace for single-name Docker
+ * Hub repos), so this is normally a single form; the expansion below
+ * only fires for inputs that still reach it in the historical
+ * `docker.io/<name>` spelling (e.g. persisted manifest records).
  */
 export function qualifiedRepoVariants(
   image: string,
@@ -2684,10 +2696,10 @@ export async function reapSupersededImages(
 
   // Qualify each managed repo the way podman qualifies the local
   // `repoTags`, so the pure selector's string match lines up across
-  // runtimes. A bare single-name Docker Hub image qualifies to
-  // `docker.io/<name>` here but podman reports it as
-  // `docker.io/library/<name>`; emit BOTH forms (same runningImageId) so
-  // the selector matches whichever the runtime used.
+  // runtimes. `qualifiedRepoVariants` also covers records persisted in
+  // the historical `docker.io/<name>` spelling of single-name Docker
+  // Hub images (podman reports `docker.io/library/<name>`), emitting
+  // both forms with the same runningImageId.
   const qualifiedManaged = managed.flatMap((m) =>
     qualifiedRepoVariants(m.image, runtime).map((image) => ({ ...m, image })),
   );

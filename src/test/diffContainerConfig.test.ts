@@ -79,6 +79,18 @@ describe("diffContainerConfig — no drift on identical configs", () => {
     );
     assert.deepEqual(drifted, []);
   });
+
+  it("treats podman's library/ canonical form as equivalent to a bare single-name image", () => {
+    // Podman reports `alpine` as `docker.io/library/alpine` in
+    // Config.Image. Anything but a match here recreates the container
+    // on every ensureRunning call.
+    const { drifted } = diffContainerConfig(
+      reqBase({ image: "alpine", tag: "3.19" }),
+      liveBase({ image: "docker.io/library/alpine", tag: "3.19" }),
+      podman,
+    );
+    assert.deepEqual(drifted, []);
+  });
 });
 
 describe("diffContainerConfig — image+tag drift", () => {
