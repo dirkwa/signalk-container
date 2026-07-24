@@ -50,8 +50,13 @@ jobs:
 
       - name: Publish
         run: |
-          if [[ "${{ github.ref }}" == refs/tags/*-beta.* ]] || [[ "${{ github.ref }}" == refs/tags/*-rc.* ]]; then
+          if [[ "$REF" == refs/tags/*-beta.* ]] || [[ "$REF" == refs/tags/*-rc.* ]]; then
             npm publish --provenance --access public --tag beta
           else
             npm publish --provenance --access public
           fi
+        env:
+          # Pass github.ref through env, never interpolated into the shell
+          # script — a tag name is attacker-controllable and expanding it
+          # inline would be a command-injection vector.
+          REF: ${{ github.ref }}
