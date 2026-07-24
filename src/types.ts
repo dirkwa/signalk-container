@@ -1,4 +1,6 @@
 import type {
+  DockerHubTagsSourceOptions,
+  GithubReleasesSourceOptions,
   TagKind,
   UpdateCheckResult,
   UpdateReason,
@@ -1608,4 +1610,6 @@ export type {
   VersionSource,
   VersionSourceResult,
   TagKind,
+  GithubReleasesSourceOptions,
+  DockerHubTagsSourceOptions,
 };
