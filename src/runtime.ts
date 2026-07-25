@@ -105,9 +105,7 @@ export function isDisableUserns(): boolean {
  * `types.ts` imports (it's the lowest layer).
  */
 type UserMappingIntent =
-  | { inImageUid?: number; inImageGid?: number }
-  | false
-  | undefined;
+  { inImageUid?: number; inImageGid?: number } | false | undefined;
 
 /**
  * Build the UID-mapping flags to pass to the runtime for one

@@ -81,8 +81,7 @@ describe("ensureRunning — image healthcheck re-emitted in the create payload",
   function captureCreate(
     config: ContainerConfig,
     imageHealthcheck:
-      | Docker.ContainerInspectInfo["Config"]["Healthcheck"]
-      | undefined,
+      Docker.ContainerInspectInfo["Config"]["Healthcheck"] | undefined,
   ): {
     createPayload: () => Docker.ContainerCreateOptions | undefined;
     run: () => Promise<void>;
@@ -99,8 +98,7 @@ describe("ensureRunning — image healthcheck re-emitted in the create payload",
     return {
       createPayload: () =>
         calls.get("createContainer")?.[0] as
-          | Docker.ContainerCreateOptions
-          | undefined,
+          Docker.ContainerCreateOptions | undefined,
       run: () =>
         ensureRunning(docker, "demo", config, () => {}, undefined, client),
     };
@@ -167,8 +165,7 @@ describe("ensureRunning — explicit healthcheck override", () => {
     return {
       createPayload: () =>
         calls.get("createContainer")?.[0] as
-          | Docker.ContainerCreateOptions
-          | undefined,
+          Docker.ContainerCreateOptions | undefined,
       run: () =>
         ensureRunning(docker, "demo", config, () => {}, undefined, client),
     };
