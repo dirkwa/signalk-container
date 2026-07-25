@@ -311,6 +311,72 @@ export interface ContainerConfig {
    */
   user?: { inImageUid?: number; inImageGid?: number } | false;
   /**
+   * Host devices to expose to the container. Two entry forms:
+   *
+   *   - A device NODE path, docker `--device` syntax
+   *     `hostPath[:containerPath[:permissions]]` (defaults: containerPath
+   *     = hostPath, permissions `rwm`), e.g. `"/dev/ttyUSB0"` or
+   *     `"/dev/ttyUSB0:/dev/gps0:rw"`. The node is attached statically at
+   *     create time — a node that disappears and reappears (USB replug)
+   *     is only picked up on the next recreate.
+   *   - A device DIRECTORY path, e.g. `"/dev/snd"` → hot-plug mode: the
+   *     directory is bind-mounted at the same in-container path (so nodes
+   *     appearing after a replug are visible) and the directory's
+   *     device-class cgroup rules are opened (`c <major>:* rwm`, derived
+   *     from the nodes currently inside it plus a built-in map of
+   *     well-known class majors — `/dev/snd`, `/dev/input`, `/dev/dri` —
+   *     so an EMPTY directory still works when the device is unplugged at
+   *     container start). Use this for devices that may be replugged
+   *     while the container runs: USB audio, input devices, GPUs.
+   *
+   * An entry whose host path does not exist is skipped with a warning —
+   * an unplugged device never prevents container start (same philosophy
+   * as `ifMissing: "skip"` volumes).
+   *
+   * On rootless runtimes device-cgroup rules cannot be applied (the
+   * device cgroup controller is not delegated to unprivileged users);
+   * access to the bound nodes is then governed by plain file
+   * permissions — combine with `groupAdd` to hold the device group
+   * (e.g. `groupAdd: ["audio"]` for `/dev/snd`).
+   *
+   * Part of drift detection: adding, removing, or changing entries
+   * recreates the container. (Podman does not report device nodes back
+   * through inspect, so node-entry changes there are detected against
+   * the prior config within a server lifetime; directory entries are
+   * always detected via their bind mounts.)
+   *
+   * Available in signalk-container 1.24.0+ — silently ignored by older
+   * versions.
+   */
+  devices?: string[];
+  /**
+   * Supplementary groups for the container process (`--group-add`),
+   * mapped to `HostConfig.GroupAdd`. Entries are group names or numeric
+   * GIDs. Names are resolved to numeric GIDs against the HOST's
+   * `/etc/group` at create time: the runtimes resolve a bare name
+   * against the container image's `/etc/group`, whose GIDs need not
+   * match the host's (or contain the name at all), and it is the host
+   * GID the kernel checks when the process opens a host device node.
+   * A name unknown to the host is skipped with a warning; numeric
+   * entries pass through.
+   *
+   * On rootless Podman the resolved GIDs alone can't grant host device
+   * access (they map into the user namespace's subordinate range), so
+   * signalk-container additionally emits the
+   * `run.oci.keep_original_groups` annotation — the container process
+   * then keeps the host user's own supplementary groups. This makes
+   * `groupAdd: ["audio"]` + `devices: ["/dev/snd"]` work across docker,
+   * rootful podman, and rootless podman alike, provided the user running
+   * the runtime is in the group. Docker never receives the annotation.
+   *
+   * Part of drift detection: changes (including unsetting) recreate the
+   * container.
+   *
+   * Available in signalk-container 1.24.0+ — silently ignored by older
+   * versions.
+   */
+  groupAdd?: (string | number)[];
+  /**
    * Resource limits for the container. The consumer plugin sets a
    * sensible default here; the user can override per-container via
    * signalk-container's plugin config (see `containerOverrides`).
@@ -598,12 +664,7 @@ export interface ContainerJobConfig {
 }
 
 export type ContainerJobStatus =
-  | "pending"
-  | "pulling"
-  | "running"
-  | "completed"
-  | "failed"
-  | "cancelled";
+  "pending" | "pulling" | "running" | "completed" | "failed" | "cancelled";
 
 export interface ContainerJobResult {
   id: string;

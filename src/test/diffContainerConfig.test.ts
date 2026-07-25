@@ -4,6 +4,11 @@ import {
   diffContainerConfig,
   type LiveContainerConfig,
 } from "../containers.js";
+import {
+  _setDeviceProbeForTesting,
+  _setEtcGroupReaderForTesting,
+  type DeviceStatResult,
+} from "../devices.js";
 import { _setCurrentHostIdsForTesting } from "../runtime.js";
 import type { ContainerConfig, ContainerRuntimeInfo } from "../types.js";
 
@@ -19,13 +24,40 @@ const docker: ContainerRuntimeInfo = {
   isPodmanDockerShim: false,
 };
 
+/** Linux dev_t: major in bits 8–19, minor split across bits 0–7 and 20+. */
+function rdevOf(major: number, minor: number): number {
+  return (minor & 0xff) + major * 0x100 + Math.floor(minor / 0x100) * 0x100000;
+}
+
+// Deterministic host state for the devices/groupAdd transforms: the diff
+// mirrors buildCreateOptions' emission, which stats device paths and
+// resolves group names, so both probes are pinned like the host-id
+// resolver below.
+const hostStats: Record<string, DeviceStatResult> = {
+  "/dev/snd": { kind: "directory", rdev: 0 },
+  "/dev/snd/controlC0": { kind: "device-node", rdev: rdevOf(116, 0) },
+  "/dev/ttyUSB0": { kind: "device-node", rdev: rdevOf(188, 0) },
+  "/dev/ttyACM0": { kind: "device-node", rdev: rdevOf(166, 0) },
+};
+
 // Pin the host UID/GID resolver so user-mapping flags are deterministic
 // across CI (often UID 0) and dev machines (often UID 1000).
 // `liveBase().user` is set to the same `1000:1000` string so the
 // existing no-drift tests stay no-drift; tests asserting `user` drift
 // override `user` explicitly.
-before(() => _setCurrentHostIdsForTesting(() => ({ uid: 1000, gid: 1000 })));
-after(() => _setCurrentHostIdsForTesting(null));
+before(() => {
+  _setCurrentHostIdsForTesting(() => ({ uid: 1000, gid: 1000 }));
+  _setDeviceProbeForTesting({
+    stat: (p) => hostStats[p] ?? null,
+    readdir: (p) => (p === "/dev/snd" ? ["controlC0"] : []),
+  });
+  _setEtcGroupReaderForTesting(() => "audio:x:29:pi\ndialout:x:20:pi\n");
+});
+after(() => {
+  _setCurrentHostIdsForTesting(null);
+  _setDeviceProbeForTesting(null);
+  _setEtcGroupReaderForTesting(null);
+});
 
 function liveBase(
   overrides: Partial<LiveContainerConfig> = {},
@@ -44,6 +76,9 @@ function liveBase(
     // produces `--user 1000:1000` by default on docker/rootful podman,
     // so live state mirrors that to keep existing no-drift tests stable.
     user: "1000:1000",
+    devices: [],
+    deviceCgroupRules: [],
+    groupAdd: [],
     ...overrides,
   } as LiveContainerConfig;
 }
@@ -609,5 +644,242 @@ describe("diffContainerConfig — recovery path documentation", () => {
       docker,
     );
     assert.ok(drifted.includes("volumes"));
+  });
+});
+
+describe("diffContainerConfig — devices", () => {
+  // Live shape a docker container created from `devices: ["/dev/snd",
+  // "/dev/ttyUSB0"]` reports back: the node in HostConfig.Devices, the
+  // class rule in DeviceCgroupRules, the hot-plug directory in Binds.
+  const dockerLiveWithDevices = () =>
+    liveBase({
+      devices: [
+        {
+          pathOnHost: "/dev/ttyUSB0",
+          pathInContainer: "/dev/ttyUSB0",
+          cgroupPermissions: "rwm",
+        },
+      ],
+      deviceCgroupRules: ["c 116:* rwm"],
+      binds: [{ host: "/dev/snd", container: "/dev/snd" }],
+      // Docker auto-injects the host-gateway mapping; mirror it live so
+      // the all-fields no-drift assertions stay about devices.
+      extraHosts: new Map([["host.containers.internal", "host-gateway"]]),
+    });
+
+  it("no drift on docker when the emission matches live (node + directory)", () => {
+    const { drifted } = diffContainerConfig(
+      reqBase({ devices: ["/dev/snd", "/dev/ttyUSB0"] }),
+      dockerLiveWithDevices(),
+      docker,
+    );
+    assert.deepEqual(drifted, []);
+  });
+
+  it("no drift across entry-syntax variants (expansion is canonicalized)", () => {
+    // Explicitly spelling out the defaults must compare equal to the
+    // shorthand the container was created from.
+    const { drifted } = diffContainerConfig(
+      reqBase({ devices: ["/dev/snd", "/dev/ttyUSB0:/dev/ttyUSB0:mwr"] }),
+      dockerLiveWithDevices(),
+      docker,
+    );
+    assert.deepEqual(drifted, []);
+  });
+
+  it("treats live empty CgroupPermissions as the rwm default (podman-style report)", () => {
+    const { drifted } = diffContainerConfig(
+      reqBase({ devices: ["/dev/ttyUSB0"] }),
+      liveBase({
+        devices: [
+          {
+            pathOnHost: "/dev/ttyUSB0",
+            pathInContainer: "/dev/ttyUSB0",
+            cgroupPermissions: "",
+          },
+        ],
+      }),
+      docker,
+    );
+    assert.ok(!drifted.includes("devices"));
+  });
+
+  it("flags drift on docker when a device is added", () => {
+    const { drifted } = diffContainerConfig(
+      reqBase({ devices: ["/dev/ttyUSB0"] }),
+      liveBase(), // live has no devices
+      docker,
+    );
+    assert.ok(drifted.includes("devices"));
+  });
+
+  it("flags drift on docker when a previously-set device list is unset (no prior needed)", () => {
+    const { drifted } = diffContainerConfig(
+      reqBase(), // devices undefined
+      dockerLiveWithDevices(),
+      docker,
+    );
+    assert.ok(drifted.includes("devices"));
+  });
+
+  it("flags drift on docker when permissions change", () => {
+    const { drifted } = diffContainerConfig(
+      reqBase({ devices: ["/dev/ttyUSB0:/dev/ttyUSB0:rw"] }),
+      dockerLiveWithDevices(),
+      docker,
+    );
+    assert.ok(drifted.includes("devices"));
+  });
+
+  it("no drift on docker when a still-missing device was skipped at create time", () => {
+    // /dev/ttyACM9 doesn't exist in the pinned host stats: it was
+    // skipped from the emission, so live legitimately has no device.
+    const { drifted } = diffContainerConfig(
+      reqBase({ devices: ["/dev/ttyACM9"] }),
+      liveBase(),
+      docker,
+    );
+    assert.ok(!drifted.includes("devices"));
+  });
+
+  it("flags drift on docker when a previously-missing device has appeared (recovery)", () => {
+    // Same config as the skip case above, but the device now exists —
+    // the emission gains the node, live doesn't have it, recreate picks
+    // it up. Mirrors the volumes ifMissing-skip recovery path.
+    const { drifted } = diffContainerConfig(
+      reqBase({ devices: ["/dev/ttyUSB0"] }),
+      liveBase(),
+      docker,
+    );
+    assert.ok(drifted.includes("devices"));
+  });
+
+  it("directory device compares through the volumes axis on podman (no drift when bound)", () => {
+    // Podman reports Devices [] and rules null regardless of what the
+    // container was created with, so only the bind is comparable —
+    // and it must be enough to keep an unchanged config from drifting.
+    const { drifted } = diffContainerConfig(
+      reqBase({ devices: ["/dev/snd"] }),
+      liveBase({ binds: [{ host: "/dev/snd", container: "/dev/snd" }] }),
+      podman,
+    );
+    assert.deepEqual(drifted, []);
+  });
+
+  it("directory device added on podman -> volumes drift via the missing bind", () => {
+    const { drifted } = diffContainerConfig(
+      reqBase({ devices: ["/dev/snd"] }),
+      liveBase({ binds: [] }),
+      podman,
+    );
+    assert.ok(drifted.includes("volumes"));
+  });
+
+  it("node devices do NOT live-compare on podman (inspect is blind there)", () => {
+    const { drifted } = diffContainerConfig(
+      reqBase({ devices: ["/dev/ttyUSB0"] }),
+      liveBase(), // podman reports [] even though the node was applied
+      podman,
+    );
+    assert.ok(!drifted.includes("devices"));
+  });
+
+  it("flags drift on podman when prior had devices and requested unsets them", () => {
+    const { drifted } = diffContainerConfig(
+      reqBase(),
+      liveBase(),
+      podman,
+      reqBase({ devices: ["/dev/ttyUSB0"] }),
+    );
+    assert.ok(drifted.includes("devices"));
+  });
+
+  it("flags drift on podman when the node list changed vs prior", () => {
+    const { drifted } = diffContainerConfig(
+      reqBase({ devices: ["/dev/ttyACM0"] }),
+      liveBase(),
+      podman,
+      reqBase({ devices: ["/dev/ttyUSB0"] }),
+    );
+    assert.ok(drifted.includes("devices"));
+  });
+
+  it("no drift on podman when devices match prior", () => {
+    const { drifted } = diffContainerConfig(
+      reqBase({ devices: ["/dev/ttyUSB0"] }),
+      liveBase(),
+      podman,
+      reqBase({ devices: ["/dev/ttyUSB0"] }),
+    );
+    assert.ok(!drifted.includes("devices"));
+  });
+});
+
+describe("diffContainerConfig — groupAdd", () => {
+  it("no drift when the host-resolved GIDs match live (name vs numeric form)", () => {
+    // The container was created from `groupAdd: ["audio"]` → live holds
+    // the resolved "29". The same config must not drift.
+    const { drifted } = diffContainerConfig(
+      reqBase({ groupAdd: ["audio"] }),
+      liveBase({ groupAdd: ["29"] }),
+      docker,
+    );
+    assert.ok(!drifted.includes("groupAdd"));
+  });
+
+  it("compares as an unordered set", () => {
+    const { drifted } = diffContainerConfig(
+      reqBase({ groupAdd: [995, "audio"] }),
+      liveBase({ groupAdd: ["29", "995"] }),
+      docker,
+    );
+    assert.ok(!drifted.includes("groupAdd"));
+  });
+
+  it("flags drift when a group is added", () => {
+    const { drifted } = diffContainerConfig(
+      reqBase({ groupAdd: ["audio", "dialout"] }),
+      liveBase({ groupAdd: ["29"] }),
+      docker,
+    );
+    assert.ok(drifted.includes("groupAdd"));
+  });
+
+  it("flags drift when a previously-set groupAdd is unset (no prior needed)", () => {
+    const { drifted } = diffContainerConfig(
+      reqBase(),
+      liveBase({ groupAdd: ["29"] }),
+      docker,
+    );
+    assert.ok(drifted.includes("groupAdd"));
+  });
+
+  it("no drift when neither side has groups", () => {
+    const { drifted } = diffContainerConfig(reqBase(), liveBase(), docker);
+    assert.ok(!drifted.includes("groupAdd"));
+  });
+
+  it("an unresolvable name is skipped from the transform, matching its skip at create time", () => {
+    const { drifted } = diffContainerConfig(
+      reqBase({ groupAdd: ["nonexistent", "audio"] }),
+      liveBase({ groupAdd: ["29"] }),
+      docker,
+    );
+    assert.ok(!drifted.includes("groupAdd"));
+  });
+
+  it("works the same on podman (GroupAdd is reported there, unlike Devices)", () => {
+    const { drifted } = diffContainerConfig(
+      reqBase({ groupAdd: ["audio"] }),
+      liveBase({ groupAdd: ["29"] }),
+      podman,
+    );
+    assert.ok(!drifted.includes("groupAdd"));
+    const changed = diffContainerConfig(
+      reqBase({ groupAdd: ["dialout"] }),
+      liveBase({ groupAdd: ["29"] }),
+      podman,
+    );
+    assert.ok(changed.drifted.includes("groupAdd"));
   });
 });

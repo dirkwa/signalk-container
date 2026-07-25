@@ -116,6 +116,16 @@ When we need to read live container state, call `getContainer(name).inspect()` o
 
 Docker reports `HostConfig.NetworkMode` as `"default"` or `"bridge"` when no `--network` was passed. Podman rootless reports `"slirp4netns"` or `"pasta"`. These are runtime defaults equivalent to "user did not request a specific network." `canonicalNetworkMode()` in `src/containers.ts` normalizes all of them to `""` so comparison against a requested `undefined`/`""` is correct. Any new comparison of `networkMode` between requested and live state must go through this helper.
 
+### Device access (`devices` / `groupAdd`)
+
+Three runtime quirks shape this feature; all were verified live on rootless Podman 5.4.2 and are load-bearing:
+
+- **Rootless runtimes reject `HostConfig.DeviceCgroupRules`** at container create ("device cgroup rules are not supported in rootless mode or in a user namespace"), so `resolveDeviceRequests` emits no rules when `isRootless === true`. Rootless device access is gated by plain file permissions on the bound nodes instead — that's what `groupAdd` + keep-original-groups exist for.
+- **`--group-add keep-groups` is CLI sugar only.** Over the docker-compat create API, a literal `keep-groups` in `HostConfig.GroupAdd` is treated as a group _name_ and fails the container at start. The API-level spelling is the `run.oci.keep_original_groups: "1"` annotation (`HostConfig.Annotations`), emitted for rootless podman only — never for docker.
+- **Podman applies `HostConfig.Devices`/`DeviceCgroupRules` but reports neither back through inspect** (compat and libpod both return `[]`/`null`, even for CLI-created `--device` containers). `diffContainerConfig` therefore live-compares node devices and rules on docker only; on podman it compares against `prior`, and directory devices compare through their bind mounts (visible on both engines). Do not "fix" a podman devices-drift gap by comparing against live inspect — it will recreate on every reconcile.
+
+Group NAMES are resolved to numeric GIDs against the HOST's `/etc/group` before emission (`resolveGroupAdd`) — the runtimes resolve names against the container image's `/etc/group`, which is the wrong namespace for host device nodes. Both `buildCreateOptions` and `diffContainerConfig` go through the same resolvers in `src/devices.ts` (with `_set…ForTesting` probe overrides), so emission and drift mirror can never diverge; never re-derive either side inline.
+
 ### `disableUserNamespaceRemap` (rootless-Podman + idmap-incompatible storage)
 
 Some filesystems (ZFS is the canonical case) cannot be id-mapped by the kernel. `HostConfig.UsernsMode: "keep-id"` either fails outright on container create or triggers Podman's `storage-chown-by-maps` sweep, which is catastrophically slow on CoW metadata. The README's user-facing section documents the host-side primary fix (storage driver swap to `fuse-overlayfs`); the plugin-side escape hatch below covers the case where the operator cannot or will not change storage drivers.
