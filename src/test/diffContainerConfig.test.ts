@@ -755,6 +755,48 @@ describe("diffContainerConfig — devices", () => {
     assert.ok(drifted.includes("devices"));
   });
 
+  it("no drift on docker when a live node device was unplugged since create", () => {
+    // /dev/ttyACM9 is absent from the pinned host stats (device
+    // unplugged). It's still in the requested config and still reported
+    // live from HostConfig.Devices, but the requested emission drops it
+    // (host-probed) — the live side must drop it too so the unplug
+    // doesn't recreate the container out from under the (gone) device.
+    const { drifted } = diffContainerConfig(
+      reqBase({ devices: ["/dev/ttyACM9"] }),
+      liveBase({
+        devices: [
+          {
+            pathOnHost: "/dev/ttyACM9",
+            pathInContainer: "/dev/ttyACM9",
+            cgroupPermissions: "rwm",
+          },
+        ],
+      }),
+      docker,
+    );
+    assert.ok(!drifted.includes("devices"));
+  });
+
+  it("still flags drift on docker for a present live node the config dropped", () => {
+    // Guard against over-filtering: /dev/ttyUSB0 exists on the host and
+    // the config no longer requests it, so removing it is real drift and
+    // must still recreate.
+    const { drifted } = diffContainerConfig(
+      reqBase({ devices: [] }),
+      liveBase({
+        devices: [
+          {
+            pathOnHost: "/dev/ttyUSB0",
+            pathInContainer: "/dev/ttyUSB0",
+            cgroupPermissions: "rwm",
+          },
+        ],
+      }),
+      docker,
+    );
+    assert.ok(drifted.includes("devices"));
+  });
+
   it("directory device compares through the volumes axis on podman (no drift when bound)", () => {
     // Podman reports Devices [] and rules null regardless of what the
     // container was created with, so only the bind is comparable —

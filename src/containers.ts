@@ -39,6 +39,7 @@ import {
   filterUnresolvedDeviceEntries,
   KEEP_ORIGINAL_GROUPS_ANNOTATION,
   parseUnresolvedDevicesLabel,
+  presentLiveDeviceNodes,
   resolveDeviceRequests,
   resolveGroupAdd,
   type DeviceNodeSpec,
@@ -1686,10 +1687,16 @@ export function diffContainerConfig(
   // engines and already flows through the volumes comparison above.
   let devicesDrift = false;
   if (runtime.runtime === "docker") {
+    // Live node devices whose host path is currently absent (device
+    // unplugged since create) are dropped before the comparison so an
+    // unplug never registers as drift and recreates the container — the
+    // requested side already omits missing nodes via resolveDeviceRequests,
+    // and this restores that symmetry on the live side (the podman branch
+    // has it for free, both its sides being host-probed).
     devicesDrift =
       !sortedStringArraysEqual(
         canonicalDeviceKeys(requestedDevices.nodes),
-        canonicalDeviceKeys(live.devices),
+        canonicalDeviceKeys(presentLiveDeviceNodes(live.devices)),
       ) ||
       !sortedStringArraysEqual(
         requestedDevices.cgroupRules,

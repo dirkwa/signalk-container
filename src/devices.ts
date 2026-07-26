@@ -250,6 +250,27 @@ export function filterUnresolvedDeviceEntries(
 }
 
 /**
+ * Drop live node-device entries whose host path is currently absent, for
+ * the docker drift comparison. Docker reports `HostConfig.Devices` back
+ * through inspect, so a node present at create time but unplugged since
+ * (USB serial/GPS dongle pulled) still shows up live while the requested
+ * emission — host-probed through `resolveDeviceRequests` — has already
+ * dropped it. Comparing the two as-is would fire `devices` drift and
+ * recreate the container over the unplug, contradicting the "a missing
+ * device must never disturb the container" policy that governs the
+ * requested side. Filtering the live side by the same probe restores the
+ * symmetry the podman branch gets for free (both its sides are
+ * host-probed). Only node devices are subject to this; directory-device
+ * binds compare through volumes and are unaffected.
+ */
+export function presentLiveDeviceNodes(
+  liveNodes: readonly DeviceNodeSpec[],
+  probe: DeviceHostProbe = currentDeviceProbe,
+): DeviceNodeSpec[] {
+  return liveNodes.filter((n) => probe.stat(n.pathOnHost) !== null);
+}
+
+/**
  * The create-payload fragments a `ContainerConfig.devices` list resolves
  * to on this host, given the runtime:
  *
