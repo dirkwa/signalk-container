@@ -443,6 +443,13 @@ export default function DoctorModal({ onClose }: DoctorModalProps) {
                 </>
               )}
 
+              {result.networkDns && result.networkDns.advice.length > 0 && (
+                <>
+                  <div style={S.sectionLabel}>Network DNS advice</div>
+                  <pre style={S.pre}>{result.networkDns.advice.join("\n")}</pre>
+                </>
+              )}
+
               {result.devicePassthrough &&
                 result.devicePassthrough.advice.length > 0 && (
                   <>
