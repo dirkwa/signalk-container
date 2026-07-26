@@ -26,6 +26,9 @@ function buildInspect(parts: {
   portBindings?: Record<string, unknown> | null;
   extraHosts?: string[] | null;
   user?: string;
+  devices?: Array<Record<string, unknown>> | null;
+  deviceCgroupRules?: string[] | null;
+  groupAdd?: string[] | null;
 }): Json {
   return {
     Config: {
@@ -39,6 +42,9 @@ function buildInspect(parts: {
       Binds: parts.binds ?? null,
       PortBindings: parts.portBindings ?? null,
       ExtraHosts: parts.extraHosts ?? null,
+      Devices: parts.devices ?? null,
+      DeviceCgroupRules: parts.deviceCgroupRules ?? null,
+      GroupAdd: parts.groupAdd ?? null,
     },
   };
 }
@@ -77,6 +83,9 @@ describe("getLiveContainerConfig", () => {
     assert.equal(result.portBindings.size, 0);
     assert.equal(result.extraHosts.size, 0);
     assert.equal(result.user, "");
+    assert.deepEqual(result.devices, []);
+    assert.deepEqual(result.deviceCgroupRules, []);
+    assert.deepEqual(result.groupAdd, []);
   });
 
   it("splits image:tag on the LAST colon (so registry ports survive)", async () => {
@@ -387,6 +396,73 @@ describe("getLiveContainerConfig", () => {
     );
     assert.ok(result);
     assert.equal(result.user, "1000:1000");
+  });
+
+  it("parses HostConfig.Devices, defaulting a missing container path and keeping empty permissions raw", async () => {
+    // Podman omits CgroupPermissions ("" here); the diff layer treats
+    // that as the rwm default — the parser just reports the raw value.
+    const result = await getLiveContainerConfig(
+      dummyRuntime,
+      "x",
+      clientWith(
+        buildInspect({
+          image: "x:1",
+          networkMode: "",
+          devices: [
+            {
+              PathOnHost: "/dev/ttyUSB0",
+              PathInContainer: "/dev/gps0",
+              CgroupPermissions: "rwm",
+            },
+            { PathOnHost: "/dev/snd/timer", CgroupPermissions: "" },
+          ],
+        }),
+      ),
+    );
+    assert.ok(result);
+    assert.deepEqual(result.devices, [
+      {
+        pathOnHost: "/dev/ttyUSB0",
+        pathInContainer: "/dev/gps0",
+        cgroupPermissions: "rwm",
+      },
+      {
+        pathOnHost: "/dev/snd/timer",
+        pathInContainer: "/dev/snd/timer",
+        cgroupPermissions: "",
+      },
+    ]);
+  });
+
+  it("parses DeviceCgroupRules and GroupAdd, defaulting null to empty arrays", async () => {
+    const withValues = await getLiveContainerConfig(
+      dummyRuntime,
+      "x",
+      clientWith(
+        buildInspect({
+          image: "x:1",
+          networkMode: "",
+          deviceCgroupRules: ["c 116:* rwm", "c 13:* rwm"],
+          groupAdd: ["29", "995"],
+        }),
+      ),
+    );
+    assert.ok(withValues);
+    assert.deepEqual(withValues.deviceCgroupRules, [
+      "c 116:* rwm",
+      "c 13:* rwm",
+    ]);
+    assert.deepEqual(withValues.groupAdd, ["29", "995"]);
+
+    const withNulls = await getLiveContainerConfig(
+      dummyRuntime,
+      "x",
+      clientWith(buildInspect({ image: "x:1", networkMode: "" })),
+    );
+    assert.ok(withNulls);
+    assert.deepEqual(withNulls.devices, []);
+    assert.deepEqual(withNulls.deviceCgroupRules, []);
+    assert.deepEqual(withNulls.groupAdd, []);
   });
 
   it("returns empty user when the container was created without --user", async () => {

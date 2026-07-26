@@ -9,6 +9,7 @@ import {
   ContainerInfo,
   ContainerRuntimeInfo,
   ContainerState,
+  DeviceIssue,
   EnsureRunningOptions,
   HealthcheckOverride,
   LocalImageSummary,
@@ -33,6 +34,17 @@ import {
   type ContainerClient,
 } from "./client.js";
 import type { ErrorKind } from "./errors.js";
+import {
+  DEVICES_UNRESOLVED_LABEL,
+  filterUnresolvedDeviceEntries,
+  KEEP_ORIGINAL_GROUPS_ANNOTATION,
+  parseUnresolvedDevicesLabel,
+  presentLiveDeviceNodes,
+  resolveDeviceRequests,
+  resolveGroupAdd,
+  unresolvedGroupNames,
+  type DeviceNodeSpec,
+} from "./devices.js";
 import { resourcePayloadForRun } from "./resources.js";
 import { containerPrefix } from "./namespace.js";
 import { classifyTag } from "./updates/tagClassifier.js";
@@ -67,6 +79,19 @@ export function volumeArg(
   if (runtime.runtime === "podman" && !isNamedVolume) flags.push("Z");
   const suffix = flags.length > 0 ? `:${flags.join(",")}` : "";
   return `${hostPath}:${containerPath}${suffix}`;
+}
+
+/**
+ * Build the `HostConfig.Binds` value for a hot-plug device directory
+ * (`/dev/snd`, `/dev/input`, …). Unlike {@link volumeArg} this NEVER adds
+ * Podman's `:Z` SELinux suffix: relabelling would touch the host's own
+ * device nodes in a shared system directory. Kept as a named helper so
+ * that intentional omission lives in code, not only in a comment, and the
+ * device-bind format has a single source of truth like `volumeArg` does
+ * for volumes.
+ */
+export function deviceBindArg(hostPath: string, containerPath: string): string {
+  return `${hostPath}:${containerPath}`;
 }
 
 /**
@@ -304,6 +329,23 @@ export function safeInvokeVolumeIssue(
     // Pre-promise sync throw (e.g. the call expression itself threw
     // before returning a Promise). Rare in practice but possible if
     // the handler is something weird like a Proxy.
+    reportError(err);
+  }
+}
+
+/**
+ * Invoke an `onDeviceIssue` callback safely. Same shape and rationale
+ * as `safeInvokeVolumeIssue`.
+ */
+export function safeInvokeDeviceIssue(
+  handler: ((event: DeviceIssue) => void | Promise<void>) | undefined,
+  event: DeviceIssue,
+  reportError: (err: unknown) => void,
+): void {
+  if (!handler) return;
+  try {
+    void Promise.resolve(handler(event)).catch(reportError);
+  } catch (err) {
     reportError(err);
   }
 }
@@ -1089,6 +1131,25 @@ export interface LiveContainerConfig {
   portBindings: Map<string, PortBinding[]>;
   extraHosts: Map<string, string>;
   /**
+   * Device nodes from `HostConfig.Devices`. Docker reports the entries
+   * it was created with; Podman applies them but reports an empty list
+   * (verified live on 5.4.2 — even for CLI-created `--device`
+   * containers), so the diff must not live-compare devices on Podman.
+   */
+  devices: DeviceNodeSpec[];
+  /** `HostConfig.DeviceCgroupRules`, `[]` when unset (`null` live). */
+  deviceCgroupRules: string[];
+  /** `HostConfig.GroupAdd`, `[]` when unset. Both runtimes report it. */
+  groupAdd: string[];
+  /**
+   * `Config.Labels`, `{}` when unset. Not part of drift detection as a
+   * field — read for the system labels signalk-container stamps itself,
+   * notably `DEVICES_UNRESOLVED_LABEL` (device entries the host rejected
+   * at create time), which gates the device/volume mirror in
+   * `diffContainerConfig`.
+   */
+  labels: Record<string, string>;
+  /**
    * Effective `--user` spec from `.Config.User`. Empty string when the
    * container was created without `--user` (image USER, typically root).
    * Drift detection compares this against the expected mapping derived
@@ -1127,12 +1188,16 @@ export async function getLiveContainerConfig(
     Cmd?: string[] | null;
     Env?: string[] | null;
     User?: string;
+    Labels?: Record<string, unknown> | null;
   };
   const hostConfig = (info.HostConfig ?? {}) as {
     NetworkMode?: string;
     Binds?: string[] | null;
     PortBindings?: Record<string, unknown> | null;
     ExtraHosts?: string[] | null;
+    Devices?: Array<Record<string, unknown>> | null;
+    DeviceCgroupRules?: string[] | null;
+    GroupAdd?: string[] | null;
   };
   const rawCmd = config.Cmd ?? null;
   const rawNetworkMode = hostConfig.NetworkMode;
@@ -1141,6 +1206,9 @@ export async function getLiveContainerConfig(
   const rawPortBindings = hostConfig.PortBindings ?? null;
   const rawExtraHosts = hostConfig.ExtraHosts ?? null;
   const rawUser = config.User;
+  const rawDevices = hostConfig.Devices ?? null;
+  const rawDeviceCgroupRules = hostConfig.DeviceCgroupRules ?? null;
+  const rawGroupAdd = hostConfig.GroupAdd ?? null;
 
   // Split image into image+tag (and optional digest). Config.Image can
   // be `repo:tag`, `repo@sha256:...`, or `repo:tag@sha256:...`.
@@ -1225,6 +1293,41 @@ export async function getLiveContainerConfig(
 
   const user = (rawUser ?? "").trim();
 
+  const devices: DeviceNodeSpec[] = [];
+  if (Array.isArray(rawDevices)) {
+    for (const entry of rawDevices) {
+      if (!entry || typeof entry !== "object") continue;
+      const pathOnHost = entry["PathOnHost"];
+      if (typeof pathOnHost !== "string" || pathOnHost === "") continue;
+      const pathInContainer = entry["PathInContainer"];
+      const cgroupPermissions = entry["CgroupPermissions"];
+      devices.push({
+        pathOnHost,
+        pathInContainer:
+          typeof pathInContainer === "string" && pathInContainer !== ""
+            ? pathInContainer
+            : pathOnHost,
+        cgroupPermissions:
+          typeof cgroupPermissions === "string" ? cgroupPermissions : "",
+      });
+    }
+  }
+
+  const deviceCgroupRules = Array.isArray(rawDeviceCgroupRules)
+    ? rawDeviceCgroupRules.filter((r): r is string => typeof r === "string")
+    : [];
+
+  const groupAdd = Array.isArray(rawGroupAdd)
+    ? rawGroupAdd.filter((g): g is string => typeof g === "string")
+    : [];
+
+  const labels: Record<string, string> = {};
+  if (config.Labels && typeof config.Labels === "object") {
+    for (const [key, value] of Object.entries(config.Labels)) {
+      if (typeof value === "string") labels[key] = value;
+    }
+  }
+
   return {
     image,
     tag,
@@ -1236,6 +1339,10 @@ export async function getLiveContainerConfig(
     portBindings,
     extraHosts,
     user,
+    devices,
+    deviceCgroupRules,
+    groupAdd,
+    labels,
   };
 }
 
@@ -1340,11 +1447,38 @@ function bindingsEqual(a: PortBinding[], b: PortBinding[]): boolean {
 }
 
 /**
+ * Canonical, order-independent form of a device-node list for
+ * comparison. Permissions letters are sorted and an empty permissions
+ * string (Podman omits it) is treated as the `rwm` default, so the
+ * expanded emission of `"/dev/x"` compares equal to a live
+ * `{PathOnHost: "/dev/x", PathInContainer: "/dev/x", CgroupPermissions: ""}`.
+ */
+function canonicalDeviceKeys(devices: DeviceNodeSpec[]): string[] {
+  return devices
+    .map((d) => {
+      const perms = [...(d.cgroupPermissions || "rwm")].sort().join("");
+      return `${d.pathOnHost}:${d.pathInContainer}:${perms}`;
+    })
+    .sort();
+}
+
+function sortedStringArraysEqual(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  const sa = [...a].sort();
+  const sb = [...b].sort();
+  return sa.every((v, i) => v === sb[i]);
+}
+
+/**
  * Compare a requested `ContainerConfig` against the live container's
  * effective config and return the list of fields that have drifted.
  *
- * Pure function — no I/O. The caller (`ensureRunning`) decides what to do
- * with a non-empty drift list (today: log + remove + recreate).
+ * Pure function over its inputs plus the injectable host probes in
+ * `devices.ts` (device stats and `/etc/group`, needed because the
+ * emission being mirrored is host-state-dependent; configs without
+ * `devices`/`groupAdd` never touch them). The caller (`ensureRunning`)
+ * decides what to do with a non-empty drift list (today: log + remove +
+ * recreate).
  *
  * Field semantics:
  *   - image+tag: tag-string equality only, never digest. Update detection
@@ -1368,6 +1502,21 @@ function bindingsEqual(a: PortBinding[], b: PortBinding[]): boolean {
  *     their `:Z`/`:ro` flags already stripped by `getLiveContainerConfig`.
  *   - ports: container-port key compared as runtime-emitted (`9000/tcp`).
  *     Multiple host bindings per container port compared as a sorted set.
+ *   - devices: compared post-transformation — what `buildCreateOptions`
+ *     would emit for the requested entries on this host vs live state —
+ *     so an unchanged config never false-drifts across entry-syntax
+ *     variants. Directory entries compare through their bind mounts (the
+ *     `volumes` axis, on both runtimes). Node entries and cgroup rules
+ *     live-compare on docker only: Podman applies `HostConfig.Devices` /
+ *     `DeviceCgroupRules` but reports neither back through inspect
+ *     (verified live on 5.4.2), so there they compare against `prior`
+ *     when available — same fallback shape as the env/command
+ *     prior-unset pattern.
+ *   - groupAdd: expected emission (host-resolved GIDs) compared against
+ *     live `HostConfig.GroupAdd` as a sorted set; both runtimes report
+ *     it, so unsetting is detected without `prior`. The rootless-podman
+ *     keep-original-groups annotation is emission-only and never
+ *     compared.
  */
 export function diffContainerConfig(
   requested: ContainerConfig,
@@ -1429,6 +1578,26 @@ export function diffContainerConfig(
   }
   if (envDrift) drifted.push("env");
 
+  // Resolve the requested devices to the same emission buildCreateOptions
+  // would produce, so both the volumes mirror below and the devices
+  // comparison diff post-transformation shapes. Warnings stay silent here
+  // — buildCreateOptions already reported any skip at create time.
+  //
+  // Entries the live container records as unresolved (the real host
+  // rejected the optimistic bind at create time — DEVICES_UNRESOLVED_LABEL)
+  // are excluded from BOTH the requested and prior emissions while the
+  // manager still cannot see the path; otherwise every reconcile would
+  // flag drift over a bind the host can never satisfy and recreate-loop.
+  // The same filter applies to `prior` so the podman fallback comparison
+  // below stays symmetric.
+  const unresolvedDevices = parseUnresolvedDevicesLabel(
+    live.labels[DEVICES_UNRESOLVED_LABEL],
+  );
+  const requestedDevices = resolveDeviceRequests(
+    filterUnresolvedDeviceEntries(requested.devices ?? [], unresolvedDevices),
+    runtime,
+  );
+
   // Volumes: build canonical Map<containerPath, hostPath> for each side.
   const requestedVolumes = new Map<string, string>();
   if (requested.volumes) {
@@ -1438,6 +1607,15 @@ export function diffContainerConfig(
         stripTrailingSlash(volumeSource(raw)),
       );
     }
+  }
+  // Hot-plug device directories are emitted as binds, so the live Binds
+  // include them; mirror them into the requested side or every reconcile
+  // of a directory-device config would flag volumes drift.
+  for (const bind of requestedDevices.directoryBinds) {
+    requestedVolumes.set(
+      stripTrailingSlash(bind.pathInContainer),
+      stripTrailingSlash(bind.pathOnHost),
+    );
   }
   const liveVolumes = new Map<string, string>();
   for (const { host, container } of live.binds) {
@@ -1511,6 +1689,62 @@ export function diffContainerConfig(
     }
   }
   if (extraHostsDrift) drifted.push("extraHosts");
+
+  // Devices: node entries + cgroup rules. Docker reports both through
+  // inspect, so compare the expected emission against live. Podman
+  // applies them but reports Devices as [] and rules as null (verified
+  // live on 5.4.2 — even for CLI-created --device containers), so a live
+  // comparison there would recreate on every reconcile; fall back to
+  // comparing the requested emission against the prior config's, which
+  // catches add/remove/change and unset within a server lifetime. The
+  // directory-bind half of a device entry is runtime-visible on both
+  // engines and already flows through the volumes comparison above.
+  let devicesDrift = false;
+  if (runtime.runtime === "docker") {
+    // Live node devices whose host path is currently absent (device
+    // unplugged since create) are dropped before the comparison so an
+    // unplug never registers as drift and recreates the container — the
+    // requested side already omits missing nodes via resolveDeviceRequests,
+    // and this restores that symmetry on the live side (the podman branch
+    // has it for free, both its sides being host-probed).
+    devicesDrift =
+      !sortedStringArraysEqual(
+        canonicalDeviceKeys(requestedDevices.nodes),
+        canonicalDeviceKeys(presentLiveDeviceNodes(live.devices)),
+      ) ||
+      !sortedStringArraysEqual(
+        requestedDevices.cgroupRules,
+        live.deviceCgroupRules,
+      );
+  } else if (prior !== undefined) {
+    const priorDevices = resolveDeviceRequests(
+      filterUnresolvedDeviceEntries(prior.devices ?? [], unresolvedDevices),
+      runtime,
+    );
+    devicesDrift =
+      !sortedStringArraysEqual(
+        canonicalDeviceKeys(requestedDevices.nodes),
+        canonicalDeviceKeys(priorDevices.nodes),
+      ) ||
+      !sortedStringArraysEqual(
+        requestedDevices.cgroupRules,
+        priorDevices.cgroupRules,
+      );
+  }
+  if (devicesDrift) drifted.push("devices");
+
+  // GroupAdd: expected emission (host-resolved GIDs) vs live, as sorted
+  // sets. Both runtimes report HostConfig.GroupAdd (docker: null when
+  // unset, podman: []), and nothing else populates it, so a symmetric
+  // comparison detects unsetting without needing `prior`. Names the host
+  // can't resolve are skipped on both sides of the transform (silently
+  // here; buildCreateOptions warned at create time), so they can't loop.
+  const expectedGroupAdd = requested.groupAdd?.length
+    ? resolveGroupAdd(requested.groupAdd)
+    : [];
+  if (!sortedStringArraysEqual(expectedGroupAdd, live.groupAdd)) {
+    drifted.push("groupAdd");
+  }
 
   // User/ownership drift. Compute the `User` form the translator would
   // emit and compare to live `Config.User`. The rootless-Podman
@@ -1809,6 +2043,55 @@ function buildCreateOptions(
     }
   }
 
+  // Host devices. Node entries land in HostConfig.Devices; directory
+  // entries (hot-plug mode) are bind-mounted via deviceBindArg (which
+  // omits the podman `:Z` relabel — see there) and opened up via
+  // per-class DeviceCgroupRules. Rules are empty under rootless runtimes
+  // (see resolveDeviceRequests). Entries whose host path is missing
+  // (device unplugged) were skipped with a warning.
+  if (config.devices?.length) {
+    const resolved = resolveDeviceRequests(config.devices, runtime, debug);
+    if (resolved.nodes.length > 0) {
+      const mappings: Docker.DeviceMapping[] = resolved.nodes.map((n) => ({
+        PathOnHost: n.pathOnHost,
+        PathInContainer: n.pathInContainer,
+        CgroupPermissions: n.cgroupPermissions,
+      }));
+      hostConfig.Devices = mappings;
+    }
+    if (resolved.cgroupRules.length > 0) {
+      hostConfig.DeviceCgroupRules = resolved.cgroupRules;
+    }
+    if (resolved.directoryBinds.length > 0) {
+      hostConfig.Binds = [
+        ...(hostConfig.Binds ?? []),
+        ...resolved.directoryBinds.map((b) =>
+          deviceBindArg(b.pathOnHost, b.pathInContainer),
+        ),
+      ];
+    }
+  }
+
+  // Supplementary groups, host-resolved to numeric GIDs (see
+  // resolveGroupAdd for why group names must never reach the runtime).
+  // Under rootless podman the GIDs alone map into the userns subordinate
+  // range, so the keep-original-groups annotation additionally carries
+  // the host user's own supplementary groups into the container — the
+  // half that actually grants device-node access there. Docker never
+  // receives the annotation (crun-specific; dockerode's HostConfig
+  // typing predates the field, hence the cast).
+  if (config.groupAdd?.length) {
+    const groups = resolveGroupAdd(config.groupAdd, debug);
+    if (groups.length > 0) hostConfig.GroupAdd = groups;
+    if (runtime.runtime === "podman" && runtime.isRootless === true) {
+      (
+        hostConfig as Docker.HostConfig & {
+          Annotations?: Record<string, string>;
+        }
+      ).Annotations = { [KEEP_ORIGINAL_GROUPS_ANNOTATION]: "1" };
+    }
+  }
+
   const env: string[] = [];
   if (config.env) {
     for (const [key, value] of Object.entries(config.env)) {
@@ -1951,6 +2234,61 @@ export async function ensureRunning(
         `Container ${fullName} ${contextLabel} (could not inspect for drift)`,
       );
       return false;
+    }
+    // Re-announce device entries the live container records as
+    // unresolved (host rejected them at create time). The label is the
+    // durable record — re-firing here keeps operator surfaces (doctor)
+    // populated across Signal K restarts, when the create-time events
+    // are long gone. The original entry string wasn't recorded, so the
+    // host path stands in for it.
+    for (const hostPath of parseUnresolvedDevicesLabel(
+      live.labels[DEVICES_UNRESOLVED_LABEL],
+    )) {
+      safeInvokeDeviceIssue(
+        options?.onDeviceIssue,
+        {
+          entry: hostPath,
+          hostPath,
+          action: "unresolved",
+          reason:
+            `Device ${hostPath} was missing on the host when ${fullName} ` +
+            `was created; the container runs without it. The entry is ` +
+            `retried on the next recreate.`,
+        },
+        (err) =>
+          debug(
+            `ensureRunning(${name}): onDeviceIssue handler threw: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          ),
+      );
+    }
+    // Re-announce unresolvable groupAdd names too, so a group-skip stays
+    // visible in the doctor across Signal K restarts — the same durability
+    // the device-unresolved block above gives host-path skips. No label is
+    // needed here: config.groupAdd is present on every call, so re-probing
+    // it against the current host /etc/group is the durable record (and it
+    // self-clears the moment the group is created on the host).
+    if (config.groupAdd?.length) {
+      for (const groupName of unresolvedGroupNames(config.groupAdd)) {
+        safeInvokeDeviceIssue(
+          options?.onDeviceIssue,
+          {
+            entry: groupName,
+            hostPath: "",
+            action: "group-skipped",
+            reason:
+              `groupAdd "${groupName}" has no matching group in the host's ` +
+              `/etc/group; ${fullName} runs without it.`,
+          },
+          (err) =>
+            debug(
+              `ensureRunning(${name}): onDeviceIssue handler threw: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            ),
+        );
+      }
     }
     const { drifted } = diffContainerConfig(config, live, runtime, prior);
     if (drifted.length === 0) return false;
@@ -2098,13 +2436,8 @@ export async function ensureRunning(
         config.healthcheck !== undefined
           ? null
           : await getImageHealthcheck(runtime, imageRef, client);
-      const createOpts = buildCreateOptions(
-        name,
-        config,
-        runtime,
-        healthcheck,
-        debug,
-        (event) =>
+      const buildOpts = (cfg: ContainerConfig): Docker.ContainerCreateOptions =>
+        buildCreateOptions(name, cfg, runtime, healthcheck, debug, (event) =>
           safeInvokeUlimitClamped(options?.onUlimitClamped, event, (err) =>
             debug(
               `ensureRunning(${name}): onUlimitClamped handler threw: ${
@@ -2112,8 +2445,50 @@ export async function ensureRunning(
               }`,
             ),
           ),
-      );
-      const created = await createAndStart(client, createOpts);
+        );
+      const fireDeviceIssue = (event: DeviceIssue): void =>
+        safeInvokeDeviceIssue(options?.onDeviceIssue, event, (err) =>
+          debug(
+            `ensureRunning(${name}): onDeviceIssue handler threw: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          ),
+        );
+      const createOpts = buildOpts(config);
+
+      // Announce create-time device dispositions (skips + unverified
+      // emissions). Same resolution buildCreateOptions just ran — the
+      // injectable probe makes it deterministic across the two calls.
+      const deviceIssues = config.devices?.length
+        ? resolveDeviceRequests(config.devices, runtime).issues
+        : [];
+      for (const issue of deviceIssues) {
+        fireDeviceIssue({
+          entry: issue.entry,
+          hostPath: issue.hostPath,
+          action: issue.disposition,
+          reason: issue.reason,
+        });
+      }
+
+      // Announce groupAdd names the host could not resolve — the emitted
+      // supplementary groups silently dropped them. Surfaced through the
+      // same device-issue channel (action "group-skipped") so an operator
+      // sees the misconfiguration instead of it living only in debug logs.
+      if (config.groupAdd?.length) {
+        for (const name of unresolvedGroupNames(config.groupAdd)) {
+          fireDeviceIssue({
+            entry: name,
+            hostPath: "",
+            action: "group-skipped",
+            reason:
+              `Skipping groupAdd "${name}": no such group in the host's ` +
+              `/etc/group. ${fullName} starts without it.`,
+          });
+        }
+      }
+
+      let created = await createAndStart(client, createOpts);
       if (!created.ok && created.conflict) {
         // getContainerState reported "missing" because `inspect` failed,
         // but a container with this name still exists in a state inspect
@@ -2123,12 +2498,67 @@ export async function ensureRunning(
           `Container ${fullName} name conflict despite "missing" state; removing stale container and retrying`,
         );
         await removeContainer(runtime, name, client);
-        const retry = await createAndStart(client, createOpts);
-        if (!retry.ok) {
-          throw new Error(`Failed to create ${fullName}: ${retry.error}`);
-        }
-        return;
+        created = await createAndStart(client, createOpts);
       }
+
+      // Optimistic-device fallback: an unverified device bind (emitted
+      // because a containerized manager cannot see the host path locally)
+      // was rejected by the runtime — the path is missing on the REAL
+      // host too. Retry without the rejected entries so a missing device
+      // never prevents container start, and stamp the dropped host paths
+      // into DEVICES_UNRESOLVED_LABEL so diffContainerConfig doesn't
+      // recreate-loop over them. One iteration per rejected path,
+      // bounded by the number of unverified entries.
+      const unverified = deviceIssues.filter(
+        (i) => i.disposition === "optimistic",
+      );
+      const unresolvedPaths: string[] = [];
+      while (!created.ok && unverified.length > 0) {
+        const rawError = created.raw;
+        const rejected = MISSING_HOST_PATH_RE.test(rawError)
+          ? unverified.filter(
+              (i) =>
+                !unresolvedPaths.includes(i.hostPath) &&
+                rawError.includes(i.hostPath),
+            )
+          : [];
+        if (rejected.length === 0) break;
+        unresolvedPaths.push(...rejected.map((i) => i.hostPath));
+        for (const issue of rejected) {
+          const reason =
+            `Device "${issue.entry}" does not exist on the host — the ` +
+            `runtime rejected the container create. Starting ${fullName} ` +
+            `without it; the entry is retried on the next recreate.`;
+          debug(`ensureRunning(${name}): ${reason}`);
+          fireDeviceIssue({
+            entry: issue.entry,
+            hostPath: issue.hostPath,
+            action: "unresolved",
+            reason,
+          });
+        }
+        // A failed start (podman resolves binds at start) leaves the
+        // created container behind; remove it before the retry.
+        // removeContainer tolerates "already gone".
+        await removeContainer(runtime, name, client);
+        created = await createAndStart(
+          client,
+          buildOpts({
+            ...config,
+            devices: filterUnresolvedDeviceEntries(
+              config.devices ?? [],
+              unresolvedPaths,
+            ),
+            labels: {
+              ...config.labels,
+              [DEVICES_UNRESOLVED_LABEL]: JSON.stringify(
+                [...unresolvedPaths].sort(),
+              ),
+            },
+          }),
+        );
+      }
+
       if (!created.ok) {
         throw new Error(`Failed to create ${fullName}: ${created.error}`);
       }
@@ -2136,6 +2566,17 @@ export async function ensureRunning(
     }
   }
 }
+
+/**
+ * Runtime error text for a bind mount whose host source path is missing.
+ * Podman (start phase): `statfs /dev/snd: no such file or directory`.
+ * Docker (start phase): `invalid mount config for type "bind": bind
+ * source path does not exist: /dev/snd`. The device-fallback path in
+ * `ensureRunning` additionally requires the error to name the specific
+ * unverified host path, so an unrelated missing-file error can't trigger
+ * the fallback.
+ */
+const MISSING_HOST_PATH_RE = /no such file or directory|does not exist/i;
 
 /** Start an existing container by its prefixed name, tolerating 304 (already running). */
 async function startByFullName(
@@ -2159,12 +2600,16 @@ async function startByFullName(
 /**
  * Create + start a container from a create payload. Returns a discriminated
  * result so the caller can detect the name-conflict (409) case and retry
- * after removing the stale container.
+ * after removing the stale container. `raw` carries the runtime's original
+ * error text — the device-fallback path in `ensureRunning` matches host
+ * paths against it, which the sanitized `userMessage` may not preserve.
  */
 async function createAndStart(
   client: ContainerClient,
   opts: Docker.ContainerCreateOptions,
-): Promise<{ ok: true } | { ok: false; conflict: boolean; error: string }> {
+): Promise<
+  { ok: true } | { ok: false; conflict: boolean; error: string; raw: string }
+> {
   const createResult = await safe(() => client.createContainer(opts));
   if (!createResult.ok) {
     // Only a genuine name collision warrants the stale-container remove+retry.
@@ -2178,11 +2623,21 @@ async function createAndStart(
       createResult.error.kind === "invalid-config"
         ? false
         : /already in use|name.*conflict|409/i.test(createResult.error.raw);
-    return { ok: false, conflict, error: createResult.error.userMessage };
+    return {
+      ok: false,
+      conflict,
+      error: createResult.error.userMessage,
+      raw: createResult.error.raw,
+    };
   }
   const startResult = await safe(() => createResult.value.start());
   if (!startResult.ok) {
-    return { ok: false, conflict: false, error: startResult.error.userMessage };
+    return {
+      ok: false,
+      conflict: false,
+      error: startResult.error.userMessage,
+      raw: startResult.error.raw,
+    };
   }
   return { ok: true };
 }

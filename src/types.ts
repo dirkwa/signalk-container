@@ -78,6 +78,17 @@ export interface ContainerRuntimeInfo {
    */
   socketPath?: string;
   /**
+   * Whether the Signal K server process itself runs inside a container
+   * (same detection as the doctor's `isContainerized`). Captured at
+   * runtime-detection time because device emission needs it: a
+   * containerized manager's filesystem is not the filesystem the runtime
+   * resolves device paths against, so `resolveDeviceRequests` treats
+   * "path missing locally" differently there (see the optimistic branch
+   * in `devices.ts`). `undefined` (older callers, tests) means
+   * bare-metal semantics.
+   */
+  isContainerized?: boolean;
+  /**
    * @deprecated Superseded by `socketPath`. Never populated since the
    * dockerode socket port (the `--remote --url` CLI fallback it described
    * no longer exists). Kept as an optional field for one release so
@@ -310,6 +321,74 @@ export interface ContainerConfig {
    * long-running managed containers and one-shot helper jobs.
    */
   user?: { inImageUid?: number; inImageGid?: number } | false;
+  /**
+   * Host devices to expose to the container. Two entry forms:
+   *
+   *   - A device NODE path, docker `--device` syntax
+   *     `hostPath[:containerPath[:permissions]]` (defaults: containerPath
+   *     = hostPath, permissions `rwm`), e.g. `"/dev/ttyUSB0"` or
+   *     `"/dev/ttyUSB0:/dev/gps0:rw"`. The node is attached statically at
+   *     create time — a node that disappears and reappears (USB replug)
+   *     is only picked up on the next recreate.
+   *   - A device DIRECTORY path, e.g. `"/dev/snd"` → hot-plug mode: the
+   *     directory is bind-mounted at the same in-container path (so nodes
+   *     appearing after a replug are visible) and the directory's
+   *     device-class cgroup rules are opened (`c <major>:* rwm`, derived
+   *     from the nodes currently inside it plus a built-in map of
+   *     well-known class majors — `/dev/snd`, `/dev/input`, `/dev/dri` —
+   *     so an EMPTY directory still works when the device is unplugged at
+   *     container start). Use this for devices that may be replugged
+   *     while the container runs: USB audio, input devices, GPUs.
+   *
+   * An entry whose host path does not exist is skipped and reported
+   * through `EnsureRunningOptions.onDeviceIssue` (and logged at warning
+   * level by the plugin) — an unplugged device never prevents container
+   * start (same philosophy as `ifMissing: "skip"` volumes).
+   *
+   * On rootless runtimes device-cgroup rules cannot be applied (the
+   * device cgroup controller is not delegated to unprivileged users);
+   * access to the bound nodes is then governed by plain file
+   * permissions — combine with `groupAdd` to hold the device group
+   * (e.g. `groupAdd: ["audio"]` for `/dev/snd`).
+   *
+   * Part of drift detection: adding, removing, or changing entries
+   * recreates the container. (Podman does not report device nodes back
+   * through inspect, so node-entry changes there are detected against
+   * the prior config within a server lifetime; directory entries are
+   * always detected via their bind mounts.)
+   *
+   * Available in signalk-container 1.24.0+ — silently ignored by older
+   * versions.
+   */
+  devices?: string[];
+  /**
+   * Supplementary groups for the container process (`--group-add`),
+   * mapped to `HostConfig.GroupAdd`. Entries are group names or numeric
+   * GIDs. Names are resolved to numeric GIDs against the HOST's
+   * `/etc/group` at create time: the runtimes resolve a bare name
+   * against the container image's `/etc/group`, whose GIDs need not
+   * match the host's (or contain the name at all), and it is the host
+   * GID the kernel checks when the process opens a host device node.
+   * A name unknown to the host is skipped and reported through
+   * `EnsureRunningOptions.onDeviceIssue` as a `group-skipped` event (and
+   * logged at warning level by the plugin); numeric entries pass through.
+   *
+   * On rootless Podman the resolved GIDs alone can't grant host device
+   * access (they map into the user namespace's subordinate range), so
+   * signalk-container additionally emits the
+   * `run.oci.keep_original_groups` annotation — the container process
+   * then keeps the host user's own supplementary groups. This makes
+   * `groupAdd: ["audio"]` + `devices: ["/dev/snd"]` work across docker,
+   * rootful podman, and rootless podman alike, provided the user running
+   * the runtime is in the group. Docker never receives the annotation.
+   *
+   * Part of drift detection: changes (including unsetting) recreate the
+   * container.
+   *
+   * Available in signalk-container 1.24.0+ — silently ignored by older
+   * versions.
+   */
+  groupAdd?: (string | number)[];
   /**
    * Resource limits for the container. The consumer plugin sets a
    * sensible default here; the user can override per-container via
@@ -598,12 +677,7 @@ export interface ContainerJobConfig {
 }
 
 export type ContainerJobStatus =
-  | "pending"
-  | "pulling"
-  | "running"
-  | "completed"
-  | "failed"
-  | "cancelled";
+  "pending" | "pulling" | "running" | "completed" | "failed" | "cancelled";
 
 export interface ContainerJobResult {
   id: string;
@@ -747,6 +821,46 @@ export interface VolumeIssue {
 }
 
 /**
+ * One device-passthrough event delivered to
+ * `EnsureRunningOptions.onDeviceIssue`. Same callback contract as
+ * `VolumeIssue`; switch on `action` to dispatch.
+ */
+export interface DeviceIssue {
+  /**
+   * The original entry string: a `ContainerConfig.devices` entry for the
+   * device actions, or the `ContainerConfig.groupAdd` group name for
+   * `'group-skipped'`.
+   */
+  entry: string;
+  /**
+   * Canonical host path the entry parsed to. Empty string for
+   * `'group-skipped'`, which concerns a supplementary group, not a path.
+   */
+  hostPath: string;
+  /**
+   * What signalk-container did about this entry:
+   *   - `'skipped'`: the host path was missing (probe-visible) at create
+   *     time; the entry was dropped and the container starts without it.
+   *   - `'optimistic'`: the manager runs containerized and could not see
+   *     the path locally; the entry was emitted unverified for the
+   *     runtime to resolve against the real host.
+   *   - `'unresolved'`: an optimistic entry was rejected by the runtime —
+   *     the path is missing on the real host too. The container was
+   *     recreated without it and carries `DEVICES_UNRESOLVED_LABEL`; the
+   *     entry is retried on the next recreate (or as soon as the manager
+   *     can see the path). Fires at create time and again on every
+   *     reconcile of a container still carrying the label, so state
+   *     survives Signal K restarts.
+   *   - `'group-skipped'`: a `groupAdd` group name did not resolve against
+   *     the host's `/etc/group`; it was dropped from the emitted
+   *     supplementary groups and the container starts without it.
+   */
+  action: "skipped" | "optimistic" | "unresolved" | "group-skipped";
+  /** Human-readable explanation; safe to surface in `setPluginStatus`. */
+  reason: string;
+}
+
+/**
  * Event delivered to `EnsureRunningOptions.onUlimitClamped` when a
  * requested ulimit had to be lowered to what the host can actually grant.
  * Currently only `nofile` is clamped (a rootless container cannot exceed
@@ -819,6 +933,20 @@ export interface EnsureRunningOptions extends HealthCheckOptions {
    * lifecycle path otherwise.
    */
   onUlimitClamped?: (event: UlimitClamp) => void | Promise<void>;
+
+  /**
+   * Called once per device entry that hit a passthrough event during
+   * this `ensureRunning` call — see `DeviceIssue.action` for the three
+   * dispositions. `'skipped'`/`'optimistic'` fire only when the call
+   * actually creates a container; `'unresolved'` additionally re-fires
+   * on reconciles of a live container carrying
+   * `DEVICES_UNRESOLVED_LABEL`.
+   *
+   * Same handler contract as `onVolumeIssue`: sync or async, fire-and-
+   * forget, errors caught and logged at error level, kept off the
+   * lifecycle path otherwise.
+   */
+  onDeviceIssue?: (event: DeviceIssue) => void | Promise<void>;
 
   /**
    * Called for every line the managed container writes to stdout
@@ -1367,6 +1495,28 @@ export interface SelfDeploymentResult {
     /** See `user` for the matching rule. */
     enabled: boolean;
     /** Operator-facing remediation; empty when `enabled` is true. */
+    advice: string[];
+  } | null;
+  /**
+   * Device-passthrough state of the managed containers. Unlike the other
+   * sections this is NOT probed by `selfDeployment` itself — it is
+   * grafted in by the plugin API layer from the `DeviceIssue` events of
+   * the most recent `ensureRunning` calls (the doctor probe has no view
+   * into per-container config). Advisory only — does not escalate
+   * `status`. `null`/absent when no managed container reported a device
+   * issue, or when the probe ran outside the plugin API (stub doctor,
+   * unit tests, pre-start, payloads from older servers).
+   */
+  devicePassthrough?: {
+    issues: Array<{
+      /** Unprefixed managed-container name (the `ensureRunning` name). */
+      container: string;
+      entry: string;
+      hostPath: string;
+      action: "skipped" | "optimistic" | "unresolved" | "group-skipped";
+      reason: string;
+    }>;
+    /** Operator-facing remediation lines (mount/plug-in guidance). */
     advice: string[];
   } | null;
   /**

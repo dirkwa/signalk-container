@@ -389,11 +389,41 @@ export default function DoctorModal({ onClose }: DoctorModalProps) {
                 />
               )}
 
+              {result.devicePassthrough &&
+                result.devicePassthrough.issues.map((issue) =>
+                  issue.action === "group-skipped" ? (
+                    <Row
+                      key={`${issue.container}:group:${issue.entry}`}
+                      label={`Group (${issue.container})`}
+                      value={`${issue.entry} ${issue.action}`}
+                      missing={true}
+                    />
+                  ) : (
+                    <Row
+                      key={`${issue.container}:${issue.hostPath}:${issue.entry}:${issue.action}`}
+                      label={`Device (${issue.container})`}
+                      value={`${issue.hostPath} ${issue.action}`}
+                      missing={issue.action !== "optimistic"}
+                    />
+                  ),
+                )}
+
               <div style={S.sectionLabel}>Remediation</div>
               {result.remediation.length > 0 ? (
                 <pre style={S.pre}>{result.remediation.join("\n")}</pre>
               ) : (
-                <div style={S.message}>No action needed (status ok).</div>
+                // "No action needed" would contradict a non-empty advisory
+                // block (storage/linger/network-DNS/device advice can be
+                // actionable while status stays ok). Mirror the identical
+                // hasAdvisoryAdvice guard in formatDoctorReport exactly —
+                // including networkDns, or the modal claims "No action needed"
+                // for a payload the copyable report flags as actionable.
+                !(
+                  (result.containerStorage?.advice.length ?? 0) > 0 ||
+                  (result.linger?.advice.length ?? 0) > 0 ||
+                  (result.networkDns?.advice.length ?? 0) > 0 ||
+                  (result.devicePassthrough?.advice.length ?? 0) > 0
+                ) && <div style={S.message}>No action needed (status ok).</div>
               )}
 
               {result.containerStorage &&
@@ -412,6 +442,23 @@ export default function DoctorModal({ onClose }: DoctorModalProps) {
                   <pre style={S.pre}>{result.linger.advice.join("\n")}</pre>
                 </>
               )}
+
+              {result.networkDns && result.networkDns.advice.length > 0 && (
+                <>
+                  <div style={S.sectionLabel}>Network DNS advice</div>
+                  <pre style={S.pre}>{result.networkDns.advice.join("\n")}</pre>
+                </>
+              )}
+
+              {result.devicePassthrough &&
+                result.devicePassthrough.advice.length > 0 && (
+                  <>
+                    <div style={S.sectionLabel}>Device passthrough advice</div>
+                    <pre style={S.pre}>
+                      {result.devicePassthrough.advice.join("\n")}
+                    </pre>
+                  </>
+                )}
 
               <button
                 type="button"

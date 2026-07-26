@@ -21,6 +21,7 @@ Instead of each plugin implementing its own container orchestration, they delega
 - **Zero-config container service connectivity** -- `signalkAccessiblePorts` lets the SignalK process connect back to a service running inside a managed container (e.g. an HTTP or TCP server). signalk-container picks the right networking strategy automatically — port binding on the host loopback for bare-metal deployments, or a shared Docker network with DNS for containerised ones. No host ports are exposed unnecessarily.
 - **Host timezone propagation** -- managed containers and one-shot jobs get `TZ=<host zone>` injected automatically, so time-based logic inside them (cron-style Node-RED flows, Grafana/QuestDB time rendering, log timestamps) agrees with the host clock instead of defaulting to UTC. Consumer plugins that set `env.TZ` themselves keep full control; shell-level tools inside minimal images may additionally need the image's `tzdata` package to interpret the zone name. See the [developer guide](doc/plugin-developer-guide.md#host-timezone).
 - **SELinux support** -- `:Z` volume flags for Podman bind mounts on Fedora/RHEL; named volumes are handled correctly (`:Z` is not applied)
+- **Host device access** -- `ContainerConfig.devices` exposes device nodes (docker `--device` syntax) or whole device directories (`/dev/snd`, `/dev/input`, …) in a hot-plug-safe way (directory bind + device-class cgroup rules, so a USB replug keeps working). `ContainerConfig.groupAdd` adds supplementary groups, with names resolved against the **host's** `/etc/group` and rootless-Podman handled via `run.oci.keep_original_groups`. Missing devices are skipped with a warning, never blocking container start. See [Exposing host devices](#exposing-host-devices-devices-groupadd).
 - **Per-volume host-source policy** -- volumes accept `{ source, ifMissing: "skip" | "abort" }` for user-managed (USB drives, NFS) or deployment-required (TLS certs) mounts. Plugins subscribe to `onVolumeIssue` events for `'skipped'`, `'aborted'`, and `'recovered'` actions; signalk-container auto-recreates the container when a previously-missing source reappears. See the [developer guide](doc/plugin-developer-guide.md#optional-and-required-volumes).
 - **Container log streaming** -- click **Logs** on any managed-container card to open a live-streaming popup of the container's stdout+stderr (combined, the same shape `podman logs <name>` produces). Plugin authors can also wire `onContainerLog` in `ensureRunning` options to forward the same stream into their plugin's `app.debug` channel — visible in the Signal K server log when debug is enabled. Multiple subscribers share a single underlying log stream. See the [developer guide](doc/plugin-developer-guide.md#streaming-container-logs-into-your-plugins-debug-channel).
 - **Host-UID ownership alignment** -- managed containers run by default under the Signal K host user's UID/GID (via `--user host:host` on Docker/rootful Podman, `--userns=keep-id` on rootless Podman). Files created on bind mounts are owned by the same identity that runs Signal K, with no `chmod` sweeps. Override per container via `ContainerConfig.user` for images with a non-root `USER` directive, or `user: false` to opt out. See the [developer guide](doc/plugin-developer-guide.md#host-uid-ownership).
@@ -683,6 +684,38 @@ The allocated address is cached for the lifetime of the plugin session, so repea
 > `signalkAccessiblePorts` sets up networking automatically. Do not combine it with
 > a manual `ports` or `networkMode` entry for the same container — the field takes
 > full ownership of those concerns.
+
+## Exposing host devices (`devices`, `groupAdd`)
+
+When a managed container needs a host device — a USB speakerphone for a voice assistant, a serial/GPS dongle, a GPU — declare it in the config instead of hand-rolling runtime flags:
+
+```typescript
+await containers.ensureRunning("voice-satellite", {
+  image: "myorg/voice-satellite",
+  tag: "1.0.0",
+  devices: ["/dev/snd"], // directory → hot-plug mode
+  groupAdd: ["audio"], // host group that owns the device nodes
+  restart: "unless-stopped",
+});
+```
+
+`devices` accepts two entry forms:
+
+- **A device node**, in docker `--device` syntax `hostPath[:containerPath[:permissions]]` — e.g. `"/dev/ttyUSB0"` or `"/dev/ttyUSB0:/dev/gps0:rw"`. The node is attached statically at create time, so a device that is replugged while the container runs is only picked up on the next recreate.
+- **A device directory** — e.g. `"/dev/snd"` — which enables **hot-plug mode**: the directory is bind-mounted into the container (so device nodes that appear after a USB replug are immediately visible) and the directory's device-class cgroup rules are opened (`c <major>:* rwm`). The class majors are derived from the nodes currently in the directory, plus a built-in map for well-known directories (`/dev/snd` → 116/ALSA, `/dev/input` → 13, `/dev/dri` → 226) so an **empty** directory — device unplugged at container start — still works after the device is plugged in.
+
+An entry whose host path does not exist is skipped with a warning rather than failing the start (same philosophy as `ifMissing: "skip"` volumes): on a boat, an unplugged USB device must never keep a container down.
+
+`groupAdd` adds supplementary groups to the container process. Names are resolved to numeric GIDs against the **host's** `/etc/group` before being handed to the runtime — docker and podman resolve bare names against the container _image's_ `/etc/group`, whose GIDs need not match the host's, and it is the host GID the kernel checks when the process opens a host device node. Numeric entries pass through unchanged; a name the host doesn't know is skipped with a warning.
+
+Rootless-Podman notes (the recommended deployment):
+
+- Device-cgroup rules cannot be applied rootless (the kernel does not delegate the device controller to unprivileged users), so signalk-container omits them there — access to the bound nodes is governed by plain file permissions instead, which is exactly what `groupAdd` covers.
+- Plain GIDs would map into the user namespace's subordinate range and grant nothing, so signalk-container also sets the `run.oci.keep_original_groups` annotation: the container process keeps the host user's own supplementary groups. `groupAdd: ["audio"]` therefore works as long as the user running Podman is in the `audio` group. Docker never receives the annotation.
+
+Both fields participate in config-drift detection — adding, removing, or changing them recreates the container on the next `ensureRunning` call.
+
+> Availability: `devices` and `groupAdd` require signalk-container ≥ 1.24.0. Older versions silently ignore the fields — the container still runs, just without the device access.
 
 ---
 

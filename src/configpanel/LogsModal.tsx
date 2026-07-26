@@ -22,10 +22,7 @@ interface LogsModalProps {
 }
 
 type ConnectionStatus =
-  | "connecting"
-  | "backfill"
-  | "streaming"
-  | "disconnected";
+  "connecting" | "backfill" | "streaming" | "disconnected";
 
 /**
  * Modal that streams a managed container's stdout/stderr log
