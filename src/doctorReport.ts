@@ -39,14 +39,51 @@ export function isSelfDeploymentResult(
     if (!Array.isArray(lg.advice)) return false;
   }
   // `devicePassthrough` may be absent (older server) or null (no device
-  // issues); a present object must carry the arrays the renderers walk.
+  // issues); a present object must carry the arrays the renderers walk —
+  // and every element must be the shape they dereference: the report
+  // formatter and DoctorModal read `issue.container/hostPath/action`
+  // directly (no optional chaining) and `advice.join("\n")` coerces each
+  // entry. A stray `null` issue or non-string advice line would crash the
+  // render, so validate the elements, not just the arrays.
   if ("devicePassthrough" in value && value.devicePassthrough != null) {
     if (!isObj(value.devicePassthrough)) return false;
     const dp = value.devicePassthrough;
-    if (!Array.isArray(dp.issues)) return false;
-    if (!Array.isArray(dp.advice)) return false;
+    if (!Array.isArray(dp.issues) || !dp.issues.every(isDeviceIssueEntry)) {
+      return false;
+    }
+    if (!Array.isArray(dp.advice) || !dp.advice.every(isString)) return false;
   }
   return true;
+}
+
+function isString(value: unknown): value is string {
+  return typeof value === "string";
+}
+
+/** Valid `action` values a device-passthrough issue may carry. */
+const DEVICE_ISSUE_ACTIONS: ReadonlySet<string> = new Set([
+  "skipped",
+  "optimistic",
+  "unresolved",
+  "group-skipped",
+]);
+
+/**
+ * Element validator for `devicePassthrough.issues`. Requires the fields
+ * the renderers read (`container`, `hostPath`, `action`) plus the
+ * remaining declared string fields; `action` must be one of the known
+ * dispositions the UI keys `missing` off.
+ */
+function isDeviceIssueEntry(value: unknown): boolean {
+  if (!isObj(value)) return false;
+  return (
+    isString(value.container) &&
+    isString(value.entry) &&
+    isString(value.hostPath) &&
+    isString(value.reason) &&
+    typeof value.action === "string" &&
+    DEVICE_ISSUE_ACTIONS.has(value.action)
+  );
 }
 
 /**
