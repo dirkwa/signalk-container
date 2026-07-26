@@ -82,6 +82,19 @@ export function volumeArg(
 }
 
 /**
+ * Build the `HostConfig.Binds` value for a hot-plug device directory
+ * (`/dev/snd`, `/dev/input`, …). Unlike {@link volumeArg} this NEVER adds
+ * Podman's `:Z` SELinux suffix: relabelling would touch the host's own
+ * device nodes in a shared system directory. Kept as a named helper so
+ * that intentional omission lives in code, not only in a comment, and the
+ * device-bind format has a single source of truth like `volumeArg` does
+ * for volumes.
+ */
+export function deviceBindArg(hostPath: string, containerPath: string): string {
+  return `${hostPath}:${containerPath}`;
+}
+
+/**
  * Extract the source string from a `volumes` entry that may be a bare
  * string or a `VolumeSpec`. Used at call sites that don't care about
  * `ifMissing` policy — `buildRunArgs` and `diffContainerConfig` both
@@ -2031,12 +2044,11 @@ function buildCreateOptions(
   }
 
   // Host devices. Node entries land in HostConfig.Devices; directory
-  // entries (hot-plug mode) are bind-mounted — deliberately WITHOUT
-  // volumeArg's podman `:Z` suffix, which would SELinux-relabel the
-  // HOST's device nodes in a shared system directory like /dev/snd —
-  // and opened up via per-class DeviceCgroupRules. Rules are empty under
-  // rootless runtimes (see resolveDeviceRequests). Entries whose host
-  // path is missing (device unplugged) were skipped with a warning.
+  // entries (hot-plug mode) are bind-mounted via deviceBindArg (which
+  // omits the podman `:Z` relabel — see there) and opened up via
+  // per-class DeviceCgroupRules. Rules are empty under rootless runtimes
+  // (see resolveDeviceRequests). Entries whose host path is missing
+  // (device unplugged) were skipped with a warning.
   if (config.devices?.length) {
     const resolved = resolveDeviceRequests(config.devices, runtime, debug);
     if (resolved.nodes.length > 0) {
@@ -2053,8 +2065,8 @@ function buildCreateOptions(
     if (resolved.directoryBinds.length > 0) {
       hostConfig.Binds = [
         ...(hostConfig.Binds ?? []),
-        ...resolved.directoryBinds.map(
-          (b) => `${b.pathOnHost}:${b.pathInContainer}`,
+        ...resolved.directoryBinds.map((b) =>
+          deviceBindArg(b.pathOnHost, b.pathInContainer),
         ),
       ];
     }
