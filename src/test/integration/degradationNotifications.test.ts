@@ -53,7 +53,8 @@ const CONTAINER_NAME = "degradation-test";
 const TRAP_AND_WAIT = ["sh", "-c", "trap exit TERM; sleep 60 & wait"];
 
 async function bootPlugin(
-  sink: ReturnType<typeof makeNotificationSink>,
+  sink: ReturnType<typeof makeNotificationSink> | null,
+  configOverrides: Partial<PluginConfig> = {},
 ): Promise<{
   api: ContainerManagerApi;
   stop: () => Promise<void>;
@@ -67,10 +68,14 @@ async function bootPlugin(
     setPluginError: noop,
     getDataDirPath: () => dataDir,
     config: { configPath: dataDir },
-    notifications: sink.notifications,
+    // sink === null models an older server with no managed-notification API.
+    ...(sink ? { notifications: sink.notifications } : {}),
   };
   const plugin = containerManagerPlugin(app);
-  await plugin.start({ disableUserNamespaceRemap: true } as PluginConfig);
+  await plugin.start({
+    disableUserNamespaceRemap: true,
+    ...configOverrides,
+  } as PluginConfig);
   const api = (
     globalThis as { __signalk_containerManager?: ContainerManagerApi }
   ).__signalk_containerManager;
@@ -224,5 +229,67 @@ describe("degradation notifications — e2e against a real runtime", () => {
       localSink.cleared.length >= 1,
       "stop() must clear outstanding notifications",
     );
+  });
+
+  it("emits nothing when emitDegradationNotifications is false", async (t) => {
+    if (!runtime) {
+      t.skip("no container runtime available");
+      return;
+    }
+    if (isContainerized()) {
+      t.skip("volume-abort semantics differ under a containerized manager");
+      return;
+    }
+    const localSink = makeNotificationSink();
+    const local = await bootPlugin(localSink, {
+      emitDegradationNotifications: false,
+    });
+    const missingSource = join(
+      tmpdir(),
+      `skc-off-${process.pid}-${Date.now()}`,
+    );
+    await assert.rejects(
+      local.api.ensureRunning("toggle-off-test", {
+        image: "docker.io/library/alpine",
+        tag: "3.19",
+        command: TRAP_AND_WAIT,
+        restart: "no",
+        volumes: { "/req": { source: missingSource, ifMissing: "abort" } },
+      }),
+    );
+    assert.equal(
+      localSink.raised.length,
+      0,
+      "toggle off must suppress all raises (the ensureRunning still throws)",
+    );
+    await local.stop();
+  });
+
+  it("does not throw when the server has no managed-notification API", async (t) => {
+    if (!runtime) {
+      t.skip("no container runtime available");
+      return;
+    }
+    if (isContainerized()) {
+      t.skip("volume-abort semantics differ under a containerized manager");
+      return;
+    }
+    // sink === null → app has no `notifications` member (older server).
+    const local = await bootPlugin(null);
+    const missingSource = join(
+      tmpdir(),
+      `skc-nonotif-${process.pid}-${Date.now()}`,
+    );
+    // The abort still throws; the emitter must no-op, not crash.
+    await assert.rejects(
+      local.api.ensureRunning("no-notif-test", {
+        image: "docker.io/library/alpine",
+        tag: "3.19",
+        command: TRAP_AND_WAIT,
+        restart: "no",
+        volumes: { "/req": { source: missingSource, ifMissing: "abort" } },
+      }),
+    );
+    await local.stop(); // must not throw either
   });
 });

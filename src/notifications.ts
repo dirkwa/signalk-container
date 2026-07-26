@@ -97,6 +97,10 @@ export function makeDegradationEmitter(
   const raised = new Map<string, string>();
   // current health per container, for edge-triggered unhealthy raise/clear.
   const health = new Map<string, boolean>();
+  // per-container signature of the currently-raised unresolved-device set,
+  // so a changed set (e.g. /dev/a → /dev/b) re-raises with a fresh message
+  // instead of the idempotent raise() no-op leaving the stale one live.
+  const unresolvedSig = new Map<string, string>();
   let emit = enabled;
 
   const raise: DegradationEmitter["raise"] = (
@@ -172,19 +176,26 @@ export function makeDegradationEmitter(
     issues,
   ) => {
     const unresolved = issues.filter((e) => e.action === "unresolved");
-    if (unresolved.length > 0) {
-      raise(
-        "deviceUnresolved",
-        name,
-        "warn",
-        `${name}: device(s) missing on host: ${unresolved
-          .map((e) => e.hostPath)
-          .join(", ")}`,
-        { unresolved },
-      );
-    } else {
+    if (unresolved.length === 0) {
+      unresolvedSig.delete(name);
       clear("deviceUnresolved", name);
+      return;
     }
+    const paths = unresolved.map((e) => e.hostPath).sort();
+    const sig = paths.join(",");
+    if (unresolvedSig.get(name) === sig) return; // same set already live
+    // The set changed (or is new): drop the stale notification (raise() is
+    // idempotent on a live key, so we must clear first) and re-raise with
+    // the current paths.
+    clear("deviceUnresolved", name);
+    unresolvedSig.set(name, sig);
+    raise(
+      "deviceUnresolved",
+      name,
+      "warn",
+      `${name}: device(s) missing on host: ${paths.join(", ")}`,
+      { unresolved },
+    );
   };
 
   return {
@@ -197,6 +208,7 @@ export function makeDegradationEmitter(
     },
     forgetContainer: (name: string) => {
       health.delete(name);
+      unresolvedSig.delete(name);
     },
     reset: () => {
       for (const id of raised.values()) {
@@ -208,6 +220,7 @@ export function makeDegradationEmitter(
       }
       raised.clear();
       health.clear();
+      unresolvedSig.clear();
     },
   };
 }

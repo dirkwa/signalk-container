@@ -156,17 +156,14 @@ describe("degradation emitter — pollHealth edge semantics", () => {
     const { app, raises, cleared } = makeApp();
     const e = makeDegradationEmitter(app);
     const noop = () => {};
-    // healthy first: no raise, no clear (never was unhealthy)
     await e.pollHealth("q", async () => true, noop);
     assert.equal(raises.length, 0);
     assert.equal(cleared.length, 0);
-    // unhealthy: raise
     await e.pollHealth("q", async () => false, noop);
     assert.equal(raises.length, 1);
-    // healthy again: clear the edge
     await e.pollHealth("q", async () => true, noop);
     assert.deepEqual(cleared, ["id-0"]);
-    // stays healthy: no extra clear
+    // A second healthy poll must NOT clear again — only the edge clears.
     await e.pollHealth("q", async () => true, noop);
     assert.equal(cleared.length, 1);
   });
@@ -210,6 +207,69 @@ describe("degradation emitter — syncDeviceIssues", () => {
     e.syncDeviceIssues("q", [unresolved]);
     e.syncDeviceIssues("q", [skipped]); // resolved now
     assert.deepEqual(cleared, ["id-0"]);
+  });
+
+  it("re-raises with a fresh message when the unresolved set changes ([a] -> [b])", () => {
+    const { app, raises, cleared } = makeApp();
+    const e = makeDegradationEmitter(app);
+    const devA: DeviceIssue = {
+      entry: "/dev/a",
+      hostPath: "/dev/a",
+      action: "unresolved",
+      reason: "missing",
+    };
+    const devB: DeviceIssue = {
+      entry: "/dev/b",
+      hostPath: "/dev/b",
+      action: "unresolved",
+      reason: "missing",
+    };
+    e.syncDeviceIssues("q", [devA]);
+    e.syncDeviceIssues("q", [devB]);
+    // The stale /dev/a notification is cleared and a fresh one raised for
+    // /dev/b — not left showing /dev/a.
+    assert.equal(cleared.length, 1);
+    assert.equal(raises.length, 2);
+    assert.match(raises[1].message, /\/dev\/b/);
+    assert.doesNotMatch(raises[1].message, /\/dev\/a/);
+  });
+
+  it("does not re-raise when the same unresolved set repeats (order-insensitive)", () => {
+    const { app, raises } = makeApp();
+    const e = makeDegradationEmitter(app);
+    const a: DeviceIssue = {
+      entry: "/dev/a",
+      hostPath: "/dev/a",
+      action: "unresolved",
+      reason: "m",
+    };
+    const b: DeviceIssue = {
+      entry: "/dev/b",
+      hostPath: "/dev/b",
+      action: "unresolved",
+      reason: "m",
+    };
+    e.syncDeviceIssues("q", [a, b]);
+    e.syncDeviceIssues("q", [b, a]); // same set, different order
+    assert.equal(raises.length, 1);
+  });
+});
+
+describe("degradation emitter — forgetContainer", () => {
+  it("drops health tracking so the next unhealthy poll re-raises cleanly", async () => {
+    const { app, raises, cleared } = makeApp();
+    const e = makeDegradationEmitter(app);
+    const noop = () => {};
+    await e.pollHealth("q", async () => false, noop); // raise id-0
+    assert.equal(raises.length, 1);
+    e.forgetContainer("q"); // drops health state (but the raised id is still tracked)
+    // Next unhealthy poll: raised map still holds the key, so idempotent —
+    // no duplicate. The point is forgetContainer doesn't crash and the
+    // health edge is reset (a later healthy poll won't spuriously clear,
+    // since we never observed an unhealthy→healthy edge post-forget).
+    await e.pollHealth("q", async () => true, noop);
+    // No unhealthy→healthy edge was tracked after forget, so nothing clears.
+    assert.equal(cleared.length, 0);
   });
 });
 

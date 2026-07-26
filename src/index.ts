@@ -174,6 +174,10 @@ export default (app: App) => {
   let runtimePreference: RuntimePreference = "auto";
   let pruneScheduler: PruneScheduler | null = null;
   const healthTimers = new Map<string, NodeJS.Timeout>();
+  // Guards against overlapping health polls per container: a slow check must
+  // not race a later one and overwrite the emitter's edge-triggered health
+  // state out of order.
+  const healthPollsInFlight = new Set<string>();
   let updateService: UpdateService | null = null;
   let manifestStore: ManifestStore | null = null;
 
@@ -192,6 +196,24 @@ export default (app: App) => {
     if (issues.length > 0) lastDeviceIssues.set(name, issues);
     else lastDeviceIssues.delete(name);
     degradation.syncDeviceIssues(name, issues);
+  };
+
+  // Raise/clear the host-level deploymentDegraded notification off a doctor
+  // result. Shared by both start() branches — runtime-detection failure
+  // (no-runtime / socket-unreachable) and the runtime-up-but-host-degraded
+  // recheck — so every dashboard-error status is covered identically.
+  const surfaceDeploymentDoctor = (doctor: SelfDeploymentResult): void => {
+    if (isDashboardDeploymentError(doctor.status)) {
+      degradation.raise(
+        "deploymentDegraded",
+        "",
+        "warn",
+        headlineForDoctorStatus(doctor.status),
+        { status: doctor.status, remediation: doctor.remediation },
+      );
+    } else {
+      degradation.clear("deploymentDegraded", "");
+    }
   };
 
   /**
@@ -1454,11 +1476,14 @@ export default (app: App) => {
           );
         };
         const timer = setInterval(() => {
-          void degradation.pollHealth(
-            name,
-            options.healthCheck!,
-            surfaceUnhealthy,
-          );
+          // Skip if the previous poll for this container is still running,
+          // so a slow health check can't race a later one and clobber the
+          // emitter's edge-triggered health state out of order.
+          if (healthPollsInFlight.has(name)) return;
+          healthPollsInFlight.add(name);
+          void degradation
+            .pollHealth(name, options.healthCheck!, surfaceUnhealthy)
+            .finally(() => healthPollsInFlight.delete(name));
         }, HEALTH_POLL_MS);
         healthTimers.set(name, timer);
       }
@@ -2293,6 +2318,7 @@ export default (app: App) => {
               `signalk-container deployment doctor — ${headline}:\n${doctor.remediation.join("\n")}`,
             );
           }
+          surfaceDeploymentDoctor(doctor);
           localResolveReady();
           return;
         }
@@ -2327,15 +2353,11 @@ export default (app: App) => {
               `signalk-container deployment doctor — ${headline}:\n${doctor.remediation.join("\n")}`,
             );
           }
-          degradation.raise("deploymentDegraded", "", "warn", headline, {
-            status: doctor.status,
-            remediation: doctor.remediation,
-          });
-        } else {
-          // Host healthy on this start — clear any deployment alert a prior
-          // start raised (the operator fixed the host config and restarted).
-          degradation.clear("deploymentDegraded", "");
         }
+        // Raise/clear the deployment notification for BOTH the degraded and
+        // the healthy case (a prior start's alert clears when the host
+        // recovers). Shared with the no-runtime branch above.
+        surfaceDeploymentDoctor(doctor);
 
         if (config.pruneSchedule && config.pruneSchedule !== "off") {
           const intervalMs =
@@ -2397,9 +2419,14 @@ export default (app: App) => {
         clearInterval(timer);
       }
       healthTimers.clear();
+      healthPollsInFlight.clear();
       // Clear every outstanding degradation notification so a plugin stop
       // doesn't strand alerts on the bus, then drop the tracking state.
       degradation.reset();
+      // The doctor's devicePassthrough section reads lastDeviceIssues; clear
+      // it too so a restart can't expose a prior run's stale device issues
+      // before any new ensureRunning() commits fresh state.
+      lastDeviceIssues.clear();
       if (updateService) {
         updateService.stop();
         updateService = null;
