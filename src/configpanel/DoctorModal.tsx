@@ -413,11 +413,15 @@ export default function DoctorModal({ onClose }: DoctorModalProps) {
                 <pre style={S.pre}>{result.remediation.join("\n")}</pre>
               ) : (
                 // "No action needed" would contradict a non-empty advisory
-                // block below (storage/linger/device advice can be actionable
-                // while status stays ok). Mirror formatDoctorReport's guard.
+                // block (storage/linger/network-DNS/device advice can be
+                // actionable while status stays ok). Mirror the identical
+                // hasAdvisoryAdvice guard in formatDoctorReport exactly —
+                // including networkDns, or the modal claims "No action needed"
+                // for a payload the copyable report flags as actionable.
                 !(
                   (result.containerStorage?.advice.length ?? 0) > 0 ||
                   (result.linger?.advice.length ?? 0) > 0 ||
+                  (result.networkDns?.advice.length ?? 0) > 0 ||
                   (result.devicePassthrough?.advice.length ?? 0) > 0
                 ) && <div style={S.message}>No action needed (status ok).</div>
               )}
