@@ -8,7 +8,11 @@ import {
 } from "../devices.js";
 import { _setCurrentHostIdsForTesting } from "../runtime.js";
 import { makeMockClient } from "./helpers/mockClient.js";
-import type { ContainerConfig, ContainerRuntimeInfo } from "../types.js";
+import type {
+  ContainerConfig,
+  ContainerRuntimeInfo,
+  DeviceIssue,
+} from "../types.js";
 
 // ensureRunning on a missing container builds a createContainer payload;
 // these tests capture it via the mock client and assert the device/group
@@ -238,5 +242,30 @@ describe("ensureRunning — groupAdd in the create payload", () => {
     assert.equal(hc.DeviceCgroupRules, undefined);
     assert.equal(hc.GroupAdd, undefined);
     assert.equal(hc.Annotations, undefined);
+  });
+
+  it("fires a group-skipped device issue for a name the host can't resolve", async () => {
+    const { client, calls } = makeClient();
+    const events: DeviceIssue[] = [];
+    await ensureRunning(
+      docker,
+      "satellite",
+      { ...baseConfig, groupAdd: ["audio", "nogroup"] },
+      () => {},
+      {
+        onDeviceIssue: (e) => {
+          events.push(e);
+        },
+      },
+      client,
+    );
+    const hc = hostConfigFrom(calls);
+    // The unresolvable name is dropped; the resolvable one still emits.
+    assert.deepEqual(hc.GroupAdd, ["29"]);
+    const skipped = events.filter((e) => e.action === "group-skipped");
+    assert.equal(skipped.length, 1);
+    assert.equal(skipped[0].entry, "nogroup");
+    assert.equal(skipped[0].hostPath, "");
+    assert.match(skipped[0].reason, /no such group/);
   });
 });

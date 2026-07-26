@@ -327,6 +327,18 @@ export default (app: App) => {
           `container started without it; recreate the container once the device is back.`,
       );
     }
+    const groupSkipped = [
+      ...new Set(
+        issues.filter((i) => i.action === "group-skipped").map((i) => i.entry),
+      ),
+    ];
+    if (groupSkipped.length > 0) {
+      advice.push(
+        `groupAdd names not found in the host's /etc/group: ${groupSkipped.join(", ")}. ` +
+          `The container started without them; create the group on the host (or use a ` +
+          `numeric GID) and recreate the container.`,
+      );
+    }
     return { issues, advice };
   }
   // Per-container log-stream broker.  Lazily created on first subscribe

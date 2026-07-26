@@ -340,9 +340,10 @@ export interface ContainerConfig {
    *     container start). Use this for devices that may be replugged
    *     while the container runs: USB audio, input devices, GPUs.
    *
-   * An entry whose host path does not exist is skipped with a warning —
-   * an unplugged device never prevents container start (same philosophy
-   * as `ifMissing: "skip"` volumes).
+   * An entry whose host path does not exist is skipped and reported
+   * through `EnsureRunningOptions.onDeviceIssue` (and logged at warning
+   * level by the plugin) — an unplugged device never prevents container
+   * start (same philosophy as `ifMissing: "skip"` volumes).
    *
    * On rootless runtimes device-cgroup rules cannot be applied (the
    * device cgroup controller is not delegated to unprivileged users);
@@ -368,8 +369,9 @@ export interface ContainerConfig {
    * against the container image's `/etc/group`, whose GIDs need not
    * match the host's (or contain the name at all), and it is the host
    * GID the kernel checks when the process opens a host device node.
-   * A name unknown to the host is skipped with a warning; numeric
-   * entries pass through.
+   * A name unknown to the host is skipped and reported through
+   * `EnsureRunningOptions.onDeviceIssue` as a `group-skipped` event (and
+   * logged at warning level by the plugin); numeric entries pass through.
    *
    * On rootless Podman the resolved GIDs alone can't grant host device
    * access (they map into the user namespace's subordinate range), so
@@ -824,12 +826,19 @@ export interface VolumeIssue {
  * `VolumeIssue`; switch on `action` to dispatch.
  */
 export interface DeviceIssue {
-  /** The original `ContainerConfig.devices` entry string. */
+  /**
+   * The original entry string: a `ContainerConfig.devices` entry for the
+   * device actions, or the `ContainerConfig.groupAdd` group name for
+   * `'group-skipped'`.
+   */
   entry: string;
-  /** Canonical host path the entry parsed to. */
+  /**
+   * Canonical host path the entry parsed to. Empty string for
+   * `'group-skipped'`, which concerns a supplementary group, not a path.
+   */
   hostPath: string;
   /**
-   * What signalk-container did about this device entry:
+   * What signalk-container did about this entry:
    *   - `'skipped'`: the host path was missing (probe-visible) at create
    *     time; the entry was dropped and the container starts without it.
    *   - `'optimistic'`: the manager runs containerized and could not see
@@ -842,8 +851,11 @@ export interface DeviceIssue {
    *     can see the path). Fires at create time and again on every
    *     reconcile of a container still carrying the label, so state
    *     survives Signal K restarts.
+   *   - `'group-skipped'`: a `groupAdd` group name did not resolve against
+   *     the host's `/etc/group`; it was dropped from the emitted
+   *     supplementary groups and the container starts without it.
    */
-  action: "skipped" | "optimistic" | "unresolved";
+  action: "skipped" | "optimistic" | "unresolved" | "group-skipped";
   /** Human-readable explanation; safe to surface in `setPluginStatus`. */
   reason: string;
 }
@@ -1501,7 +1513,7 @@ export interface SelfDeploymentResult {
       container: string;
       entry: string;
       hostPath: string;
-      action: "skipped" | "optimistic" | "unresolved";
+      action: "skipped" | "optimistic" | "unresolved" | "group-skipped";
       reason: string;
     }>;
     /** Operator-facing remediation lines (mount/plug-in guidance). */

@@ -516,6 +516,36 @@ export function resolveGroupAdd(
   return out;
 }
 
+/**
+ * The `groupAdd` group names that `resolveGroupAdd` would drop against
+ * the current host `/etc/group` — names the host does not know. Numeric
+ * entries and resolvable names never appear. Mirrors the `.issues` shape
+ * `resolveDeviceRequests` returns so `ensureRunning` can surface group
+ * skips through the same operator channel as device skips; kept as a
+ * companion probe (rather than folded into `resolveGroupAdd`'s return)
+ * so the resolver's `string[]` signature and its call sites stay stable.
+ */
+export function unresolvedGroupNames(
+  groupAdd: ReadonlyArray<string | number>,
+  readGroups: EtcGroupReader = currentEtcGroupReader,
+): string[] {
+  const missing: string[] = [];
+  let hostGroups: Map<string, number> | undefined;
+  for (const entry of groupAdd) {
+    if (typeof entry === "number") continue;
+    const name = entry.trim();
+    if (/^\d+$/.test(name)) continue;
+    if (hostGroups === undefined) {
+      const content = readGroups();
+      hostGroups = content === null ? new Map() : parseEtcGroup(content);
+    }
+    if (hostGroups.get(name) === undefined && !missing.includes(name)) {
+      missing.push(name);
+    }
+  }
+  return missing;
+}
+
 function pushUnique(list: string[], value: string): void {
   if (!list.includes(value)) list.push(value);
 }

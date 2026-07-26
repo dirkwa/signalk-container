@@ -327,4 +327,125 @@ describe("isSelfDeploymentResult", () => {
       false,
     );
   });
+
+  const goodIssue = {
+    container: "wyoming",
+    entry: "/dev/snd",
+    hostPath: "/dev/snd",
+    action: "optimistic" as const,
+    reason: "…",
+  };
+
+  it("accepts a well-formed devicePassthrough section", () => {
+    assert.equal(
+      isSelfDeploymentResult({
+        ...baseResult(),
+        devicePassthrough: { issues: [goodIssue], advice: ["mount it"] },
+      }),
+      true,
+    );
+  });
+
+  it("accepts null / absent devicePassthrough", () => {
+    assert.equal(
+      isSelfDeploymentResult({ ...baseResult(), devicePassthrough: null }),
+      true,
+    );
+    assert.equal(isSelfDeploymentResult(baseResult()), true);
+  });
+
+  it("rejects a null issue element (would crash the renderer)", () => {
+    assert.equal(
+      isSelfDeploymentResult({
+        ...baseResult(),
+        devicePassthrough: { issues: [null], advice: [] },
+      }),
+      false,
+    );
+  });
+
+  it("rejects an issue missing required fields", () => {
+    assert.equal(
+      isSelfDeploymentResult({
+        ...baseResult(),
+        devicePassthrough: { issues: [{ container: "x" }], advice: [] },
+      }),
+      false,
+    );
+  });
+
+  it("rejects an unknown issue action", () => {
+    assert.equal(
+      isSelfDeploymentResult({
+        ...baseResult(),
+        devicePassthrough: {
+          issues: [{ ...goodIssue, action: "exploded" }],
+          advice: [],
+        },
+      }),
+      false,
+    );
+  });
+
+  it("rejects a non-string advice entry", () => {
+    assert.equal(
+      isSelfDeploymentResult({
+        ...baseResult(),
+        devicePassthrough: { issues: [goodIssue], advice: [{}] },
+      }),
+      false,
+    );
+  });
+
+  it("accepts a group-skipped issue with an empty hostPath", () => {
+    assert.equal(
+      isSelfDeploymentResult({
+        ...baseResult(),
+        devicePassthrough: {
+          issues: [
+            {
+              container: "wyoming",
+              entry: "audio",
+              hostPath: "",
+              action: "group-skipped",
+              reason: "…",
+            },
+          ],
+          advice: [],
+        },
+      }),
+      true,
+    );
+  });
+});
+
+describe("formatDoctorReport — device/group passthrough", () => {
+  it("renders a group-skipped issue by group name, not the empty hostPath", () => {
+    const out = formatDoctorReport(
+      baseResult({
+        devicePassthrough: {
+          issues: [
+            {
+              container: "wyoming",
+              entry: "audio",
+              hostPath: "",
+              action: "group-skipped",
+              reason: "…",
+            },
+          ],
+          advice: [],
+        },
+      }),
+    );
+    assert.match(out, /group passthrough \(wyoming\): audio group-skipped/);
+  });
+
+  it("suppresses 'No action needed' when only device advice is present", () => {
+    const out = formatDoctorReport(
+      baseResult({
+        devicePassthrough: { issues: [], advice: ["attach the device"] },
+      }),
+    );
+    assert.doesNotMatch(out, /No action needed/);
+  });
 });

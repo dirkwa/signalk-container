@@ -42,6 +42,7 @@ import {
   presentLiveDeviceNodes,
   resolveDeviceRequests,
   resolveGroupAdd,
+  unresolvedGroupNames,
   type DeviceNodeSpec,
 } from "./devices.js";
 import { resourcePayloadForRun } from "./resources.js";
@@ -2429,6 +2430,23 @@ export async function ensureRunning(
           action: issue.disposition,
           reason: issue.reason,
         });
+      }
+
+      // Announce groupAdd names the host could not resolve — the emitted
+      // supplementary groups silently dropped them. Surfaced through the
+      // same device-issue channel (action "group-skipped") so an operator
+      // sees the misconfiguration instead of it living only in debug logs.
+      if (config.groupAdd?.length) {
+        for (const name of unresolvedGroupNames(config.groupAdd)) {
+          fireDeviceIssue({
+            entry: name,
+            hostPath: "",
+            action: "group-skipped",
+            reason:
+              `Skipping groupAdd "${name}": no such group in the host's ` +
+              `/etc/group. ${fullName} starts without it.`,
+          });
+        }
       }
 
       let created = await createAndStart(client, createOpts);

@@ -390,20 +390,36 @@ export default function DoctorModal({ onClose }: DoctorModalProps) {
               )}
 
               {result.devicePassthrough &&
-                result.devicePassthrough.issues.map((issue) => (
-                  <Row
-                    key={`${issue.container}:${issue.hostPath}:${issue.action}`}
-                    label={`Device (${issue.container})`}
-                    value={`${issue.hostPath} ${issue.action}`}
-                    missing={issue.action !== "optimistic"}
-                  />
-                ))}
+                result.devicePassthrough.issues.map((issue) =>
+                  issue.action === "group-skipped" ? (
+                    <Row
+                      key={`${issue.container}:group:${issue.entry}`}
+                      label={`Group (${issue.container})`}
+                      value={`${issue.entry} ${issue.action}`}
+                      missing={true}
+                    />
+                  ) : (
+                    <Row
+                      key={`${issue.container}:${issue.hostPath}:${issue.entry}:${issue.action}`}
+                      label={`Device (${issue.container})`}
+                      value={`${issue.hostPath} ${issue.action}`}
+                      missing={issue.action !== "optimistic"}
+                    />
+                  ),
+                )}
 
               <div style={S.sectionLabel}>Remediation</div>
               {result.remediation.length > 0 ? (
                 <pre style={S.pre}>{result.remediation.join("\n")}</pre>
               ) : (
-                <div style={S.message}>No action needed (status ok).</div>
+                // "No action needed" would contradict a non-empty advisory
+                // block below (storage/linger/device advice can be actionable
+                // while status stays ok). Mirror formatDoctorReport's guard.
+                !(
+                  (result.containerStorage?.advice.length ?? 0) > 0 ||
+                  (result.linger?.advice.length ?? 0) > 0 ||
+                  (result.devicePassthrough?.advice.length ?? 0) > 0
+                ) && <div style={S.message}>No action needed (status ok).</div>
               )}
 
               {result.containerStorage &&

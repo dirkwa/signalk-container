@@ -6,6 +6,7 @@ import {
   parseDeviceEntry,
   resolveDeviceRequests,
   resolveGroupAdd,
+  unresolvedGroupNames,
   type DeviceHostProbe,
   type DeviceStatResult,
 } from "../devices.js";
@@ -340,6 +341,46 @@ describe("resolveGroupAdd", () => {
           throw new Error("must not be called");
         },
       ),
+      [],
+    );
+  });
+});
+
+describe("unresolvedGroupNames", () => {
+  const etcGroup = () => ["audio:x:29:pi", "dialout:x:20:pi"].join("\n");
+
+  it("returns only the names the host cannot resolve", () => {
+    assert.deepEqual(
+      unresolvedGroupNames(
+        ["audio", "nope", "dialout", "alsomissing"],
+        etcGroup,
+      ),
+      ["nope", "alsomissing"],
+    );
+  });
+
+  it("ignores numeric entries (numbers and digit strings)", () => {
+    assert.deepEqual(unresolvedGroupNames([29, "44", "audio"], etcGroup), []);
+  });
+
+  it("dedupes a repeated missing name", () => {
+    assert.deepEqual(unresolvedGroupNames(["nope", "nope"], etcGroup), [
+      "nope",
+    ]);
+  });
+
+  it("treats an unreadable /etc/group as 'all names unresolvable'", () => {
+    assert.deepEqual(
+      unresolvedGroupNames(["audio", 29], () => null),
+      ["audio"],
+    );
+  });
+
+  it("returns [] for an empty list without reading /etc/group", () => {
+    assert.deepEqual(
+      unresolvedGroupNames([], () => {
+        throw new Error("must not be called");
+      }),
       [],
     );
   });

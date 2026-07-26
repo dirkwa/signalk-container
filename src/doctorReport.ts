@@ -173,8 +173,12 @@ export function formatDoctorReport(r: SelfDeploymentResult): string {
 
   if (r.devicePassthrough) {
     for (const issue of r.devicePassthrough.issues) {
+      // group-skipped concerns a supplementary group (empty hostPath), so
+      // print the group name from `entry` instead of the blank path.
       lines.push(
-        `device passthrough (${issue.container}): ${issue.hostPath} ${issue.action}`,
+        issue.action === "group-skipped"
+          ? `group passthrough (${issue.container}): ${issue.entry} ${issue.action}`
+          : `device passthrough (${issue.container}): ${issue.hostPath} ${issue.action}`,
       );
     }
   }
