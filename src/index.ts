@@ -225,6 +225,50 @@ export default (app: App) => {
   const lastDeviceIssues = new Map<string, DeviceIssue[]>();
 
   /**
+   * Build the `onDeviceIssue` interceptor shared by every path that calls
+   * `ensureRunning` (the API wrapper AND the resource-update recreate) so
+   * device-passthrough events are collected, logged at the right level
+   * (`optimistic` is informational; the rest are actionable), forwarded to
+   * the consumer's own handler, and committed to `lastDeviceIssues` for
+   * the doctor. Returns the collected list and the handler; the caller
+   * commits `issues` to `lastDeviceIssues` (set when non-empty, delete
+   * when quiet) only after its `ensureRunning` succeeds.
+   */
+  function makeDeviceIssueCollector(
+    name: string,
+    consumerHandler?: (event: DeviceIssue) => void | Promise<void>,
+  ): { issues: DeviceIssue[]; onDeviceIssue: (event: DeviceIssue) => void } {
+    const issues: DeviceIssue[] = [];
+    return {
+      issues,
+      onDeviceIssue: (event) => {
+        if (
+          !issues.some(
+            (e) =>
+              e.entry === event.entry &&
+              e.hostPath === event.hostPath &&
+              e.action === event.action,
+          )
+        ) {
+          issues.push(event);
+          if (event.action === "optimistic") {
+            app.debug(`ensureRunning(${name}): ${event.reason}`);
+          } else {
+            app.error(`ensureRunning(${name}): ${event.reason}`);
+          }
+        }
+        safeInvokeDeviceIssue(consumerHandler, event, (err) =>
+          app.error(
+            `ensureRunning(${name}): onDeviceIssue handler threw for ` +
+              `${event.hostPath} (${event.action}): ` +
+              `${err instanceof Error ? err.message : String(err)}`,
+          ),
+        );
+      },
+    };
+  }
+
+  /**
    * Doctor section built from `lastDeviceIssues`. `null` when quiet so
    * the doctor renders nothing. Advice lines cover the two actionable
    * states: unverified emissions (mount the path into the Signal K
@@ -1036,34 +1080,13 @@ export default (app: App) => {
       );
 
       // Intercept device-passthrough events: collect for the doctor's
-      // devicePassthrough section, surface at the right log level
-      // (`optimistic` is informational; `skipped`/`unresolved` are
-      // actionable), and forward to the consumer's own handler.
-      const deviceIssues: DeviceIssue[] = [];
-      const innerOptions: EnsureRunningOptions = {
-        ...options,
-        onDeviceIssue: (event) => {
-          if (
-            !deviceIssues.some(
-              (e) => e.hostPath === event.hostPath && e.action === event.action,
-            )
-          ) {
-            deviceIssues.push(event);
-            if (event.action === "optimistic") {
-              app.debug(`ensureRunning(${name}): ${event.reason}`);
-            } else {
-              app.error(`ensureRunning(${name}): ${event.reason}`);
-            }
-          }
-          safeInvokeDeviceIssue(options?.onDeviceIssue, event, (err) =>
-            app.error(
-              `ensureRunning(${name}): onDeviceIssue handler threw for ` +
-                `${event.hostPath} (${event.action}): ` +
-                `${err instanceof Error ? err.message : String(err)}`,
-            ),
-          );
-        },
-      };
+      // devicePassthrough section (see makeDeviceIssueCollector), forwarding
+      // to the consumer's own handler.
+      const { issues: deviceIssues, onDeviceIssue } = makeDeviceIssueCollector(
+        name,
+        options?.onDeviceIssue,
+      );
+      const innerOptions: EnsureRunningOptions = { ...options, onDeviceIssue };
 
       try {
         await ensureRunning(
@@ -1715,10 +1738,25 @@ export default (app: App) => {
         );
       }
 
+      // A resource-update recreate re-runs ensureRunning, which re-fires
+      // device-passthrough events (a device may have been unplugged since
+      // the container was first created). Collect them through the same
+      // interceptor as the API wrapper so the doctor's devicePassthrough
+      // section stays current instead of going stale after a resource bump.
+      const recreateCollector = makeDeviceIssueCollector(name);
       try {
-        await ensureRunning(runtimeInfo, name, newConfig, (msg) =>
-          app.debug(msg),
+        await ensureRunning(
+          runtimeInfo,
+          name,
+          newConfig,
+          (msg) => app.debug(msg),
+          { onDeviceIssue: recreateCollector.onDeviceIssue },
         );
+        if (recreateCollector.issues.length > 0) {
+          lastDeviceIssues.set(name, recreateCollector.issues);
+        } else {
+          lastDeviceIssues.delete(name);
+        }
       } catch (recreateErr) {
         // Recreate failed — the container is gone or in a bad state.
         // Try to roll back to the previous config so the consumer
@@ -1734,9 +1772,21 @@ export default (app: App) => {
         try {
           // Make sure no half-created container is in the way.
           await removeContainer(runtimeInfo, name).catch(() => {});
-          await ensureRunning(runtimeInfo, name, cachedConfig, (msg) =>
-            app.debug(msg),
+          // Rollback recreates from cachedConfig; refresh device state to
+          // reflect the config the container actually ends up running.
+          const rollbackCollector = makeDeviceIssueCollector(name);
+          await ensureRunning(
+            runtimeInfo,
+            name,
+            cachedConfig,
+            (msg) => app.debug(msg),
+            { onDeviceIssue: rollbackCollector.onDeviceIssue },
           );
+          if (rollbackCollector.issues.length > 0) {
+            lastDeviceIssues.set(name, rollbackCollector.issues);
+          } else {
+            lastDeviceIssues.delete(name);
+          }
           // Rollback succeeded — internal state is unchanged. Throw a
           // wrapper that carries the original recreate error as `cause`
           // so callers can introspect the underlying podman failure.
