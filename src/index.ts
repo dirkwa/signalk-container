@@ -551,6 +551,16 @@ export default (app: App) => {
     }
     perCallOnContainerLogUnsub.delete(name);
     lastDeviceIssues.delete(name);
+    // Stop the health-check timer for the removed container — otherwise it
+    // keeps firing pollHealth against a container that no longer exists,
+    // re-raising the unhealthy notification we clear just below every 60s
+    // with no unhealthy→healthy edge left to clear it again.
+    const healthTimer = healthTimers.get(name);
+    if (healthTimer) {
+      clearInterval(healthTimer);
+      healthTimers.delete(name);
+    }
+    healthPollsInFlight.delete(name);
     // A removed container's degradation alerts must not linger.
     degradation.clear("unhealthy", name);
     degradation.clear("deviceUnresolved", name);
@@ -2449,8 +2459,10 @@ export default (app: App) => {
       // omits the flag (older saved config) does not inherit the
       // previous run's toggle.
       setDisableUserns(false);
-      // Same for the degradation-notification toggle (default on).
-      degradation.setEnabled(true);
+      // NOTE: do NOT re-enable the emitter here. degradation.reset() (above)
+      // left it disabled so a late raise() from an in-flight startup step
+      // can't strand a notification after stop(). The next start() re-enables
+      // it from config via degradation.setEnabled(...).
       // Restore the default namespace symmetrically; start() re-reads the
       // env var, so this only matters as a defensive reset.
       resetNamespace();

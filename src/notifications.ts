@@ -250,6 +250,12 @@ export function makeDegradationEmitter(
       health.clear();
       unresolvedSig.clear();
       unhealthyReason.clear();
+      // Disable emission until the next start() re-enables via setEnabled().
+      // Without this, a raise() from an async startup step (e.g. the
+      // deployment doctor) that resolves AFTER stop()+reset() would strand a
+      // notification on the bus with no live plugin to ever clear it — the
+      // raise/clear path has no per-call epoch guard the way pollHealth does.
+      emit = false;
     },
   };
 }

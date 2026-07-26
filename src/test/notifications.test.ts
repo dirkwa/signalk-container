@@ -340,16 +340,32 @@ describe("degradation emitter — forgetContainer", () => {
 });
 
 describe("degradation emitter — reset", () => {
-  it("clears all outstanding notifications and forgets state", async () => {
+  it("clears all outstanding notifications and drops tracking state", () => {
     const { app, cleared } = makeApp();
     const e = makeDegradationEmitter(app);
     e.raise("unhealthy", "a", "warn", "x");
     e.raise("volumeAborted", "b", "alert", "y");
     e.reset();
     assert.equal(cleared.length, 2);
-    // after reset, a raise for the same key works again (not still tracked)
+  });
+
+  it("disables emission after reset (a late raise must not strand)", () => {
+    const { app, raises } = makeApp();
+    const e = makeDegradationEmitter(app);
+    e.reset();
+    // A raise arriving after reset() — e.g. from an async startup step that
+    // resolved after stop() — must NOT publish, or it would strand a
+    // notification with no live plugin to clear it.
+    e.raise("deploymentDegraded", "", "warn", "late");
+    assert.equal(raises.length, 0);
+  });
+
+  it("setEnabled(true) after reset re-enables emission (the next start())", () => {
+    const { app, raises } = makeApp();
+    const e = makeDegradationEmitter(app);
+    e.reset();
+    e.setEnabled(true);
     e.raise("unhealthy", "a", "warn", "x");
-    e.clear("unhealthy", "a");
-    assert.equal(cleared.length, 3);
+    assert.equal(raises.length, 1);
   });
 });
