@@ -103,6 +103,27 @@ describe("degradation emitter — raise/clear lifecycle", () => {
     assert.equal(cleared.length, 0);
     assert.equal(errors.length, 0);
   });
+
+  it("logs via app.error and does not throw when raise() throws", () => {
+    const { app, errors } = makeApp();
+    app.notifications!.raise = () => {
+      throw new Error("boom");
+    };
+    const e = makeDegradationEmitter(app);
+    assert.doesNotThrow(() => e.raise("unhealthy", "q", "warn", "a"));
+    assert.equal(errors.length, 1);
+  });
+
+  it("logs via app.error and does not throw when clear() throws", () => {
+    const { app, errors } = makeApp();
+    const e = makeDegradationEmitter(app);
+    e.raise("unhealthy", "q", "warn", "a");
+    app.notifications!.clear = () => {
+      throw new Error("boom");
+    };
+    assert.doesNotThrow(() => e.clear("unhealthy", "q"));
+    assert.equal(errors.length, 1);
+  });
 });
 
 describe("degradation emitter — toggle", () => {
@@ -175,6 +196,51 @@ describe("degradation emitter — pollHealth edge semantics", () => {
     await e.pollHealth("q", async () => false, noop);
     await e.pollHealth("q", async () => false, noop);
     assert.equal(raises.length, 1);
+  });
+
+  it("re-raises with a fresh message when the unhealthy reason changes", async () => {
+    const { app, raises, cleared } = makeApp();
+    const e = makeDegradationEmitter(app);
+    const noop = () => {};
+    await e.pollHealth(
+      "q",
+      async () => {
+        throw new Error("reason A");
+      },
+      noop,
+    );
+    await e.pollHealth(
+      "q",
+      async () => {
+        throw new Error("reason B");
+      },
+      noop,
+    );
+    assert.equal(cleared.length, 1, "the stale reason-A notification clears");
+    assert.equal(raises.length, 2);
+    assert.match(raises[1].message, /reason B/);
+  });
+
+  it("drops an in-flight poll whose result lands after reset() (no stale raise)", async () => {
+    const { app, raises } = makeApp();
+    const e = makeDegradationEmitter(app);
+    let release!: (v: boolean) => void;
+    const gate = new Promise<boolean>((r) => {
+      release = r;
+    });
+    const poll = e.pollHealth(
+      "q",
+      () => gate,
+      () => {},
+    );
+    e.reset(); // reset while the check is in flight
+    release(false); // now the (would-be unhealthy) check resolves
+    await poll;
+    assert.equal(
+      raises.length,
+      0,
+      "a poll resolving after reset must not raise a stale notification",
+    );
   });
 });
 

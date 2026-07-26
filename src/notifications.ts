@@ -101,6 +101,14 @@ export function makeDegradationEmitter(
   // so a changed set (e.g. /dev/a → /dev/b) re-raises with a fresh message
   // instead of the idempotent raise() no-op leaving the stale one live.
   const unresolvedSig = new Map<string, string>();
+  // current health-check message, so a changed reason re-raises rather than
+  // leaving the idempotent stale one live.
+  const unhealthyReason = new Map<string, string>();
+  // Generation guards so an in-flight pollHealth whose healthCheck resolves
+  // AFTER forgetContainer()/reset() cannot re-raise a stale unhealthy
+  // notification with no timer left to clear it. Bumped on each.
+  const healthEpoch = new Map<string, number>();
+  let resetEpoch = 0;
   let emit = enabled;
 
   const raise: DegradationEmitter["raise"] = (
@@ -152,6 +160,8 @@ export function makeDegradationEmitter(
     healthCheck,
     surface,
   ) => {
+    const startEpoch = healthEpoch.get(name) ?? 0;
+    const startReset = resetEpoch;
     let healthy: boolean;
     let reason = "";
     try {
@@ -161,12 +171,27 @@ export function makeDegradationEmitter(
       healthy = false;
       reason = err instanceof Error ? err.message : String(err);
     }
+    // If the container was forgotten or the emitter was reset while the
+    // check was in flight, drop this result — otherwise we'd re-raise a
+    // notification no surviving timer would ever clear.
+    if (
+      startReset !== resetEpoch ||
+      startEpoch !== (healthEpoch.get(name) ?? 0)
+    )
+      return;
     if (!healthy) {
       surface(reason);
+      // Re-raise on a changed reason (raise() is idempotent per key, so a
+      // stale message would otherwise persist until recovery).
+      if (unhealthyReason.get(name) !== reason) {
+        clear("unhealthy", name);
+        unhealthyReason.set(name, reason);
+      }
       raise("unhealthy", name, "warn", `${name}: ${reason}`);
       health.set(name, false);
     } else {
       if (health.get(name) === false) clear("unhealthy", name);
+      unhealthyReason.delete(name);
       health.set(name, true);
     }
   };
@@ -207,10 +232,13 @@ export function makeDegradationEmitter(
       emit = enabled;
     },
     forgetContainer: (name: string) => {
+      healthEpoch.set(name, (healthEpoch.get(name) ?? 0) + 1);
       health.delete(name);
       unresolvedSig.delete(name);
+      unhealthyReason.delete(name);
     },
     reset: () => {
+      resetEpoch += 1;
       for (const id of raised.values()) {
         try {
           app.notifications?.clear(id);
@@ -221,6 +249,7 @@ export function makeDegradationEmitter(
       raised.clear();
       health.clear();
       unresolvedSig.clear();
+      unhealthyReason.clear();
     },
   };
 }

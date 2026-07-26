@@ -162,7 +162,6 @@ interface App {
  */
 const SSE_HEARTBEAT_MS = 30_000;
 
-/** Interval between container health-check polls. */
 const HEALTH_POLL_MS = 60_000;
 
 // `DEFAULT_KEEP_IMAGE_VERSIONS` and `normalizeKeepImageVersions` live in

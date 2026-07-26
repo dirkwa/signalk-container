@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { detectRuntime, isContainerized } from "../../runtime.js";
-import { getContainerState } from "../../containers.js";
+import { getContainerState, removeContainer } from "../../containers.js";
 import containerManagerPlugin from "../../index.js";
 import type {
   ContainerManagerApi,
@@ -101,13 +101,32 @@ describe("degradation notifications — e2e against a real runtime", () => {
   });
 
   after(async () => {
-    if (runtime && booted) {
+    // Force-remove every fixed-name container these tests create, by name,
+    // regardless of test outcome or plugin state — the recovery container in
+    // test 1 survives its own plugin.stop() (stop() doesn't remove
+    // containers), and a failed assertion could strand the others. Do this
+    // BEFORE tearing the plugin down (which resets the namespace), and never
+    // let a stop() error skip the removals.
+    if (runtime) {
+      for (const name of [
+        CONTAINER_NAME,
+        "stop-clear-test",
+        "toggle-off-test",
+        "no-notif-test",
+      ]) {
+        try {
+          await removeContainer(runtime, name);
+        } catch {
+          /* best effort */
+        }
+      }
+    }
+    if (booted) {
       try {
-        await booted.api.remove(CONTAINER_NAME);
+        await booted.stop();
       } catch {
         /* best effort */
       }
-      await booted.stop();
     }
   });
 
@@ -127,74 +146,83 @@ describe("degradation notifications — e2e against a real runtime", () => {
 
     sink = makeNotificationSink();
     booted = await bootPlugin(sink);
+    const presentSource = mkdtempSync(join(tmpdir(), "skc-present-"));
     try {
-      await booted.api.remove(CONTAINER_NAME);
-    } catch {
-      /* ok if absent */
-    }
+      try {
+        await booted.api.remove(CONTAINER_NAME);
+      } catch {
+        /* ok if absent */
+      }
 
-    const missingSource = join(
-      tmpdir(),
-      `skc-does-not-exist-${process.pid}-${Date.now()}`,
-    );
+      const missingSource = join(
+        tmpdir(),
+        `skc-does-not-exist-${process.pid}-${Date.now()}`,
+      );
 
-    // ensureRunning with a required (ifMissing: "abort") volume whose
-    // source does not exist must throw AND raise volumeAborted (alert).
-    await assert.rejects(
-      booted.api.ensureRunning(CONTAINER_NAME, {
+      // ensureRunning with a required (ifMissing: "abort") volume whose
+      // source does not exist must throw AND raise volumeAborted (alert).
+      await assert.rejects(
+        booted.api.ensureRunning(CONTAINER_NAME, {
+          image: "docker.io/library/alpine",
+          tag: "3.19",
+          command: TRAP_AND_WAIT,
+          restart: "no",
+          volumes: {
+            "/required": { source: missingSource, ifMissing: "abort" },
+          },
+        }),
+        /required host paths missing|does not exist/i,
+        "ensureRunning must reject when a required volume source is missing",
+      );
+
+      const abortedRaise = sink.raised.find(
+        (r) =>
+          r.path === `notifications.container.${CONTAINER_NAME}.volumeAborted`,
+      );
+      assert.ok(
+        abortedRaise,
+        `expected a volumeAborted notification, got: ${JSON.stringify(sink.raised)}`,
+      );
+      assert.equal(abortedRaise.state, "alert");
+      assert.equal(
+        sink.cleared.length,
+        0,
+        "nothing should have cleared yet while the source is still missing",
+      );
+
+      // Recovery: same container, now with the required source present. A
+      // successful ensureRunning must clear the volumeAborted alert.
+      await booted.api.ensureRunning(CONTAINER_NAME, {
         image: "docker.io/library/alpine",
         tag: "3.19",
         command: TRAP_AND_WAIT,
         restart: "no",
-        volumes: {
-          "/required": { source: missingSource, ifMissing: "abort" },
-        },
-      }),
-      /required host paths missing|does not exist/i,
-      "ensureRunning must reject when a required volume source is missing",
-    );
-
-    const abortedRaise = sink.raised.find(
-      (r) =>
-        r.path === `notifications.container.${CONTAINER_NAME}.volumeAborted`,
-    );
-    assert.ok(
-      abortedRaise,
-      `expected a volumeAborted notification, got: ${JSON.stringify(sink.raised)}`,
-    );
-    assert.equal(abortedRaise.state, "alert");
-    assert.equal(
-      sink.cleared.length,
-      0,
-      "nothing should have cleared yet while the source is still missing",
-    );
-
-    // Recovery: same container, now with the required source present (use
-    // the temp data dir, which exists). A successful ensureRunning must
-    // clear the volumeAborted alert.
-    const presentSource = mkdtempSync(join(tmpdir(), "skc-present-"));
-    await booted.api.ensureRunning(CONTAINER_NAME, {
-      image: "docker.io/library/alpine",
-      tag: "3.19",
-      command: TRAP_AND_WAIT,
-      restart: "no",
-      volumes: { "/required": { source: presentSource, ifMissing: "abort" } },
-    });
-    assert.equal(
-      await getContainerState(runtime, CONTAINER_NAME),
-      "running",
-      "container should be running after the source reappears",
-    );
-    assert.ok(
-      sink
-        .clearedPaths()
-        .includes(`notifications.container.${CONTAINER_NAME}.volumeAborted`),
-      `expected the volumeAborted notification to be cleared on recovery, cleared=${JSON.stringify(
-        sink.clearedPaths(),
-      )}`,
-    );
-
-    rmSync(presentSource, { recursive: true, force: true });
+        volumes: { "/required": { source: presentSource, ifMissing: "abort" } },
+      });
+      assert.equal(
+        await getContainerState(runtime, CONTAINER_NAME),
+        "running",
+        "container should be running after the source reappears",
+      );
+      assert.ok(
+        sink
+          .clearedPaths()
+          .includes(`notifications.container.${CONTAINER_NAME}.volumeAborted`),
+        `expected the volumeAborted notification to be cleared on recovery, cleared=${JSON.stringify(
+          sink.clearedPaths(),
+        )}`,
+      );
+    } finally {
+      // The recovery ensureRunning leaves a running container; remove it in
+      // the test's own scope (correct namespace state) rather than relying
+      // on the suite-level after() alone.
+      try {
+        await removeContainer(runtime, CONTAINER_NAME);
+      } catch {
+        /* best effort */
+      }
+      rmSync(presentSource, { recursive: true, force: true });
+    }
   });
 
   it("clears all outstanding notifications on plugin stop()", async (t) => {
@@ -208,23 +236,29 @@ describe("degradation notifications — e2e against a real runtime", () => {
     }
     const localSink = makeNotificationSink();
     const local = await bootPlugin(localSink);
-    const missingSource = join(
-      tmpdir(),
-      `skc-gone-${process.pid}-${Date.now()}`,
-    );
-    await assert.rejects(
-      local.api.ensureRunning("stop-clear-test", {
-        image: "docker.io/library/alpine",
-        tag: "3.19",
-        command: TRAP_AND_WAIT,
-        restart: "no",
-        volumes: { "/req": { source: missingSource, ifMissing: "abort" } },
-      }),
-    );
-    assert.ok(localSink.raised.length >= 1, "a notification should be raised");
-    const outstanding = localSink.raised.length - localSink.cleared.length;
-    assert.ok(outstanding >= 1, "notification should still be outstanding");
-    await local.stop(); // stop() must clear it
+    try {
+      const missingSource = join(
+        tmpdir(),
+        `skc-gone-${process.pid}-${Date.now()}`,
+      );
+      await assert.rejects(
+        local.api.ensureRunning("stop-clear-test", {
+          image: "docker.io/library/alpine",
+          tag: "3.19",
+          command: TRAP_AND_WAIT,
+          restart: "no",
+          volumes: { "/req": { source: missingSource, ifMissing: "abort" } },
+        }),
+      );
+      assert.ok(
+        localSink.raised.length >= 1,
+        "a notification should be raised",
+      );
+      const outstanding = localSink.raised.length - localSink.cleared.length;
+      assert.ok(outstanding >= 1, "notification should still be outstanding");
+    } finally {
+      await local.stop(); // stop() must clear it (and tear the plugin down)
+    }
     assert.ok(
       localSink.cleared.length >= 1,
       "stop() must clear outstanding notifications",
@@ -244,25 +278,28 @@ describe("degradation notifications — e2e against a real runtime", () => {
     const local = await bootPlugin(localSink, {
       emitDegradationNotifications: false,
     });
-    const missingSource = join(
-      tmpdir(),
-      `skc-off-${process.pid}-${Date.now()}`,
-    );
-    await assert.rejects(
-      local.api.ensureRunning("toggle-off-test", {
-        image: "docker.io/library/alpine",
-        tag: "3.19",
-        command: TRAP_AND_WAIT,
-        restart: "no",
-        volumes: { "/req": { source: missingSource, ifMissing: "abort" } },
-      }),
-    );
-    assert.equal(
-      localSink.raised.length,
-      0,
-      "toggle off must suppress all raises (the ensureRunning still throws)",
-    );
-    await local.stop();
+    try {
+      const missingSource = join(
+        tmpdir(),
+        `skc-off-${process.pid}-${Date.now()}`,
+      );
+      await assert.rejects(
+        local.api.ensureRunning("toggle-off-test", {
+          image: "docker.io/library/alpine",
+          tag: "3.19",
+          command: TRAP_AND_WAIT,
+          restart: "no",
+          volumes: { "/req": { source: missingSource, ifMissing: "abort" } },
+        }),
+      );
+      assert.equal(
+        localSink.raised.length,
+        0,
+        "toggle off must suppress all raises (the ensureRunning still throws)",
+      );
+    } finally {
+      await local.stop();
+    }
   });
 
   it("does not throw when the server has no managed-notification API", async (t) => {
@@ -276,20 +313,23 @@ describe("degradation notifications — e2e against a real runtime", () => {
     }
     // sink === null → app has no `notifications` member (older server).
     const local = await bootPlugin(null);
-    const missingSource = join(
-      tmpdir(),
-      `skc-nonotif-${process.pid}-${Date.now()}`,
-    );
-    // The abort still throws; the emitter must no-op, not crash.
-    await assert.rejects(
-      local.api.ensureRunning("no-notif-test", {
-        image: "docker.io/library/alpine",
-        tag: "3.19",
-        command: TRAP_AND_WAIT,
-        restart: "no",
-        volumes: { "/req": { source: missingSource, ifMissing: "abort" } },
-      }),
-    );
-    await local.stop(); // must not throw either
+    try {
+      const missingSource = join(
+        tmpdir(),
+        `skc-nonotif-${process.pid}-${Date.now()}`,
+      );
+      // The abort still throws; the emitter must no-op, not crash.
+      await assert.rejects(
+        local.api.ensureRunning("no-notif-test", {
+          image: "docker.io/library/alpine",
+          tag: "3.19",
+          command: TRAP_AND_WAIT,
+          restart: "no",
+          volumes: { "/req": { source: missingSource, ifMissing: "abort" } },
+        }),
+      );
+    } finally {
+      await local.stop(); // must not throw either
+    }
   });
 });
