@@ -2251,6 +2251,33 @@ export async function ensureRunning(
           ),
       );
     }
+    // Re-announce unresolvable groupAdd names too, so a group-skip stays
+    // visible in the doctor across Signal K restarts — the same durability
+    // the device-unresolved block above gives host-path skips. No label is
+    // needed here: config.groupAdd is present on every call, so re-probing
+    // it against the current host /etc/group is the durable record (and it
+    // self-clears the moment the group is created on the host).
+    if (config.groupAdd?.length) {
+      for (const groupName of unresolvedGroupNames(config.groupAdd)) {
+        safeInvokeDeviceIssue(
+          options?.onDeviceIssue,
+          {
+            entry: groupName,
+            hostPath: "",
+            action: "group-skipped",
+            reason:
+              `groupAdd "${groupName}" has no matching group in the host's ` +
+              `/etc/group; ${fullName} runs without it.`,
+          },
+          (err) =>
+            debug(
+              `ensureRunning(${name}): onDeviceIssue handler threw: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            ),
+        );
+      }
+    }
     const { drifted } = diffContainerConfig(config, live, runtime, prior);
     if (drifted.length === 0) return false;
     debug(
