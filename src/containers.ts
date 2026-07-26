@@ -389,6 +389,26 @@ export function safeInvokeUlimitClamped(
 }
 
 /**
+ * Invoke an `onUnhealthy` callback safely. Same shape and rationale as
+ * `safeInvokeVolumeIssue` (isolate a throwing/rejecting handler so it can
+ * never re-enter the health-check loop), but with the `(name, reason)`
+ * signature `onUnhealthy` carries.
+ */
+export function safeInvokeUnhealthy(
+  handler: ((name: string, reason: string) => void | Promise<void>) | undefined,
+  name: string,
+  reason: string,
+  reportError: (err: unknown) => void,
+): void {
+  if (!handler) return;
+  try {
+    void Promise.resolve(handler(name, reason)).catch(reportError);
+  } catch (err) {
+    reportError(err);
+  }
+}
+
+/**
  * Spawn `podman logs -f --tail=N sk-<name>` (or `docker logs -f`)
  * and emit each line to `onLine`.  Returns a stop-handle; the caller
  * manages lifecycle (start after the container is running; stop on

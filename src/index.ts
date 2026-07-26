@@ -76,6 +76,7 @@ import {
   resolveSignalkNetworks,
   safeInvokeContainerLog,
   safeInvokeDeviceIssue,
+  safeInvokeUnhealthy,
   safeInvokeVolumeIssue,
   startContainer,
   stopContainer,
@@ -1377,17 +1378,32 @@ export default (app: App) => {
         const existing = healthTimers.get(name);
         if (existing) clearInterval(existing);
 
+        // An unhealthy result must never vanish silently: fire the
+        // consumer's handler if it wired one, but always also log at error
+        // level so a container failing its health check is visible in the
+        // server log even when the consumer passed no onUnhealthy. The
+        // handler is invoked in its own try/catch — a throwing handler must
+        // not re-enter the health-check catch below (which would double-log
+        // and let the second throw escape as an unhandled rejection),
+        // mirroring the safeInvoke* discipline used for the other callbacks.
+        const surfaceUnhealthy = (reason: string): void => {
+          app.error(`ensureRunning(${name}): container unhealthy: ${reason}`);
+          safeInvokeUnhealthy(options.onUnhealthy, name, reason, (e) =>
+            app.error(
+              `ensureRunning(${name}): onUnhealthy handler threw: ${
+                e instanceof Error ? e.message : String(e)
+              }`,
+            ),
+          );
+        };
         const timer = setInterval(async () => {
           try {
             const ok = await options.healthCheck!();
             if (!ok) {
-              options.onUnhealthy?.(name, "Health check returned false");
+              surfaceUnhealthy("Health check returned false");
             }
           } catch (err) {
-            options.onUnhealthy?.(
-              name,
-              err instanceof Error ? err.message : String(err),
-            );
+            surfaceUnhealthy(err instanceof Error ? err.message : String(err));
           }
         }, 60000);
         healthTimers.set(name, timer);
