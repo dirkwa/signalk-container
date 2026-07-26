@@ -1625,6 +1625,20 @@ export interface PluginConfig {
    * Default: `false` (historical keep-id behaviour preserved).
    */
   disableUserNamespaceRemap?: boolean;
+  /**
+   * Emit SignalK notifications (`notifications.container.*`) for managed-
+   * container degradation: an unhealthy container, a device the host
+   * rejected, a required volume whose source is missing, and a degraded
+   * container-runtime deployment. Severity is `warn` (or `alert` for a
+   * missing required volume) — visual only, never an audible alarm. The
+   * notifications supplement the existing plugin-status / log / consumer-
+   * callback surfacing; they do not replace it. Requires a SignalK server
+   * that exposes the managed-notification API (≥ 2.30.0); on older servers
+   * the setting has no effect.
+   *
+   * Default: `true`.
+   */
+  emitDegradationNotifications?: boolean;
 }
 
 /**

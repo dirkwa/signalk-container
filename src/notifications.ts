@@ -1,0 +1,213 @@
+/**
+ * Degradation notifications for managed containers
+ * (`notifications.container.*`).
+ *
+ * A single emitter for the four managed-container degradation conditions
+ * (unhealthy container, host-rejected device, missing required volume,
+ * degraded runtime deployment). It is ADDITIVE — a parallel channel next
+ * to the existing log / plugin-status / consumer-callback surfacing, never
+ * a replacement.
+ *
+ * Two things gate emission:
+ *  - the config toggle (`emitDegradationNotifications`, default on), and
+ *  - the server actually exposing the managed-notification API
+ *    (`app.notifications`, SignalK ≥ 2.30.0). Absent → silent no-op, so an
+ *    older server degrades to the existing surfacing without breaking.
+ *
+ * Deliberately NO `method` field on `raise`: the emitter states severity
+ * only; the server's NotificationManager owns presentation (RFC
+ * notification-handling §6.1). Path convention: a stable, addressable
+ * `notifications.container.<name>.<condition>` (or
+ * `notifications.container.deployment` for the host-level deployment
+ * condition) with `idInPath: false`, so the same container+condition
+ * updates one path instead of accumulating UUID-suffixed duplicates, and
+ * the tracked NotificationId lets us `clear` on recovery.
+ */
+import type { DeviceIssue } from "./types.js";
+
+export type DegradationCondition =
+  "unhealthy" | "deviceUnresolved" | "volumeAborted" | "deploymentDegraded";
+
+/** Minimal slice of the host `app` the emitter needs. */
+export interface NotificationApp {
+  error: (...args: unknown[]) => void;
+  notifications?: {
+    raise(options: {
+      state: "normal" | "nominal" | "alert" | "warn" | "alarm" | "emergency";
+      message: string;
+      path: string;
+      idInPath?: boolean;
+      data?: unknown;
+    }): string;
+    clear(id: string): void;
+  };
+}
+
+export interface DegradationEmitter {
+  /** Raise (idempotently) a degradation notification for a container. */
+  raise(
+    condition: DegradationCondition,
+    name: string,
+    state: "warn" | "alert",
+    message: string,
+    data?: unknown,
+  ): void;
+  /** Clear a previously-raised notification; no-op if none is tracked. */
+  clear(condition: DegradationCondition, name: string): void;
+  /**
+   * One health-check poll: `surface` fires on failure (log + consumer
+   * handler); the unhealthy notification is raised on failure and cleared
+   * on the unhealthy → healthy edge.
+   */
+  pollHealth(
+    name: string,
+    healthCheck: () => Promise<boolean>,
+    surface: (reason: string) => void,
+  ): Promise<void>;
+  /**
+   * Raise/clear the `deviceUnresolved` notification off a device-issue
+   * set. Callers hold the authoritative `lastDeviceIssues` map; this only
+   * mirrors the `unresolved` subset onto the notification bus so the two
+   * can't diverge.
+   */
+  syncDeviceIssues(name: string, issues: DeviceIssue[]): void;
+  /** Enable/disable emission (config toggle). Clears nothing. */
+  setEnabled(enabled: boolean): void;
+  /** Drop one container's health-tracking state (on container removal). */
+  forgetContainer(name: string): void;
+  /** Clear every outstanding notification and drop all tracking state. */
+  reset(): void;
+}
+
+/** `notifications.container.<name>.<condition>` (or `.deployment`). */
+export function notificationPath(
+  condition: DegradationCondition,
+  name: string,
+): string {
+  return condition === "deploymentDegraded"
+    ? "notifications.container.deployment"
+    : `notifications.container.${name}.${condition}`;
+}
+
+export function makeDegradationEmitter(
+  app: NotificationApp,
+  enabled = true,
+): DegradationEmitter {
+  // key `${condition}:${name}` → NotificationId (deployment uses name "").
+  const raised = new Map<string, string>();
+  // current health per container, for edge-triggered unhealthy raise/clear.
+  const health = new Map<string, boolean>();
+  let emit = enabled;
+
+  const raise: DegradationEmitter["raise"] = (
+    condition,
+    name,
+    state,
+    message,
+    data,
+  ) => {
+    if (!emit || !app.notifications?.raise) return;
+    const key = `${condition}:${name}`;
+    if (raised.has(key)) return; // idempotent; the stable path updates in place
+    try {
+      const id = app.notifications.raise({
+        state,
+        message,
+        path: notificationPath(condition, name),
+        idInPath: false,
+        data,
+      });
+      raised.set(key, id);
+    } catch (err) {
+      app.error(
+        `raiseDegradation(${key}) failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  };
+
+  const clear: DegradationEmitter["clear"] = (condition, name) => {
+    const key = `${condition}:${name}`;
+    const id = raised.get(key);
+    if (id === undefined) return;
+    raised.delete(key);
+    try {
+      app.notifications?.clear(id);
+    } catch (err) {
+      app.error(
+        `clearDegradation(${key}) failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  };
+
+  const pollHealth: DegradationEmitter["pollHealth"] = async (
+    name,
+    healthCheck,
+    surface,
+  ) => {
+    let healthy: boolean;
+    let reason = "";
+    try {
+      healthy = await healthCheck();
+      if (!healthy) reason = "Health check returned false";
+    } catch (err) {
+      healthy = false;
+      reason = err instanceof Error ? err.message : String(err);
+    }
+    if (!healthy) {
+      surface(reason);
+      raise("unhealthy", name, "warn", `${name}: ${reason}`);
+      health.set(name, false);
+    } else {
+      if (health.get(name) === false) clear("unhealthy", name);
+      health.set(name, true);
+    }
+  };
+
+  const syncDeviceIssues: DegradationEmitter["syncDeviceIssues"] = (
+    name,
+    issues,
+  ) => {
+    const unresolved = issues.filter((e) => e.action === "unresolved");
+    if (unresolved.length > 0) {
+      raise(
+        "deviceUnresolved",
+        name,
+        "warn",
+        `${name}: device(s) missing on host: ${unresolved
+          .map((e) => e.hostPath)
+          .join(", ")}`,
+        { unresolved },
+      );
+    } else {
+      clear("deviceUnresolved", name);
+    }
+  };
+
+  return {
+    raise,
+    clear,
+    pollHealth,
+    syncDeviceIssues,
+    setEnabled: (enabled: boolean) => {
+      emit = enabled;
+    },
+    forgetContainer: (name: string) => {
+      health.delete(name);
+    },
+    reset: () => {
+      for (const id of raised.values()) {
+        try {
+          app.notifications?.clear(id);
+        } catch {
+          /* never throw from reset (called in stop()) */
+        }
+      }
+      raised.clear();
+      health.clear();
+    },
+  };
+}
