@@ -79,6 +79,7 @@ function liveBase(
     devices: [],
     deviceCgroupRules: [],
     groupAdd: [],
+    labels: {},
     ...overrides,
   } as LiveContainerConfig;
 }

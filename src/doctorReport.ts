@@ -38,6 +38,14 @@ export function isSelfDeploymentResult(
     if (typeof lg.enabled !== "boolean") return false;
     if (!Array.isArray(lg.advice)) return false;
   }
+  // `devicePassthrough` may be absent (older server) or null (no device
+  // issues); a present object must carry the arrays the renderers walk.
+  if ("devicePassthrough" in value && value.devicePassthrough != null) {
+    if (!isObj(value.devicePassthrough)) return false;
+    const dp = value.devicePassthrough;
+    if (!Array.isArray(dp.issues)) return false;
+    if (!Array.isArray(dp.advice)) return false;
+  }
   return true;
 }
 
@@ -126,6 +134,14 @@ export function formatDoctorReport(r: SelfDeploymentResult): string {
     );
   }
 
+  if (r.devicePassthrough) {
+    for (const issue of r.devicePassthrough.issues) {
+      lines.push(
+        `device passthrough (${issue.container}): ${issue.hostPath} ${issue.action}`,
+      );
+    }
+  }
+
   const envEntries = Object.entries(r.env).filter(([, v]) => v != null);
   if (envEntries.length > 0) {
     lines.push("");
@@ -139,7 +155,8 @@ export function formatDoctorReport(r: SelfDeploymentResult): string {
   const hasAdvisoryAdvice =
     (r.containerStorage?.advice.length ?? 0) > 0 ||
     (r.linger?.advice.length ?? 0) > 0 ||
-    (r.networkDns?.advice.length ?? 0) > 0;
+    (r.networkDns?.advice.length ?? 0) > 0 ||
+    (r.devicePassthrough?.advice.length ?? 0) > 0;
   if (r.remediation.length > 0) {
     lines.push("");
     lines.push("Remediation:");
@@ -165,6 +182,12 @@ export function formatDoctorReport(r: SelfDeploymentResult): string {
     lines.push("");
     lines.push("Network DNS advice:");
     for (const line of r.networkDns.advice) lines.push(line);
+  }
+
+  if (r.devicePassthrough && r.devicePassthrough.advice.length > 0) {
+    lines.push("");
+    lines.push("Device passthrough advice:");
+    for (const line of r.devicePassthrough.advice) lines.push(line);
   }
 
   return lines.join("\n");

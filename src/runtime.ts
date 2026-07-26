@@ -344,6 +344,7 @@ export async function detectRuntime(
     isRootless: rootlessFromInfo(info),
     hostUser: probeHostUser(),
     socketPath,
+    isContainerized: isContainerized(),
   };
 }
 

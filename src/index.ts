@@ -23,6 +23,7 @@ import {
   SelfDeploymentResult,
   SetupSnippetFormat,
   SetupSnippetResult,
+  DeviceIssue,
   UpdateResourcesResult,
   VolumeIssue,
 } from "./types.js";
@@ -74,6 +75,7 @@ import {
   resolveSignalkDataSource,
   resolveSignalkNetworks,
   safeInvokeContainerLog,
+  safeInvokeDeviceIssue,
   safeInvokeVolumeIssue,
   startContainer,
   stopContainer,
@@ -214,6 +216,75 @@ export default (app: App) => {
       aborted: Array<{ containerPath: string; source: string }>;
     }
   >();
+  // Device-passthrough events from the most recent ensureRunning() call
+  // per container, feeding the doctor's devicePassthrough section. The
+  // inner ensureRunning fires events at create time and re-fires
+  // `unresolved` on every reconcile of a container carrying
+  // DEVICES_UNRESOLVED_LABEL, so committing per call (and clearing on a
+  // quiet call) keeps this current across restarts and recoveries.
+  const lastDeviceIssues = new Map<string, DeviceIssue[]>();
+
+  /**
+   * Doctor section built from `lastDeviceIssues`. `null` when quiet so
+   * the doctor renders nothing. Advice lines cover the two actionable
+   * states: unverified emissions (mount the path into the Signal K
+   * container for full fidelity) and host-rejected entries (attach the
+   * device; retried on the next recreate).
+   */
+  function buildDevicePassthroughSection(): SelfDeploymentResult["devicePassthrough"] {
+    const issues: NonNullable<
+      SelfDeploymentResult["devicePassthrough"]
+    >["issues"] = [];
+    for (const [container, events] of lastDeviceIssues) {
+      for (const e of events) {
+        issues.push({
+          container,
+          entry: e.entry,
+          hostPath: e.hostPath,
+          action: e.action,
+          reason: e.reason,
+        });
+      }
+    }
+    if (issues.length === 0) return null;
+    const paths = (action: DeviceIssue["action"]): string[] => [
+      ...new Set(
+        issues.filter((i) => i.action === action).map((i) => i.hostPath),
+      ),
+    ];
+    const unresolved = paths("unresolved");
+    const optimistic = paths("optimistic").filter(
+      (p) => !unresolved.includes(p),
+    );
+    const skipped = paths("skipped");
+    const advice: string[] = [];
+    if (optimistic.length > 0) {
+      advice.push(
+        `Signal K runs containerized and cannot verify ${optimistic.join(", ")} locally; ` +
+          `the bind is emitted for the runtime to resolve on the host. For full drift ` +
+          `fidelity, mount the path into the Signal K container read-only:`,
+      );
+      for (const p of optimistic) {
+        advice.push(
+          `  compose/run: -v ${p}:${p}:ro   quadlet: Volume=${p}:${p}:ro`,
+        );
+      }
+    }
+    if (unresolved.length > 0) {
+      advice.push(
+        `Missing on the host: ${unresolved.join(", ")}. Attach or enable the device ` +
+          `(e.g. plug in the USB audio card, load the driver); the entry is retried ` +
+          `automatically on the next container recreate.`,
+      );
+    }
+    if (skipped.length > 0) {
+      advice.push(
+        `Missing at create time (device unplugged?): ${skipped.join(", ")}. The ` +
+          `container started without it; recreate the container once the device is back.`,
+      );
+    }
+    return { issues, advice };
+  }
   // Per-container log-stream broker.  Lazily created on first subscribe
   // (either from `onContainerLog` or the SSE route), torn down when
   // the last subscriber unsubscribes OR when the container is
@@ -359,6 +430,7 @@ export default (app: App) => {
       logStreamBrokers.delete(name);
     }
     perCallOnContainerLogUnsub.delete(name);
+    lastDeviceIssues.delete(name);
   }
 
   const effectiveResources = new Map<string, ContainerResourceLimits>();
@@ -963,13 +1035,43 @@ export default (app: App) => {
         (msg) => app.debug(`resolveImage(${name}): ${msg}`),
       );
 
+      // Intercept device-passthrough events: collect for the doctor's
+      // devicePassthrough section, surface at the right log level
+      // (`optimistic` is informational; `skipped`/`unresolved` are
+      // actionable), and forward to the consumer's own handler.
+      const deviceIssues: DeviceIssue[] = [];
+      const innerOptions: EnsureRunningOptions = {
+        ...options,
+        onDeviceIssue: (event) => {
+          if (
+            !deviceIssues.some(
+              (e) => e.hostPath === event.hostPath && e.action === event.action,
+            )
+          ) {
+            deviceIssues.push(event);
+            if (event.action === "optimistic") {
+              app.debug(`ensureRunning(${name}): ${event.reason}`);
+            } else {
+              app.error(`ensureRunning(${name}): ${event.reason}`);
+            }
+          }
+          safeInvokeDeviceIssue(options?.onDeviceIssue, event, (err) =>
+            app.error(
+              `ensureRunning(${name}): onDeviceIssue handler threw for ` +
+                `${event.hostPath} (${event.action}): ` +
+                `${err instanceof Error ? err.message : String(err)}`,
+            ),
+          );
+        },
+      };
+
       try {
         await ensureRunning(
           runtimeInfo,
           name,
           effectiveConfig,
           (msg) => app.debug(msg),
-          options,
+          innerOptions,
           undefined,
           priorConfig,
         );
@@ -991,6 +1093,11 @@ export default (app: App) => {
       // unset check still sees the genuine prior limits.
       lastConfigs.set(name, effectiveConfig);
       effectiveResources.set(name, filteredMerged);
+      // Commit device events the same way: a quiet call means the
+      // container is running with everything it asked for — clear any
+      // stale doctor state from earlier calls.
+      if (deviceIssues.length > 0) lastDeviceIssues.set(name, deviceIssues);
+      else lastDeviceIssues.delete(name);
 
       // Commit port-address mappings only after the container has been
       // successfully started.  Populating portAddressMap before this
@@ -1660,6 +1767,7 @@ export default (app: App) => {
           lastConfigs.delete(name);
           effectiveResources.delete(name);
           lastVolumeIssues.delete(name);
+          lastDeviceIssues.delete(name);
           app.setPluginError(
             `Container ${name} is in an indeterminate state: ` +
               `recreate failed (${recreateMsg}) AND rollback failed (${rollbackMsg}). ` +
@@ -1723,7 +1831,12 @@ export default (app: App) => {
       return imageRunsAsUser(runtimeInfo, image, user);
     },
     async selfDeployment(): Promise<SelfDeploymentResult> {
-      return selfDeployment(runtimePreference);
+      const result = await selfDeployment(runtimePreference);
+      // Grafted here rather than probed in doctor.ts: the probe has no
+      // view into per-container config; the events live in this plugin
+      // scope (see lastDeviceIssues).
+      result.devicePassthrough = buildDevicePassthroughSection();
+      return result;
     },
     async generateSetupSnippet(
       format: SetupSnippetFormat = "compose",

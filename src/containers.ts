@@ -9,6 +9,7 @@ import {
   ContainerInfo,
   ContainerRuntimeInfo,
   ContainerState,
+  DeviceIssue,
   EnsureRunningOptions,
   HealthcheckOverride,
   LocalImageSummary,
@@ -34,7 +35,10 @@ import {
 } from "./client.js";
 import type { ErrorKind } from "./errors.js";
 import {
+  DEVICES_UNRESOLVED_LABEL,
+  filterUnresolvedDeviceEntries,
   KEEP_ORIGINAL_GROUPS_ANNOTATION,
+  parseUnresolvedDevicesLabel,
   resolveDeviceRequests,
   resolveGroupAdd,
   type DeviceNodeSpec,
@@ -310,6 +314,23 @@ export function safeInvokeVolumeIssue(
     // Pre-promise sync throw (e.g. the call expression itself threw
     // before returning a Promise). Rare in practice but possible if
     // the handler is something weird like a Proxy.
+    reportError(err);
+  }
+}
+
+/**
+ * Invoke an `onDeviceIssue` callback safely. Same shape and rationale
+ * as `safeInvokeVolumeIssue`.
+ */
+export function safeInvokeDeviceIssue(
+  handler: ((event: DeviceIssue) => void | Promise<void>) | undefined,
+  event: DeviceIssue,
+  reportError: (err: unknown) => void,
+): void {
+  if (!handler) return;
+  try {
+    void Promise.resolve(handler(event)).catch(reportError);
+  } catch (err) {
     reportError(err);
   }
 }
@@ -1106,6 +1127,14 @@ export interface LiveContainerConfig {
   /** `HostConfig.GroupAdd`, `[]` when unset. Both runtimes report it. */
   groupAdd: string[];
   /**
+   * `Config.Labels`, `{}` when unset. Not part of drift detection as a
+   * field — read for the system labels signalk-container stamps itself,
+   * notably `DEVICES_UNRESOLVED_LABEL` (device entries the host rejected
+   * at create time), which gates the device/volume mirror in
+   * `diffContainerConfig`.
+   */
+  labels: Record<string, string>;
+  /**
    * Effective `--user` spec from `.Config.User`. Empty string when the
    * container was created without `--user` (image USER, typically root).
    * Drift detection compares this against the expected mapping derived
@@ -1144,6 +1173,7 @@ export async function getLiveContainerConfig(
     Cmd?: string[] | null;
     Env?: string[] | null;
     User?: string;
+    Labels?: Record<string, unknown> | null;
   };
   const hostConfig = (info.HostConfig ?? {}) as {
     NetworkMode?: string;
@@ -1276,6 +1306,13 @@ export async function getLiveContainerConfig(
     ? rawGroupAdd.filter((g): g is string => typeof g === "string")
     : [];
 
+  const labels: Record<string, string> = {};
+  if (config.Labels && typeof config.Labels === "object") {
+    for (const [key, value] of Object.entries(config.Labels)) {
+      if (typeof value === "string") labels[key] = value;
+    }
+  }
+
   return {
     image,
     tag,
@@ -1290,6 +1327,7 @@ export async function getLiveContainerConfig(
     devices,
     deviceCgroupRules,
     groupAdd,
+    labels,
   };
 }
 
@@ -1529,8 +1567,19 @@ export function diffContainerConfig(
   // would produce, so both the volumes mirror below and the devices
   // comparison diff post-transformation shapes. Warnings stay silent here
   // — buildCreateOptions already reported any skip at create time.
+  //
+  // Entries the live container records as unresolved (the real host
+  // rejected the optimistic bind at create time — DEVICES_UNRESOLVED_LABEL)
+  // are excluded from BOTH the requested and prior emissions while the
+  // manager still cannot see the path; otherwise every reconcile would
+  // flag drift over a bind the host can never satisfy and recreate-loop.
+  // The same filter applies to `prior` so the podman fallback comparison
+  // below stays symmetric.
+  const unresolvedDevices = parseUnresolvedDevicesLabel(
+    live.labels[DEVICES_UNRESOLVED_LABEL],
+  );
   const requestedDevices = resolveDeviceRequests(
-    requested.devices ?? [],
+    filterUnresolvedDeviceEntries(requested.devices ?? [], unresolvedDevices),
     runtime,
   );
 
@@ -1647,7 +1696,10 @@ export function diffContainerConfig(
         live.deviceCgroupRules,
       );
   } else if (prior !== undefined) {
-    const priorDevices = resolveDeviceRequests(prior.devices ?? [], runtime);
+    const priorDevices = resolveDeviceRequests(
+      filterUnresolvedDeviceEntries(prior.devices ?? [], unresolvedDevices),
+      runtime,
+    );
     devicesDrift =
       !sortedStringArraysEqual(
         canonicalDeviceKeys(requestedDevices.nodes),
@@ -2163,6 +2215,34 @@ export async function ensureRunning(
       );
       return false;
     }
+    // Re-announce device entries the live container records as
+    // unresolved (host rejected them at create time). The label is the
+    // durable record — re-firing here keeps operator surfaces (doctor)
+    // populated across Signal K restarts, when the create-time events
+    // are long gone. The original entry string wasn't recorded, so the
+    // host path stands in for it.
+    for (const hostPath of parseUnresolvedDevicesLabel(
+      live.labels[DEVICES_UNRESOLVED_LABEL],
+    )) {
+      safeInvokeDeviceIssue(
+        options?.onDeviceIssue,
+        {
+          entry: hostPath,
+          hostPath,
+          action: "unresolved",
+          reason:
+            `Device ${hostPath} was missing on the host when ${fullName} ` +
+            `was created; the container runs without it. The entry is ` +
+            `retried on the next recreate.`,
+        },
+        (err) =>
+          debug(
+            `ensureRunning(${name}): onDeviceIssue handler threw: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          ),
+      );
+    }
     const { drifted } = diffContainerConfig(config, live, runtime, prior);
     if (drifted.length === 0) return false;
     debug(
@@ -2309,13 +2389,8 @@ export async function ensureRunning(
         config.healthcheck !== undefined
           ? null
           : await getImageHealthcheck(runtime, imageRef, client);
-      const createOpts = buildCreateOptions(
-        name,
-        config,
-        runtime,
-        healthcheck,
-        debug,
-        (event) =>
+      const buildOpts = (cfg: ContainerConfig): Docker.ContainerCreateOptions =>
+        buildCreateOptions(name, cfg, runtime, healthcheck, debug, (event) =>
           safeInvokeUlimitClamped(options?.onUlimitClamped, event, (err) =>
             debug(
               `ensureRunning(${name}): onUlimitClamped handler threw: ${
@@ -2323,8 +2398,33 @@ export async function ensureRunning(
               }`,
             ),
           ),
-      );
-      const created = await createAndStart(client, createOpts);
+        );
+      const fireDeviceIssue = (event: DeviceIssue): void =>
+        safeInvokeDeviceIssue(options?.onDeviceIssue, event, (err) =>
+          debug(
+            `ensureRunning(${name}): onDeviceIssue handler threw: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          ),
+        );
+      const createOpts = buildOpts(config);
+
+      // Announce create-time device dispositions (skips + unverified
+      // emissions). Same resolution buildCreateOptions just ran — the
+      // injectable probe makes it deterministic across the two calls.
+      const deviceIssues = config.devices?.length
+        ? resolveDeviceRequests(config.devices, runtime).issues
+        : [];
+      for (const issue of deviceIssues) {
+        fireDeviceIssue({
+          entry: issue.entry,
+          hostPath: issue.hostPath,
+          action: issue.disposition,
+          reason: issue.reason,
+        });
+      }
+
+      let created = await createAndStart(client, createOpts);
       if (!created.ok && created.conflict) {
         // getContainerState reported "missing" because `inspect` failed,
         // but a container with this name still exists in a state inspect
@@ -2334,12 +2434,67 @@ export async function ensureRunning(
           `Container ${fullName} name conflict despite "missing" state; removing stale container and retrying`,
         );
         await removeContainer(runtime, name, client);
-        const retry = await createAndStart(client, createOpts);
-        if (!retry.ok) {
-          throw new Error(`Failed to create ${fullName}: ${retry.error}`);
-        }
-        return;
+        created = await createAndStart(client, createOpts);
       }
+
+      // Optimistic-device fallback: an unverified device bind (emitted
+      // because a containerized manager cannot see the host path locally)
+      // was rejected by the runtime — the path is missing on the REAL
+      // host too. Retry without the rejected entries so a missing device
+      // never prevents container start, and stamp the dropped host paths
+      // into DEVICES_UNRESOLVED_LABEL so diffContainerConfig doesn't
+      // recreate-loop over them. One iteration per rejected path,
+      // bounded by the number of unverified entries.
+      const unverified = deviceIssues.filter(
+        (i) => i.disposition === "optimistic",
+      );
+      const unresolvedPaths: string[] = [];
+      while (!created.ok && unverified.length > 0) {
+        const rawError = created.raw;
+        const rejected = MISSING_HOST_PATH_RE.test(rawError)
+          ? unverified.filter(
+              (i) =>
+                !unresolvedPaths.includes(i.hostPath) &&
+                rawError.includes(i.hostPath),
+            )
+          : [];
+        if (rejected.length === 0) break;
+        unresolvedPaths.push(...rejected.map((i) => i.hostPath));
+        for (const issue of rejected) {
+          const reason =
+            `Device "${issue.entry}" does not exist on the host — the ` +
+            `runtime rejected the container create. Starting ${fullName} ` +
+            `without it; the entry is retried on the next recreate.`;
+          debug(`ensureRunning(${name}): ${reason}`);
+          fireDeviceIssue({
+            entry: issue.entry,
+            hostPath: issue.hostPath,
+            action: "unresolved",
+            reason,
+          });
+        }
+        // A failed start (podman resolves binds at start) leaves the
+        // created container behind; remove it before the retry.
+        // removeContainer tolerates "already gone".
+        await removeContainer(runtime, name, client);
+        created = await createAndStart(
+          client,
+          buildOpts({
+            ...config,
+            devices: filterUnresolvedDeviceEntries(
+              config.devices ?? [],
+              unresolvedPaths,
+            ),
+            labels: {
+              ...config.labels,
+              [DEVICES_UNRESOLVED_LABEL]: JSON.stringify(
+                [...unresolvedPaths].sort(),
+              ),
+            },
+          }),
+        );
+      }
+
       if (!created.ok) {
         throw new Error(`Failed to create ${fullName}: ${created.error}`);
       }
@@ -2347,6 +2502,17 @@ export async function ensureRunning(
     }
   }
 }
+
+/**
+ * Runtime error text for a bind mount whose host source path is missing.
+ * Podman (start phase): `statfs /dev/snd: no such file or directory`.
+ * Docker (start phase): `invalid mount config for type "bind": bind
+ * source path does not exist: /dev/snd`. The device-fallback path in
+ * `ensureRunning` additionally requires the error to name the specific
+ * unverified host path, so an unrelated missing-file error can't trigger
+ * the fallback.
+ */
+const MISSING_HOST_PATH_RE = /no such file or directory|does not exist/i;
 
 /** Start an existing container by its prefixed name, tolerating 304 (already running). */
 async function startByFullName(
@@ -2370,12 +2536,16 @@ async function startByFullName(
 /**
  * Create + start a container from a create payload. Returns a discriminated
  * result so the caller can detect the name-conflict (409) case and retry
- * after removing the stale container.
+ * after removing the stale container. `raw` carries the runtime's original
+ * error text — the device-fallback path in `ensureRunning` matches host
+ * paths against it, which the sanitized `userMessage` may not preserve.
  */
 async function createAndStart(
   client: ContainerClient,
   opts: Docker.ContainerCreateOptions,
-): Promise<{ ok: true } | { ok: false; conflict: boolean; error: string }> {
+): Promise<
+  { ok: true } | { ok: false; conflict: boolean; error: string; raw: string }
+> {
   const createResult = await safe(() => client.createContainer(opts));
   if (!createResult.ok) {
     // Only a genuine name collision warrants the stale-container remove+retry.
@@ -2389,11 +2559,21 @@ async function createAndStart(
       createResult.error.kind === "invalid-config"
         ? false
         : /already in use|name.*conflict|409/i.test(createResult.error.raw);
-    return { ok: false, conflict, error: createResult.error.userMessage };
+    return {
+      ok: false,
+      conflict,
+      error: createResult.error.userMessage,
+      raw: createResult.error.raw,
+    };
   }
   const startResult = await safe(() => createResult.value.start());
   if (!startResult.ok) {
-    return { ok: false, conflict: false, error: startResult.error.userMessage };
+    return {
+      ok: false,
+      conflict: false,
+      error: startResult.error.userMessage,
+      raw: startResult.error.raw,
+    };
   }
   return { ok: true };
 }

@@ -172,6 +172,81 @@ export function directoryDeviceMajors(
 export interface DeviceDirectoryBind {
   pathOnHost: string;
   pathInContainer: string;
+  /**
+   * True when the entry was emitted WITHOUT a local stat confirming the
+   * host path exists (see the optimistic branch in
+   * `resolveDeviceRequests`). The create path uses this to recognize
+   * which binds to drop when the runtime rejects the create because the
+   * path is missing on the real host.
+   */
+  unverified?: boolean;
+}
+
+/**
+ * One per-entry disposition from `resolveDeviceRequests`, for surfacing
+ * through logs and the deployment doctor. `skipped` entries were dropped
+ * from the emission; `optimistic` entries were emitted unverified.
+ */
+export interface DeviceRequestIssue {
+  /** The original `ContainerConfig.devices` entry string. */
+  entry: string;
+  /** Canonical host path the entry parsed to (trailing slashes stripped). */
+  hostPath: string;
+  disposition: "skipped" | "optimistic";
+  /** Human-readable explanation; safe to surface to the operator. */
+  reason: string;
+}
+
+/**
+ * Container label recording device entries that the REAL host rejected at
+ * create time (fallback path in `ensureRunning`): the manager could not
+ * see the path locally, emitted it optimistically, and the runtime failed
+ * the create because the path is missing on the host too. Value is a JSON
+ * array of canonical host paths. `diffContainerConfig` reads it back from
+ * the live container so the reconcile loop doesn't recreate forever over
+ * a bind the host can never satisfy; the exclusion holds only while the
+ * manager still cannot see the path (see `filterUnresolvedDeviceEntries`).
+ */
+export const DEVICES_UNRESOLVED_LABEL = "io.signalk.devices-unresolved";
+
+/** Parse the `DEVICES_UNRESOLVED_LABEL` value; invalid/absent → []. */
+export function parseUnresolvedDevicesLabel(
+  value: string | undefined,
+): string[] {
+  if (!value) return [];
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((p): p is string => typeof p === "string");
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Drop device entries recorded as unresolved on the live container — but
+ * only while the manager STILL cannot see the host path. The moment the
+ * path becomes visible (device plugged in and the path mounted into a
+ * containerized manager, or the manager runs bare-metal), the entry is
+ * kept, the diff sees the live container lacks it, and the normal drift
+ * recreate applies it for real.
+ */
+export function filterUnresolvedDeviceEntries(
+  entries: readonly string[],
+  unresolvedHostPaths: readonly string[],
+  probe: DeviceHostProbe = currentDeviceProbe,
+): string[] {
+  if (unresolvedHostPaths.length === 0) return [...entries];
+  return entries.filter((entry) => {
+    let hostPath: string;
+    try {
+      hostPath = stripTrailingSlashes(parseDeviceEntry(entry).pathOnHost);
+    } catch {
+      return true;
+    }
+    if (!unresolvedHostPaths.includes(hostPath)) return true;
+    return probe.stat(hostPath) !== null;
+  });
 }
 
 /**
@@ -197,6 +272,8 @@ export interface ResolvedDeviceRequests {
   nodes: DeviceNodeSpec[];
   cgroupRules: string[];
   directoryBinds: DeviceDirectoryBind[];
+  /** Per-entry dispositions worth surfacing (skips and unverified emissions). */
+  issues: DeviceRequestIssue[];
 }
 
 /**
@@ -207,6 +284,18 @@ export interface ResolvedDeviceRequests {
  * start. An entry that exists but is neither a device node nor a
  * directory is skipped with a warning too (the runtime would reject it
  * at create time).
+ *
+ * Exception — the optimistic branch: when the manager itself runs inside
+ * a container (`runtime.isContainerized`), its filesystem is NOT the
+ * filesystem the runtime resolves bind sources against, so "the path
+ * does not exist here" proves nothing about the host. A missing path
+ * that is a well-known hot-plug directory is then emitted UNVERIFIED
+ * (bind + class cgroup rule from `WELL_KNOWN_DIRECTORY_MAJORS` — the
+ * exact reason that table exists) and marked `unverified` so the create
+ * path can fall back if the real host rejects it. Non-well-known paths
+ * stay skipped even when containerized: without a stat there is no way
+ * to classify node vs directory, and guessing wrong fails the create on
+ * hosts where the device IS present.
  */
 export function resolveDeviceRequests(
   devices: readonly string[],
@@ -217,14 +306,48 @@ export function resolveDeviceRequests(
   const nodes: DeviceNodeSpec[] = [];
   const cgroupRules = new Set<string>();
   const directoryBinds: DeviceDirectoryBind[] = [];
+  const issues: DeviceRequestIssue[] = [];
 
   for (const entry of devices) {
     const spec = parseDeviceEntry(entry);
+    const canonicalHostPath = stripTrailingSlashes(spec.pathOnHost);
     const st = probe.stat(spec.pathOnHost);
     if (st === null) {
-      warn(
-        `Skipping device "${entry}": host path ${spec.pathOnHost} does not exist (device unplugged?)`,
-      );
+      if (
+        runtime.isContainerized === true &&
+        WELL_KNOWN_DIRECTORY_MAJORS[canonicalHostPath] !== undefined
+      ) {
+        const reason =
+          `Device "${entry}" is not visible from inside the Signal K ` +
+          `container; emitting it unverified — the runtime resolves the ` +
+          `bind against the real host, where it may exist`;
+        warn(reason);
+        issues.push({
+          entry,
+          hostPath: canonicalHostPath,
+          disposition: "optimistic",
+          reason,
+        });
+        directoryBinds.push({
+          pathOnHost: spec.pathOnHost,
+          pathInContainer: spec.pathInContainer,
+          unverified: true,
+        });
+        if (runtime.isRootless !== true) {
+          for (const major of directoryDeviceMajors(spec.pathOnHost, probe)) {
+            cgroupRules.add(`c ${major}:* rwm`);
+          }
+        }
+        continue;
+      }
+      const reason = `Skipping device "${entry}": host path ${spec.pathOnHost} does not exist (device unplugged?)`;
+      warn(reason);
+      issues.push({
+        entry,
+        hostPath: canonicalHostPath,
+        disposition: "skipped",
+        reason,
+      });
       continue;
     }
     if (st.kind === "device-node") {
@@ -243,12 +366,22 @@ export function resolveDeviceRequests(
       }
       continue;
     }
-    warn(
-      `Skipping device "${entry}": ${spec.pathOnHost} is neither a device node nor a directory`,
-    );
+    const reason = `Skipping device "${entry}": ${spec.pathOnHost} is neither a device node nor a directory`;
+    warn(reason);
+    issues.push({
+      entry,
+      hostPath: canonicalHostPath,
+      disposition: "skipped",
+      reason,
+    });
   }
 
-  return { nodes, cgroupRules: [...cgroupRules].sort(), directoryBinds };
+  return {
+    nodes,
+    cgroupRules: [...cgroupRules].sort(),
+    directoryBinds,
+    issues,
+  };
 }
 
 /**

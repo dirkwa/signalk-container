@@ -78,6 +78,17 @@ export interface ContainerRuntimeInfo {
    */
   socketPath?: string;
   /**
+   * Whether the Signal K server process itself runs inside a container
+   * (same detection as the doctor's `isContainerized`). Captured at
+   * runtime-detection time because device emission needs it: a
+   * containerized manager's filesystem is not the filesystem the runtime
+   * resolves device paths against, so `resolveDeviceRequests` treats
+   * "path missing locally" differently there (see the optimistic branch
+   * in `devices.ts`). `undefined` (older callers, tests) means
+   * bare-metal semantics.
+   */
+  isContainerized?: boolean;
+  /**
    * @deprecated Superseded by `socketPath`. Never populated since the
    * dockerode socket port (the `--remote --url` CLI fallback it described
    * no longer exists). Kept as an optional field for one release so
@@ -808,6 +819,36 @@ export interface VolumeIssue {
 }
 
 /**
+ * One device-passthrough event delivered to
+ * `EnsureRunningOptions.onDeviceIssue`. Same callback contract as
+ * `VolumeIssue`; switch on `action` to dispatch.
+ */
+export interface DeviceIssue {
+  /** The original `ContainerConfig.devices` entry string. */
+  entry: string;
+  /** Canonical host path the entry parsed to. */
+  hostPath: string;
+  /**
+   * What signalk-container did about this device entry:
+   *   - `'skipped'`: the host path was missing (probe-visible) at create
+   *     time; the entry was dropped and the container starts without it.
+   *   - `'optimistic'`: the manager runs containerized and could not see
+   *     the path locally; the entry was emitted unverified for the
+   *     runtime to resolve against the real host.
+   *   - `'unresolved'`: an optimistic entry was rejected by the runtime —
+   *     the path is missing on the real host too. The container was
+   *     recreated without it and carries `DEVICES_UNRESOLVED_LABEL`; the
+   *     entry is retried on the next recreate (or as soon as the manager
+   *     can see the path). Fires at create time and again on every
+   *     reconcile of a container still carrying the label, so state
+   *     survives Signal K restarts.
+   */
+  action: "skipped" | "optimistic" | "unresolved";
+  /** Human-readable explanation; safe to surface in `setPluginStatus`. */
+  reason: string;
+}
+
+/**
  * Event delivered to `EnsureRunningOptions.onUlimitClamped` when a
  * requested ulimit had to be lowered to what the host can actually grant.
  * Currently only `nofile` is clamped (a rootless container cannot exceed
@@ -880,6 +921,20 @@ export interface EnsureRunningOptions extends HealthCheckOptions {
    * lifecycle path otherwise.
    */
   onUlimitClamped?: (event: UlimitClamp) => void | Promise<void>;
+
+  /**
+   * Called once per device entry that hit a passthrough event during
+   * this `ensureRunning` call — see `DeviceIssue.action` for the three
+   * dispositions. `'skipped'`/`'optimistic'` fire only when the call
+   * actually creates a container; `'unresolved'` additionally re-fires
+   * on reconciles of a live container carrying
+   * `DEVICES_UNRESOLVED_LABEL`.
+   *
+   * Same handler contract as `onVolumeIssue`: sync or async, fire-and-
+   * forget, errors caught and logged at error level, kept off the
+   * lifecycle path otherwise.
+   */
+  onDeviceIssue?: (event: DeviceIssue) => void | Promise<void>;
 
   /**
    * Called for every line the managed container writes to stdout
@@ -1428,6 +1483,28 @@ export interface SelfDeploymentResult {
     /** See `user` for the matching rule. */
     enabled: boolean;
     /** Operator-facing remediation; empty when `enabled` is true. */
+    advice: string[];
+  } | null;
+  /**
+   * Device-passthrough state of the managed containers. Unlike the other
+   * sections this is NOT probed by `selfDeployment` itself — it is
+   * grafted in by the plugin API layer from the `DeviceIssue` events of
+   * the most recent `ensureRunning` calls (the doctor probe has no view
+   * into per-container config). Advisory only — does not escalate
+   * `status`. `null`/absent when no managed container reported a device
+   * issue, or when the probe ran outside the plugin API (stub doctor,
+   * unit tests, pre-start, payloads from older servers).
+   */
+  devicePassthrough?: {
+    issues: Array<{
+      /** Unprefixed managed-container name (the `ensureRunning` name). */
+      container: string;
+      entry: string;
+      hostPath: string;
+      action: "skipped" | "optimistic" | "unresolved";
+      reason: string;
+    }>;
+    /** Operator-facing remediation lines (mount/plug-in guidance). */
     advice: string[];
   } | null;
   /**

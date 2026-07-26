@@ -389,6 +389,16 @@ export default function DoctorModal({ onClose }: DoctorModalProps) {
                 />
               )}
 
+              {result.devicePassthrough &&
+                result.devicePassthrough.issues.map((issue) => (
+                  <Row
+                    key={`${issue.container}:${issue.hostPath}:${issue.action}`}
+                    label={`Device (${issue.container})`}
+                    value={`${issue.hostPath} ${issue.action}`}
+                    missing={issue.action !== "optimistic"}
+                  />
+                ))}
+
               <div style={S.sectionLabel}>Remediation</div>
               {result.remediation.length > 0 ? (
                 <pre style={S.pre}>{result.remediation.join("\n")}</pre>
@@ -412,6 +422,16 @@ export default function DoctorModal({ onClose }: DoctorModalProps) {
                   <pre style={S.pre}>{result.linger.advice.join("\n")}</pre>
                 </>
               )}
+
+              {result.devicePassthrough &&
+                result.devicePassthrough.advice.length > 0 && (
+                  <>
+                    <div style={S.sectionLabel}>Device passthrough advice</div>
+                    <pre style={S.pre}>
+                      {result.devicePassthrough.advice.join("\n")}
+                    </pre>
+                  </>
+                )}
 
               <button
                 type="button"
