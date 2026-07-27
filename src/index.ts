@@ -37,6 +37,10 @@ import {
 } from "./resources.js";
 import { detectRuntime, isContainerized, setDisableUserns } from "./runtime.js";
 import { setNamespace, resetNamespace } from "./namespace.js";
+import {
+  makeDegradationEmitter,
+  type NotificationApp,
+} from "./notifications.js";
 import { resetClient } from "./client.js";
 import {
   classifyVolumeSources,
@@ -130,6 +134,20 @@ interface App {
     configuration: object,
     cb: (err: NodeJS.ErrnoException | null) => void,
   ) => void;
+  /**
+   * Managed-notification API (SignalK server ≥ 2.30.0). `raise` returns a
+   * NotificationId that `clear` later removes. Reuses
+   * `NotificationApp["notifications"]` (defined in `./notifications.js`) as
+   * the single source of truth for the shape, so the plugin and the emitter
+   * can't drift — e.g. one sprouting a `method` field the other lacks
+   * (deliberately absent: the emitter states severity only, the server's
+   * NotificationManager owns presentation, RFC notification-handling §6.1).
+   * That shape is declared locally rather than imported from
+   * `@signalk/server-api` because the pinned type (2.24.0) doesn't yet
+   * expose `raise`/`clear` — the running server does. Optional, so an older
+   * server (where it is undefined) degrades to the existing surfacing.
+   */
+  notifications?: NotificationApp["notifications"];
   [key: string]: unknown;
 }
 
@@ -140,6 +158,8 @@ interface App {
  */
 const SSE_HEARTBEAT_MS = 30_000;
 
+const HEALTH_POLL_MS = 60_000;
+
 // `DEFAULT_KEEP_IMAGE_VERSIONS` and `normalizeKeepImageVersions` live in
 // `./configNormalize.js` so the backend and the React config panel share
 // one contract — a browser-safe module with no node-only imports.
@@ -149,8 +169,47 @@ export default (app: App) => {
   let runtimePreference: RuntimePreference = "auto";
   let pruneScheduler: PruneScheduler | null = null;
   const healthTimers = new Map<string, NodeJS.Timeout>();
+  // Guards against overlapping health polls per container: a slow check must
+  // not race a later one and overwrite the emitter's edge-triggered health
+  // state out of order.
+  const healthPollsInFlight = new Set<string>();
   let updateService: UpdateService | null = null;
   let manifestStore: ManifestStore | null = null;
+
+  // Degradation notifications (notifications.container.*) — see
+  // src/notifications.ts. Additive: a parallel channel next to the existing
+  // log / plugin-status / consumer-callback surfacing. Enabled state is set
+  // from config in start(); until then it defaults on.
+  const degradation = makeDegradationEmitter(app);
+
+  // Commit the device issues of an ensureRunning transition to
+  // lastDeviceIssues AND mirror the `unresolved` subset onto the
+  // deviceUnresolved notification, so the doctor state and the notification
+  // can never diverge. Called from all three commit sites (initial,
+  // recreate, rollback).
+  const commitDeviceIssues = (name: string, issues: DeviceIssue[]): void => {
+    if (issues.length > 0) lastDeviceIssues.set(name, issues);
+    else lastDeviceIssues.delete(name);
+    degradation.syncDeviceIssues(name, issues);
+  };
+
+  // Raise/clear the host-level deploymentDegraded notification off a doctor
+  // result. Shared by both start() branches — runtime-detection failure
+  // (no-runtime / socket-unreachable) and the runtime-up-but-host-degraded
+  // recheck — so every dashboard-error status is covered identically.
+  const surfaceDeploymentDoctor = (doctor: SelfDeploymentResult): void => {
+    if (isDashboardDeploymentError(doctor.status)) {
+      degradation.raise(
+        "deploymentDegraded",
+        "",
+        "warn",
+        headlineForDoctorStatus(doctor.status),
+        { status: doctor.status, remediation: doctor.remediation },
+      );
+    } else {
+      degradation.clear("deploymentDegraded", "");
+    }
+  };
 
   /**
    * Build the reaper's view of managed images: every container recorded
@@ -488,6 +547,21 @@ export default (app: App) => {
     }
     perCallOnContainerLogUnsub.delete(name);
     lastDeviceIssues.delete(name);
+    // Stop the health-check timer for the removed container — otherwise it
+    // keeps firing pollHealth against a container that no longer exists,
+    // re-raising the unhealthy notification we clear just below every 60s
+    // with no unhealthy→healthy edge left to clear it again.
+    const healthTimer = healthTimers.get(name);
+    if (healthTimer) {
+      clearInterval(healthTimer);
+      healthTimers.delete(name);
+    }
+    healthPollsInFlight.delete(name);
+    // A removed container's degradation alerts must not linger.
+    degradation.clear("unhealthy", name);
+    degradation.clear("deviceUnresolved", name);
+    degradation.clear("volumeAborted", name);
+    degradation.forgetContainer(name);
   }
 
   const effectiveResources = new Map<string, ContainerResourceLimits>();
@@ -1039,6 +1113,18 @@ export default (app: App) => {
         // action: "recovered" for these entries. Without this, the
         // first-time abort would have no prior record to recover from.
         lastVolumeIssues.set(name, { skipped, aborted });
+        // clear-then-raise so a changed missing-source list refreshes the
+        // message: raise() is idempotent per key, so without the clear a
+        // second abort with a different `list` would leave the stale message
+        // live (same reason pollHealth/syncDeviceIssues clear first).
+        degradation.clear("volumeAborted", name);
+        degradation.raise(
+          "volumeAborted",
+          name,
+          "alert",
+          `${name}: required volume source(s) missing: ${list}`,
+          { aborted },
+        );
         throw new Error(
           `ensureRunning(${name}): required host paths missing for volumes: ${list}`,
         );
@@ -1131,9 +1217,12 @@ export default (app: App) => {
       effectiveResources.set(name, filteredMerged);
       // Commit device events the same way: a quiet call means the
       // container is running with everything it asked for — clear any
-      // stale doctor state from earlier calls.
-      if (deviceIssues.length > 0) lastDeviceIssues.set(name, deviceIssues);
-      else lastDeviceIssues.delete(name);
+      // stale doctor state (and the deviceUnresolved notification) from
+      // earlier calls.
+      commitDeviceIssues(name, deviceIssues);
+      // Reaching here means the container started with nothing aborted, so
+      // clear any prior volumeAborted alert (the missing source reappeared).
+      degradation.clear("volumeAborted", name);
 
       // Commit port-address mappings only after the container has been
       // successfully started.  Populating portAddressMap before this
@@ -1396,16 +1485,16 @@ export default (app: App) => {
             ),
           );
         };
-        const timer = setInterval(async () => {
-          try {
-            const ok = await options.healthCheck!();
-            if (!ok) {
-              surfaceUnhealthy("Health check returned false");
-            }
-          } catch (err) {
-            surfaceUnhealthy(err instanceof Error ? err.message : String(err));
-          }
-        }, 60000);
+        const timer = setInterval(() => {
+          // Skip if the previous poll for this container is still running,
+          // so a slow health check can't race a later one and clobber the
+          // emitter's edge-triggered health state out of order.
+          if (healthPollsInFlight.has(name)) return;
+          healthPollsInFlight.add(name);
+          void degradation
+            .pollHealth(name, options.healthCheck!, surfaceUnhealthy)
+            .finally(() => healthPollsInFlight.delete(name));
+        }, HEALTH_POLL_MS);
         healthTimers.set(name, timer);
       }
     },
@@ -1780,11 +1869,7 @@ export default (app: App) => {
           (msg) => app.debug(msg),
           { onDeviceIssue: recreateCollector.onDeviceIssue },
         );
-        if (recreateCollector.issues.length > 0) {
-          lastDeviceIssues.set(name, recreateCollector.issues);
-        } else {
-          lastDeviceIssues.delete(name);
-        }
+        commitDeviceIssues(name, recreateCollector.issues);
       } catch (recreateErr) {
         // Recreate failed — the container is gone or in a bad state.
         // Try to roll back to the previous config so the consumer
@@ -1810,11 +1895,7 @@ export default (app: App) => {
             (msg) => app.debug(msg),
             { onDeviceIssue: rollbackCollector.onDeviceIssue },
           );
-          if (rollbackCollector.issues.length > 0) {
-            lastDeviceIssues.set(name, rollbackCollector.issues);
-          } else {
-            lastDeviceIssues.delete(name);
-          }
+          commitDeviceIssues(name, rollbackCollector.issues);
           // Rollback succeeded — internal state is unchanged. Throw a
           // wrapper that carries the original recreate error as `cause`
           // so callers can introspect the underlying podman failure.
@@ -2062,6 +2143,13 @@ export default (app: App) => {
           description:
             "Suppress the rootless-Podman --userns=keep-id flag for every managed container. Enable on hosts whose backing filesystem cannot be id-mapped by the kernel (ZFS is the common case; symptom is 'crun: writing file /proc/.../gid_map: Invalid argument' on container create). Bind-mount file ownership still lands on the host caller for root-by-default images. Leave off unless you actually see the error.",
         },
+        emitDegradationNotifications: {
+          type: "boolean",
+          default: true,
+          title: "Emit container degradation notifications",
+          description:
+            "Publish SignalK notifications (notifications.container.*) when a managed container is unhealthy, a device the host rejected, a required volume source is missing, or the container-runtime deployment is degraded. Severity is warn (or alert for a missing required volume) — visual only, no audible alarm. Requires a SignalK server that exposes the managed-notification API (>= 2.30.0); no effect on older servers. Turn off if you don't want these on the notification bus.",
+        },
         containerOverrides: {
           type: "object" as const,
           title: "Per-container resource overrides",
@@ -2123,6 +2211,8 @@ export default (app: App) => {
       // when persisting a new override via savePluginOptions. Shallow
       // copy to avoid mutating the caller's object.
       currentConfig = { ...config };
+      // Degradation notifications default on; a stored `false` opts out.
+      degradation.setEnabled(config.emitDegradationNotifications !== false);
       // Cache user-supplied per-container resource overrides. These
       // are merged into every ensureRunning() call so consumer
       // plugins automatically pick them up. The user can edit them
@@ -2238,6 +2328,7 @@ export default (app: App) => {
               `signalk-container deployment doctor — ${headline}:\n${doctor.remediation.join("\n")}`,
             );
           }
+          surfaceDeploymentDoctor(doctor);
           localResolveReady();
           return;
         }
@@ -2273,6 +2364,10 @@ export default (app: App) => {
             );
           }
         }
+        // Raise/clear the deployment notification for BOTH the degraded and
+        // the healthy case (a prior start's alert clears when the host
+        // recovers). Shared with the no-runtime branch above.
+        surfaceDeploymentDoctor(doctor);
 
         if (config.pruneSchedule && config.pruneSchedule !== "off") {
           const intervalMs =
@@ -2334,6 +2429,14 @@ export default (app: App) => {
         clearInterval(timer);
       }
       healthTimers.clear();
+      healthPollsInFlight.clear();
+      // Clear every outstanding degradation notification so a plugin stop
+      // doesn't strand alerts on the bus, then drop the tracking state.
+      degradation.reset();
+      // The doctor's devicePassthrough section reads lastDeviceIssues; clear
+      // it too so a restart can't expose a prior run's stale device issues
+      // before any new ensureRunning() commits fresh state.
+      lastDeviceIssues.clear();
       if (updateService) {
         updateService.stop();
         updateService = null;
@@ -2357,6 +2460,10 @@ export default (app: App) => {
       // omits the flag (older saved config) does not inherit the
       // previous run's toggle.
       setDisableUserns(false);
+      // NOTE: do NOT re-enable the emitter here. degradation.reset() (above)
+      // left it disabled so a late raise() from an in-flight startup step
+      // can't strand a notification after stop(). The next start() re-enables
+      // it from config via degradation.setEnabled(...).
       // Restore the default namespace symmetrically; start() re-reads the
       // env var, so this only matters as a defensive reset.
       resetNamespace();

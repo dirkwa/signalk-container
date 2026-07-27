@@ -141,6 +141,16 @@ Invariants:
 
 Discoverability — `selfDeployment().containerStorage` reports the filesystem backing the rootless-Podman storage root and emits `advice` lines when the filesystem is in `IDMAP_HAZARD_FSTYPES`. Advisory only; never escalates `status`.
 
+### Degradation notifications (`notifications.container.*`)
+
+`src/notifications.ts` (`makeDegradationEmitter`) publishes SignalK notifications for four managed-container degradation conditions, via the server's `app.notifications.raise()`/`clear()` API. Wired into the `src/index.ts` wrapper.
+
+- **Conditions → path → state**: unhealthy → `notifications.container.<name>.unhealthy` `warn`; host-rejected device (`DeviceIssue` action `unresolved`) → `.deviceUnresolved` `warn`; missing required volume (`ifMissing:'abort'`) → `.volumeAborted` `alert`; degraded runtime deployment (`isDashboardDeploymentError`) → the host-level `notifications.container.deployment` `warn`. Paths use the **unprefixed** container name (the notification bus is per-server, so the container-name namespace buys nothing here) and `idInPath:false` (stable, addressable, updates in place — plus the tracked id is what `clear` needs).
+- **Additive, never a replacement.** Every site keeps its existing log / `setPluginError` / consumer-callback surfacing; the notification is a parallel channel. Do not remove the old surfacing when touching these sites.
+- **Two gates**: the `emitDegradationNotifications` config toggle (default **on**) and the server exposing `app.notifications` (≥ 2.30.0). The pinned `@signalk/server-api` (2.24.0) does NOT declare `raise`/`clear`, so the `App` interface declares a local minimal shape (like `handleMessage?`/`config?`) and the emitter no-ops when `app.notifications` is absent — older servers degrade to the existing surfacing, never throw.
+- **NO `method`.** The emitter states severity only; the NotificationManager owns presentation (RFC notification-handling §6.1). The `raise` option type deliberately omits `method` so the `updates/service.ts` `handleMessage`+`method:["visual"]` pattern (a separate, older emitter on `notifications.plugins.<id>.updateAvailable`) can't be copied here.
+- **Recovery/clear**: unhealthy is edge-triggered (raise on healthy→unhealthy, clear on unhealthy→healthy) via per-container health tracking in `pollHealth`; deviceUnresolved raises/clears off the `unresolved` subset each commit (`syncDeviceIssues`, called from all three `commitDeviceIssues` sites); volumeAborted clears unconditionally on any successful `ensureRunning` (reaching the success commit means nothing aborted); deployment clears on a subsequent start that finds the host `ok`. `afterContainerRemoved` clears the three per-container conditions; `stop()` calls `degradation.reset()` (clears all outstanding + drops state), mirroring the `resetNamespace`/`setDisableUserns` lifecycle.
+
 ### Auto-recreate on config drift
 
 `ensureRunning` compares the requested `ContainerConfig` against the live container's effective config on every call. On drift across `image+tag`, `command`, `networkMode`, `env`, `volumes`, or `ports`, it removes and recreates the container transparently. `resources` follows the existing live-update path. Consumer plugins do not need (and should remove) per-plugin `${dataDir}.container-hash` files — this is centralized.
