@@ -37,7 +37,10 @@ import {
 } from "./resources.js";
 import { detectRuntime, isContainerized, setDisableUserns } from "./runtime.js";
 import { setNamespace, resetNamespace } from "./namespace.js";
-import { makeDegradationEmitter } from "./notifications.js";
+import {
+  makeDegradationEmitter,
+  type NotificationApp,
+} from "./notifications.js";
 import { resetClient } from "./client.js";
 import {
   classifyVolumeSources,
@@ -142,16 +145,9 @@ interface App {
    * states severity only; the server's NotificationManager owns
    * presentation (RFC notification-handling §6.1).
    */
-  notifications?: {
-    raise(options: {
-      state: "normal" | "nominal" | "alert" | "warn" | "alarm" | "emergency";
-      message: string;
-      path: string;
-      idInPath?: boolean;
-      data?: unknown;
-    }): string;
-    clear(id: string): void;
-  };
+  // Reuse the emitter's own shape so the two can't drift (e.g. one
+  // sprouting a `method` field the other lacks).
+  notifications?: NotificationApp["notifications"];
   [key: string]: unknown;
 }
 
@@ -1117,6 +1113,11 @@ export default (app: App) => {
         // action: "recovered" for these entries. Without this, the
         // first-time abort would have no prior record to recover from.
         lastVolumeIssues.set(name, { skipped, aborted });
+        // clear-then-raise so a changed missing-source list refreshes the
+        // message: raise() is idempotent per key, so without the clear a
+        // second abort with a different `list` would leave the stale message
+        // live (same reason pollHealth/syncDeviceIssues clear first).
+        degradation.clear("volumeAborted", name);
         degradation.raise(
           "volumeAborted",
           name,

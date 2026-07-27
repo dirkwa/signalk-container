@@ -222,6 +222,13 @@ describe("degradation notifications — e2e against a real runtime", () => {
         /* best effort */
       }
       rmSync(presentSource, { recursive: true, force: true });
+      // Tear this plugin down in-test so it doesn't stay started (and
+      // sharing globalThis.__signalk_containerManager / the dockerode
+      // client / namespace) while tests 2–4 run — otherwise their
+      // local.stop() resets that shared state out from under it and the
+      // suite becomes order-dependent. Null out `booted` so after() skips it.
+      await booted.stop();
+      booted = null;
     }
   });
 
