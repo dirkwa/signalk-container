@@ -27,6 +27,7 @@ function makeNotificationSink() {
   const raised: RaiseCall[] = [];
   const cleared: string[] = [];
   const byId = new Map<string, RaiseCall>();
+  const activeIds = new Set<string>(); // raised and not yet cleared
   let seq = 0;
   return {
     raised,
@@ -36,15 +37,22 @@ function makeNotificationSink() {
         raised.push(o);
         const id = `nid-${seq++}`;
         byId.set(id, o);
+        activeIds.add(id);
         return id;
       },
       clear: (id: string) => {
         cleared.push(id);
+        activeIds.delete(id);
       },
     },
-    // helper: the paths currently "live" (raised and not yet cleared)
+    // Paths of the notifications that have been cleared.
     clearedPaths(): string[] {
-      return this.cleared.map((id) => byId.get(id)?.path ?? id);
+      return cleared.map((id) => byId.get(id)?.path ?? id);
+    },
+    // Paths still outstanding (raised, never cleared) — empty after a clean
+    // teardown.
+    outstandingPaths(): string[] {
+      return [...activeIds].map((id) => byId.get(id)?.path ?? id);
     },
   };
 }
@@ -257,18 +265,29 @@ describe("degradation notifications — e2e against a real runtime", () => {
           volumes: { "/req": { source: missingSource, ifMissing: "abort" } },
         }),
       );
+      const abortedPath =
+        "notifications.container.stop-clear-test.volumeAborted";
       assert.ok(
-        localSink.raised.length >= 1,
-        "a notification should be raised",
+        localSink.outstandingPaths().includes(abortedPath),
+        `volumeAborted should be outstanding before stop(), outstanding=${JSON.stringify(
+          localSink.outstandingPaths(),
+        )}`,
       );
-      const outstanding = localSink.raised.length - localSink.cleared.length;
-      assert.ok(outstanding >= 1, "notification should still be outstanding");
     } finally {
-      await local.stop(); // stop() must clear it (and tear the plugin down)
+      await local.stop(); // stop() must clear every outstanding notification
     }
+    assert.deepEqual(
+      localSink.outstandingPaths(),
+      [],
+      `stop() must clear ALL outstanding notifications, still outstanding=${JSON.stringify(
+        localSink.outstandingPaths(),
+      )}`,
+    );
     assert.ok(
-      localSink.cleared.length >= 1,
-      "stop() must clear outstanding notifications",
+      localSink
+        .clearedPaths()
+        .includes("notifications.container.stop-clear-test.volumeAborted"),
+      "the volumeAborted notification must be among the cleared paths",
     );
   });
 

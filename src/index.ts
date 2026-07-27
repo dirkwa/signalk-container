@@ -136,17 +136,17 @@ interface App {
   ) => void;
   /**
    * Managed-notification API (SignalK server ≥ 2.30.0). `raise` returns a
-   * NotificationId that `clear` later removes. Declared locally with a
-   * minimal shape rather than imported from `@signalk/server-api` because
-   * the pinned type (2.24.0) doesn't yet expose `raise`/`clear` — the
-   * running server does. Optional, so an older server (where it is
-   * undefined) degrades to the existing surfacing (see the degradation-
-   * notification emitter). Deliberately NO `method` field: the emitter
-   * states severity only; the server's NotificationManager owns
-   * presentation (RFC notification-handling §6.1).
+   * NotificationId that `clear` later removes. Reuses
+   * `NotificationApp["notifications"]` (defined in `./notifications.js`) as
+   * the single source of truth for the shape, so the plugin and the emitter
+   * can't drift — e.g. one sprouting a `method` field the other lacks
+   * (deliberately absent: the emitter states severity only, the server's
+   * NotificationManager owns presentation, RFC notification-handling §6.1).
+   * That shape is declared locally rather than imported from
+   * `@signalk/server-api` because the pinned type (2.24.0) doesn't yet
+   * expose `raise`/`clear` — the running server does. Optional, so an older
+   * server (where it is undefined) degrades to the existing surfacing.
    */
-  // Reuse the emitter's own shape so the two can't drift (e.g. one
-  // sprouting a `method` field the other lacks).
   notifications?: NotificationApp["notifications"];
   [key: string]: unknown;
 }
