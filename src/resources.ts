@@ -105,6 +105,19 @@ const FIELDS_THAT_CANNOT_LIVE_UNSET: ReadonlySet<
 > = new Set(["memory", "memorySwap", "memoryReservation", "oomScoreAdj"]);
 
 /**
+ * Fields the container runtime can inject without any user request.
+ * Rootless Podman clamps a child container's `oom_score_adj` up to the
+ * creating process's value (it can only raise, never lower), so a
+ * managed container started under a signalk-server whose own
+ * `oom_score_adj` is non-zero always shows a non-zero `oomScoreAdj`
+ * that nobody asked for. When provenance is unknown, a live value in
+ * this set cannot be attributed to a user request and is not reported
+ * as an unset.
+ */
+const RUNTIME_INJECTED_FIELDS: ReadonlySet<keyof ContainerResourceLimits> =
+  new Set(["oomScoreAdj"]);
+
+/**
  * Compare a snapshot of currently-applied resource limits to a
  * target, and return the list of fields that the target is asking
  * to UNSET (i.e. fields present in `current` but absent or null in
@@ -129,8 +142,14 @@ const FIELDS_THAT_CANNOT_LIVE_UNSET: ReadonlySet<
  * shows a non-zero `oomScoreAdj` in `current` that no plugin ever
  * requested. Without provenance, the diff misreads that artifact as
  * "user wants to unset a limit" and warns on every ensureRunning.
- * Omit `priorRequested` to keep the original current-vs-target
- * behaviour.
+ *
+ * When `priorRequested` is omitted (no provenance at all — the
+ * container predates the requested-resources label and the in-process
+ * cache is cold), the check falls back to plain current-vs-target,
+ * minus `RUNTIME_INJECTED_FIELDS`: a live value the runtime is known
+ * to inject on its own is unattributable and would otherwise warn on
+ * every server start, forever, on deployments where signalk-server
+ * runs with a non-zero `oom_score_adj`.
  */
 export function fieldsRequiringRecreateForUnset(
   current: ContainerResourceLimits,
@@ -141,6 +160,11 @@ export function fieldsRequiringRecreateForUnset(
   for (const field of FIELDS_THAT_CANNOT_LIVE_UNSET) {
     const wasSet = isSet(current[field]);
     const willBeSet = isSet(target[field]);
+    if (priorRequested === undefined && RUNTIME_INJECTED_FIELDS.has(field)) {
+      // No provenance: a live value here may well be runtime-injected
+      // (see RUNTIME_INJECTED_FIELDS), so it can't be read as an unset.
+      continue;
+    }
     if (priorRequested && !isSet(priorRequested[field])) {
       // The field exists only as a runtime artifact (e.g. an inherited
       // oom_score_adj), never a consumer request — not a real unset.
@@ -152,6 +176,52 @@ export function fieldsRequiringRecreateForUnset(
   }
   return result;
 }
+
+/**
+ * Parse a requested-resources provenance label value back into
+ * ContainerResourceLimits. The value crosses a system boundary (it is
+ * read back from container runtime state and could have been written
+ * by anything), so it is validated field by field: unknown keys and
+ * wrong-typed values are dropped, and a value that is not a JSON
+ * object at all yields `undefined` — "no provenance", never a throw.
+ */
+export function parseResourceLimits(
+  raw: string,
+): ContainerResourceLimits | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return undefined;
+  }
+  const source = parsed as Record<string, unknown>;
+  const out: ContainerResourceLimits = {};
+  for (const [field, type] of Object.entries(RESOURCE_LIMIT_VALUE_TYPES)) {
+    const value = source[field];
+    if (typeof value === type) {
+      (out as Record<string, unknown>)[field] = value;
+    }
+  }
+  return out;
+}
+
+/** Expected primitive type per ContainerResourceLimits field. */
+const RESOURCE_LIMIT_VALUE_TYPES: Record<
+  keyof ContainerResourceLimits,
+  "number" | "string"
+> = {
+  cpus: "number",
+  cpuShares: "number",
+  cpusetCpus: "string",
+  memory: "string",
+  memorySwap: "string",
+  memoryReservation: "string",
+  pidsLimit: "number",
+  oomScoreAdj: "number",
+};
 
 function isSet(v: unknown): boolean {
   return v !== undefined && v !== null;

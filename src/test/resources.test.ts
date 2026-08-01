@@ -6,6 +6,7 @@ import {
   mergeResourceLimits,
   minimizeOverride,
   parseMemoryToBytes,
+  parseResourceLimits,
   resourcePayloadForRun,
   resourcePayloadForUpdate,
   resourceLimitsEqual,
@@ -621,9 +622,13 @@ describe("fieldsRequiringRecreateForUnset (Bug E)", () => {
     assert.deepEqual(result, ["memory"]);
   });
 
-  it("returns ['oomScoreAdj'] when oom-score-adj is being unset", () => {
+  it("suppresses oomScoreAdj without provenance (runtime-injected)", () => {
+    // 2-arg form = no provenance at all. A live oomScoreAdj may well be
+    // the value rootless podman clamps onto every child of a non-zero
+    // oom_score_adj server process — unattributable, so never reported
+    // as an unset (#216).
     const result = fieldsRequiringRecreateForUnset({ oomScoreAdj: 500 }, {});
-    assert.deepEqual(result, ["oomScoreAdj"]);
+    assert.deepEqual(result, []);
   });
 
   it("returns multiple fields when several are being unset", () => {
@@ -636,6 +641,13 @@ describe("fieldsRequiringRecreateForUnset (Bug E)", () => {
         cpus: 1.5,
       },
       { cpus: 2.0 },
+      {
+        memory: "512m",
+        memorySwap: "512m",
+        memoryReservation: "256m",
+        oomScoreAdj: 500,
+        cpus: 1.5,
+      },
     );
     // All four memory/oom fields are being unset
     assert.equal(result.length, 4);
@@ -659,15 +671,15 @@ describe("fieldsRequiringRecreateForUnset (Bug E)", () => {
     assert.deepEqual(result, []);
   });
 
-  it("backward-compat (2-arg, no provenance): removing oomScoreAdj while keeping cpus/memory", () => {
-    // The 2-arg form keeps the original current-vs-target behaviour. Real
-    // call sites now pass a 3rd `priorRequested` arg; the provenance-aware
-    // equivalent of this scenario is covered below.
+  it("2-arg, no provenance: memory unset still flagged, oomScoreAdj suppressed", () => {
+    // Without provenance the memory family keeps the original
+    // current-vs-target behaviour (a stale cap is a real constraint worth
+    // surfacing), while oomScoreAdj is treated as runtime-injected.
     const result = fieldsRequiringRecreateForUnset(
       { cpus: 1.5, memory: "512m", memorySwap: "512m", oomScoreAdj: 500 },
-      { cpus: 1.5, memory: "512m", memorySwap: "512m" },
+      { cpus: 1.5, memorySwap: "512m" },
     );
-    assert.deepEqual(result, ["oomScoreAdj"]);
+    assert.deepEqual(result, ["memory"]);
   });
 
   it("does not mutate either input", () => {
@@ -720,10 +732,16 @@ describe("fieldsRequiringRecreateForUnset (Bug E)", () => {
       assert.deepEqual(result, ["memory"]);
     });
 
-    it("matches the no-provenance behaviour when priorRequested is omitted", () => {
+    it("suppresses oomScoreAdj alike whether provenance says {} or is absent", () => {
+      // Explicit empty provenance and no provenance both mean "nobody
+      // requested oomScoreAdj" for a live runtime-injected value.
+      assert.deepEqual(
+        fieldsRequiringRecreateForUnset({ oomScoreAdj: 200 }, {}, {}),
+        [],
+      );
       assert.deepEqual(
         fieldsRequiringRecreateForUnset({ oomScoreAdj: 200 }, {}),
-        ["oomScoreAdj"],
+        [],
       );
     });
 
@@ -752,11 +770,12 @@ describe("fieldsRequiringRecreateForUnset (Bug E)", () => {
       assert.deepEqual(result, ["memory"]);
     });
 
-    it("ensureRunning cold cache (priorConfig undefined): falls back to current-vs-live", () => {
-      // On the first ensureRunning of a process, priorConfig is undefined,
-      // so the call site passes priorRequested=undefined. Provenance is
-      // unknown — a pre-existing container may carry a stale cap the new
-      // config removes — so a real memory unset must still be flagged.
+    it("ensureRunning no provenance at all: current-vs-live minus runtime-injected", () => {
+      // Reached only when priorConfig is undefined (first ensureRunning of
+      // the process) AND the container predates the requested-resources
+      // label. Provenance is unknown — a pre-existing container may carry
+      // a stale cap the new config removes — so a real memory unset must
+      // still be flagged.
       const memUnset = fieldsRequiringRecreateForUnset(
         { cpus: 1.5, memory: "1g" },
         { cpus: 1.5 },
@@ -764,15 +783,15 @@ describe("fieldsRequiringRecreateForUnset (Bug E)", () => {
       );
       assert.deepEqual(memUnset, ["memory"]);
 
-      // The cost of unknown provenance: an inherited oomScoreAdj is also
-      // flagged once, until the cache warms on the next call and the
-      // provenance guard kicks in.
+      // An unattributable oomScoreAdj, however, is treated as the
+      // rootless-podman inheritance artifact and never flagged — it used
+      // to warn once per container on every server start (#216).
       const oomCold = fieldsRequiringRecreateForUnset(
         { cpus: 1.5, oomScoreAdj: 200 },
         { cpus: 1.5 },
         undefined,
       );
-      assert.deepEqual(oomCold, ["oomScoreAdj"]);
+      assert.deepEqual(oomCold, []);
     });
   });
 });
@@ -883,5 +902,39 @@ describe("minimizeOverride (Bug Z: snapshot-override noise)", () => {
       minimizeOverride({ cpusetCpus: "0,1" }, { cpusetCpus: "0,1" }),
       {},
     );
+  });
+});
+
+describe("parseResourceLimits", () => {
+  it("round-trips a typical limits object", () => {
+    const limits = { cpus: 1.5, memory: "512m", oomScoreAdj: 500 };
+    assert.deepEqual(parseResourceLimits(JSON.stringify(limits)), limits);
+  });
+
+  it("parses '{}' as definite empty provenance, not unknown", () => {
+    assert.deepEqual(parseResourceLimits("{}"), {});
+  });
+
+  it("returns undefined on malformed JSON", () => {
+    assert.equal(parseResourceLimits("{nope"), undefined);
+  });
+
+  it("returns undefined on non-object JSON", () => {
+    assert.equal(parseResourceLimits('"512m"'), undefined);
+    assert.equal(parseResourceLimits("42"), undefined);
+    assert.equal(parseResourceLimits("null"), undefined);
+    assert.equal(parseResourceLimits('["memory"]'), undefined);
+  });
+
+  it("drops unknown keys and wrong-typed values", () => {
+    const result = parseResourceLimits(
+      JSON.stringify({
+        memory: "512m",
+        cpus: "1.5", // wrong type: string where number expected
+        oomScoreAdj: null, // null = unset; dropped
+        bogus: true, // unknown key
+      }),
+    );
+    assert.deepEqual(result, { memory: "512m" });
   });
 });
