@@ -1,6 +1,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { ensureRunning } from "../containers.js";
+import { requestedResourcesLabel } from "../namespace.js";
 import { _setCurrentHostIdsForTesting } from "../runtime.js";
 import type { ContainerConfig, ContainerRuntimeInfo } from "../types.js";
 import { makeMockClient } from "./helpers/mockClient.js";
@@ -528,7 +529,7 @@ describe("ensureRunning — buildCreateOptions ownership", () => {
     );
   });
 
-  it("emits no Labels when config.labels is unset", async () => {
+  it("emits only the provenance label when config.labels is unset", async () => {
     const cap = captureCreateOnMissing({
       image: "questdb/questdb",
       tag: "9.0.0",
@@ -536,6 +537,10 @@ describe("ensureRunning — buildCreateOptions ownership", () => {
     await cap.run();
     const payload = cap.payload();
     assert.ok(payload);
-    assert.equal(payload.Labels, undefined, "Labels should not be set");
+    // The requested-resources provenance label is always stamped; no
+    // consumer labels means nothing else.
+    assert.deepEqual(payload.Labels, {
+      [requestedResourcesLabel()]: "{}",
+    });
   });
 });

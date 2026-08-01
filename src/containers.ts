@@ -45,8 +45,8 @@ import {
   unresolvedGroupNames,
   type DeviceNodeSpec,
 } from "./devices.js";
-import { resourcePayloadForRun } from "./resources.js";
-import { containerPrefix } from "./namespace.js";
+import { parseResourceLimits, resourcePayloadForRun } from "./resources.js";
+import { containerPrefix, requestedResourcesLabel } from "./namespace.js";
 import { classifyTag } from "./updates/tagClassifier.js";
 import { compareVersions } from "./updates/semver.js";
 import { isOfflineError } from "./updates/offline.js";
@@ -1008,6 +1008,33 @@ export async function getLiveResources(
   }
 
   return out;
+}
+
+/**
+ * Requested-resource-limits provenance for a managed container, read
+ * back from the label `buildCreateOptions` stamps at create time.
+ *
+ * Returns the limits the consumer requested when the container was
+ * created (`{}` when it was created with none), or `undefined` when no
+ * provenance exists — the container is missing, predates the label, or
+ * the label doesn't parse. Callers treat `undefined` as "unknown":
+ * `fieldsRequiringRecreateForUnset` then falls back to the plain
+ * current-vs-target check minus runtime-injected fields.
+ */
+export async function getRequestedResources(
+  name: string,
+  client: ContainerClient = getClient(),
+): Promise<import("./types.js").ContainerResourceLimits | undefined> {
+  const info = await safeInspect(() =>
+    client.getContainer(prefixedName(name)).inspect(),
+  );
+  const labels = (
+    info?.Config as
+      { Labels?: Record<string, unknown> | null } | null | undefined
+  )?.Labels;
+  const raw = labels?.[requestedResourcesLabel()];
+  if (typeof raw !== "string") return undefined;
+  return parseResourceLimits(raw);
 }
 
 /**
@@ -2188,7 +2215,17 @@ function buildCreateOptions(
   // Container labels. Informational only — not part of drift detection.
   // dockerode takes Labels as a native object; values are NOT
   // percent-encoded (unlike the old CLI --label path).
-  if (config.labels) options.Labels = { ...config.labels };
+  //
+  // The requested-resources provenance label records what the consumer
+  // asked for at create time — read back by getRequestedResources()
+  // when a fresh server process has no in-memory provenance, so a
+  // runtime-injected limit (rootless podman clamps a child's
+  // oom_score_adj up to its parent's) is never misread as a user
+  // unset. Stamped after the consumer labels so it can't be shadowed.
+  options.Labels = {
+    ...config.labels,
+    [requestedResourcesLabel()]: JSON.stringify(config.resources ?? {}),
+  };
 
   // Healthcheck. An explicit override wins over the image's own
   // HEALTHCHECK; we always emit it ourselves rather than relying on

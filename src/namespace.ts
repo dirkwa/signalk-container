@@ -100,3 +100,12 @@ export function jobOwnerLabel(): string {
 export function jobNameLabel(): string {
   return `${namespace}-job-label`;
 }
+
+/**
+ * Requested-resource-limits provenance label key on managed containers.
+ * Stamped at create time so a fresh server process can tell a
+ * runtime-injected limit from one a consumer actually requested.
+ */
+export function requestedResourcesLabel(): string {
+  return `${namespace}-requested-resources`;
+}
