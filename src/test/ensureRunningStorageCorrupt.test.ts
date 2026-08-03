@@ -3,7 +3,13 @@ import assert from "node:assert/strict";
 import { ensureRunning } from "../containers.js";
 import { _setCurrentHostIdsForTesting } from "../runtime.js";
 import type { ContainerConfig, ContainerRuntimeInfo } from "../types.js";
-import { makeMockClient, httpError } from "./helpers/mockClient.js";
+import {
+  makeMockClient,
+  httpError,
+  storageCorrupt500 as corrupt500,
+  HTTP_NOT_FOUND,
+  HTTP_INTERNAL_SERVER_ERROR,
+} from "./helpers/mockClient.js";
 
 const docker: ContainerRuntimeInfo = {
   runtime: "docker",
@@ -26,15 +32,6 @@ const requested: ContainerConfig = {
   env: { FOO: "2" },
 };
 
-/** The inspect failure from issue #219, as docker-modem delivers it. */
-function corrupt500(): Error {
-  return httpError(
-    '(HTTP code 500) server error - getting graph driver info "abc123": ' +
-      "readlink /home/u/.local/share/containers/storage/overlay: invalid argument ",
-    500,
-  );
-}
-
 describe("ensureRunning — corrupt container storage (issue #219)", () => {
   it("removes the corrupt container and recreates it", async () => {
     // Scenario: power loss zero-truncated the container layer's overlay
@@ -47,7 +44,9 @@ describe("ensureRunning — corrupt container storage (issue #219)", () => {
         "sk-questdb": {
           inspect: () =>
             Promise.reject(
-              removed ? httpError("no such container", 404) : corrupt500(),
+              removed
+                ? httpError("no such container", HTTP_NOT_FOUND)
+                : corrupt500(),
             ),
           remove: () => {
             removed = true;
@@ -186,7 +185,10 @@ describe("ensureRunning — corrupt container storage (issue #219)", () => {
         "sk-questdb": {
           inspect: () =>
             Promise.reject(
-              httpError("(HTTP code 500) server error - something else ", 500),
+              httpError(
+                "(HTTP code 500) server error - something else ",
+                HTTP_INTERNAL_SERVER_ERROR,
+              ),
             ),
         },
       },

@@ -105,14 +105,14 @@ const STORAGE_CORRUPT_PATTERN_GROUPS = [
   [/layer not known/i],
 ];
 
+const HTTP_NOT_FOUND = 404;
+const HTTP_INTERNAL_SERVER_ERROR = 500;
+
 /**
  * Pull a status code off a dockerode error when present. dockerode attaches
  * `statusCode` (HTTP status from the daemon) to the errors it throws; we use it
  * to classify 404 → not-found cheaply before falling back to message matching.
  */
-const HTTP_NOT_FOUND = 404;
-const HTTP_INTERNAL_SERVER_ERROR = 500;
-
 function statusCodeOf(err: unknown): number | undefined {
   if (typeof err !== "object" || err === null) return undefined;
   const code = (err as { statusCode?: unknown }).statusCode;

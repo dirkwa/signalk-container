@@ -2,21 +2,16 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { collectManagedImageRefs } from "../containers.js";
 import type { ContainerRuntimeInfo } from "../types.js";
-import { makeMockClient, httpError } from "./helpers/mockClient.js";
+import {
+  makeMockClient,
+  storageCorrupt500 as corrupt500,
+} from "./helpers/mockClient.js";
 
 const docker: ContainerRuntimeInfo = {
   runtime: "docker",
   version: "27.0.0",
   isPodmanDockerShim: false,
 };
-
-function corrupt500(): Error {
-  return httpError(
-    '(HTTP code 500) server error - getting graph driver info "abc123": ' +
-      "readlink /home/u/.local/share/containers/storage/overlay: invalid argument ",
-    500,
-  );
-}
 
 const manifests: Array<{ containers: Record<string, { image: string }> }> = [
   { containers: { questdb: { image: "questdb/questdb" } } },

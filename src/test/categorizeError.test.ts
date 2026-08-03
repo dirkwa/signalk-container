@@ -1,7 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { categorizeError, isStorageCorruptError } from "../errors.js";
-import { httpError } from "./helpers/mockClient.js";
+import {
+  httpError,
+  HTTP_NOT_FOUND,
+  HTTP_INTERNAL_SERVER_ERROR,
+} from "./helpers/mockClient.js";
 
 // The exact daemon text from issue #219, as docker-modem delivers it —
 // including the trailing space.
@@ -11,7 +15,9 @@ const GRAPH_DRIVER_BODY =
 
 describe("categorizeError — storage corruption (issue #219)", () => {
   it("classifies the graph-driver readlink 500 as storage-corrupt", () => {
-    const result = categorizeError(httpError(GRAPH_DRIVER_BODY, 500));
+    const result = categorizeError(
+      httpError(GRAPH_DRIVER_BODY, HTTP_INTERNAL_SERVER_ERROR),
+    );
     assert.equal(result.kind, "storage-corrupt");
     assert.match(result.userMessage, /podman system check --repair --force/);
     assert.equal(result.raw, GRAPH_DRIVER_BODY);
@@ -19,19 +25,27 @@ describe("categorizeError — storage corruption (issue #219)", () => {
 
   it("classifies 'layer not known' 500 as storage-corrupt, not not-found", () => {
     const result = categorizeError(
-      httpError("(HTTP code 500) server error - layer not known ", 500),
+      httpError(
+        "(HTTP code 500) server error - layer not known ",
+        HTTP_INTERNAL_SERVER_ERROR,
+      ),
     );
     assert.equal(result.kind, "storage-corrupt");
   });
 
   it("a 404 wins over the body patterns (absent, not corrupt)", () => {
-    const result = categorizeError(httpError(GRAPH_DRIVER_BODY, 404));
+    const result = categorizeError(
+      httpError(GRAPH_DRIVER_BODY, HTTP_NOT_FOUND),
+    );
     assert.equal(result.kind, "not-found");
   });
 
   it("a generic 500 stays unknown", () => {
     const result = categorizeError(
-      httpError("(HTTP code 500) server error - something else ", 500),
+      httpError(
+        "(HTTP code 500) server error - something else ",
+        HTTP_INTERNAL_SERVER_ERROR,
+      ),
     );
     assert.equal(result.kind, "unknown");
   });

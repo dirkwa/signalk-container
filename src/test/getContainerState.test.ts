@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { getContainerState } from "../containers.js";
 import type { ContainerRuntimeInfo } from "../types.js";
-import { makeMockClient, httpError } from "./helpers/mockClient.js";
+import { makeMockClient, storageCorrupt500 } from "./helpers/mockClient.js";
 
 const dummyRuntime: ContainerRuntimeInfo = {
   runtime: "podman",
@@ -184,11 +184,7 @@ describe("getContainerState", () => {
     const client = makeMockClient({
       containers: {
         "sk-x": {
-          inspect: httpError(
-            '(HTTP code 500) server error - getting graph driver info "abc": ' +
-              "readlink /home/u/.local/share/containers/storage/overlay: invalid argument ",
-            500,
-          ),
+          inspect: storageCorrupt500(),
         },
       },
     });
