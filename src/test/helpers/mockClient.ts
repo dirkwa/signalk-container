@@ -48,10 +48,33 @@ export interface MockClientSpec {
   calls?: Map<string, unknown[]>;
 }
 
-function notFound(msg: string): Error {
+export const HTTP_NOT_FOUND = 404;
+export const HTTP_INTERNAL_SERVER_ERROR = 500;
+
+/**
+ * An error shaped like docker-modem's daemon-response errors: the HTTP
+ * status lands on `statusCode`, which `categorizeError` reads.
+ */
+export function httpError(msg: string, statusCode: number): Error {
   const err = new Error(msg) as Error & { statusCode?: number };
-  err.statusCode = 404;
+  err.statusCode = statusCode;
   return err;
+}
+
+/**
+ * The overlay storage-corruption inspect failure as docker-modem delivers
+ * it: graph-driver wrapper plus readlink EINVAL, trailing space included.
+ */
+export function storageCorrupt500(): Error {
+  return httpError(
+    '(HTTP code 500) server error - getting graph driver info "abc123": ' +
+      "readlink /home/u/.local/share/containers/storage/overlay: invalid argument ",
+    HTTP_INTERNAL_SERVER_ERROR,
+  );
+}
+
+function notFound(msg: string): Error {
+  return httpError(msg, HTTP_NOT_FOUND);
 }
 
 function record(spec: MockClientSpec, op: string, arg: unknown): void {

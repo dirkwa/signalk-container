@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { getContainerState } from "../containers.js";
 import type { ContainerRuntimeInfo } from "../types.js";
-import { makeMockClient } from "./helpers/mockClient.js";
+import { makeMockClient, storageCorrupt500 } from "./helpers/mockClient.js";
 
 const dummyRuntime: ContainerRuntimeInfo = {
   runtime: "podman",
@@ -175,6 +175,30 @@ describe("getContainerState", () => {
     });
     const result = await getContainerState(dummyRuntime, "x", client);
     assert.equal(result, "stopped");
+  });
+
+  it("rethrows a storage-corruption 500 with the classified cause (issue #219)", async () => {
+    // The recovery in ensureRunning depends on this contract: a corrupt
+    // container is NOT reported as "missing" — the error propagates with
+    // cause.kind === "storage-corrupt" so the caller can remove + recreate.
+    const client = makeMockClient({
+      containers: {
+        "sk-x": {
+          inspect: storageCorrupt500(),
+        },
+      },
+    });
+    await assert.rejects(
+      getContainerState(dummyRuntime, "x", client),
+      (err: Error) => {
+        assert.match(err.message, /storage is corrupt/i);
+        assert.equal(
+          (err.cause as { kind?: string } | undefined)?.kind,
+          "storage-corrupt",
+        );
+        return true;
+      },
+    );
   });
 
   it("negative Pid is treated as not-running", async () => {
