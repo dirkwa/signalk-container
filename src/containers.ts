@@ -33,7 +33,11 @@ import {
   safeInspect,
   type ContainerClient,
 } from "./client.js";
-import type { ErrorKind } from "./errors.js";
+import {
+  describeError,
+  isStorageCorruptError,
+  type ErrorKind,
+} from "./errors.js";
 import {
   DEVICES_UNRESOLVED_LABEL,
   filterUnresolvedDeviceEntries,
@@ -2270,8 +2274,34 @@ export async function ensureRunning(
   _postRecreate: boolean = false,
   _pull: PullFn = pullImage,
 ): Promise<void> {
-  const state = await getContainerState(runtime, name, client);
   const fullName = prefixedName(name);
+  let state: ContainerState;
+  try {
+    state = await getContainerState(runtime, name, client);
+  } catch (err) {
+    if (_postRecreate || !isStorageCorruptError(err)) throw err;
+    // Storage corruption (issue #219): inspect 500s but force-remove still
+    // works, and managed containers keep their state in bind mounts, so
+    // remove + recreate is the recovery. Bounded: if removal or the re-read
+    // fails we throw, and the _postRecreate re-entry never retries.
+    debug(
+      `Container ${fullName} has corrupt storage (${describeError(err)}); removing and recreating`,
+    );
+    try {
+      await removeContainer(runtime, name, client);
+      state = await getContainerState(runtime, name, client);
+    } catch (recoveryErr) {
+      throw new Error(
+        `Container ${fullName} has corrupt storage and automatic recovery failed. ` +
+          `Remove it manually (\`${runtime.runtime} rm -f ${fullName}\`)` +
+          (runtime.runtime === "podman"
+            ? " or repair the store (`podman system check --repair --force`)"
+            : "") +
+          ` and retry. Underlying error: ${describeError(recoveryErr)}`,
+        { cause: recoveryErr },
+      );
+    }
+  }
   const imageRef = qualifyImage(
     config.digest
       ? `${config.image}@${config.digest}`
@@ -3257,6 +3287,45 @@ export interface PruneRunLogger {
  * so the scheduler leaves the run unrecorded and retries it instead of
  * waiting out a full interval — both phases are idempotent.
  */
+/**
+ * Build the reaper's view of managed images: every container recorded in a
+ * manifest, paired with the immutable image-ID it is currently running (or
+ * null when that cannot be determined). A per-container probe failure (e.g.
+ * corrupt storage making inspect 500 — issue #219) must not abort the whole
+ * list: the ref is kept with `runningImageId: null`, which
+ * `selectImagesToReap` treats as unanchored and keeps every version of that
+ * image — fail-safe.
+ */
+export async function collectManagedImageRefs(
+  runtime: ContainerRuntimeInfo,
+  manifests: ReadonlyArray<{ containers: Record<string, { image: string }> }>,
+  debug: (msg: string) => void,
+  client: ContainerClient = getClient(),
+): Promise<ManagedImageRef[]> {
+  const refs: ManagedImageRef[] = [];
+  for (const manifest of manifests) {
+    for (const [containerName, entry] of Object.entries(manifest.containers)) {
+      let runningImageId: string | null = null;
+      try {
+        // Inspect the container directly — going through getImageDigest
+        // would try an image-name lookup first, so a local image tagged
+        // with the container's name would shadow the container's .Image.
+        const info = await safeInspect(() =>
+          client.getContainer(prefixedName(containerName)).inspect(),
+        );
+        runningImageId = (info?.Image as string | undefined) ?? null;
+      } catch (err) {
+        debug(
+          `Image reaper: cannot read the running image of ${prefixedName(containerName)} ` +
+            `(${describeError(err)}); keeping all versions of ${entry.image} this run`,
+        );
+      }
+      refs.push({ image: entry.image, runningImageId });
+    }
+  }
+  return refs;
+}
+
 export async function runScheduledPrune(
   runtime: ContainerRuntimeInfo,
   collectManaged: () => Promise<ManagedImageRef[]>,

@@ -52,6 +52,7 @@ import {
   ensureNetwork,
   ensureRunning,
   execInContainer,
+  collectManagedImageRefs as collectManagedImageRefsFromManifests,
   getActualPortBindings,
   getContainerLogs,
   getContainerState,
@@ -223,19 +224,11 @@ export default (app: App) => {
     runtime: ContainerRuntimeInfo,
   ): Promise<ManagedImageRef[]> {
     if (!manifestStore) return [];
-    const refs: ManagedImageRef[] = [];
-    for (const manifest of await manifestStore.list()) {
-      for (const [containerName, entry] of Object.entries(
-        manifest.containers,
-      )) {
-        const runningImageId = await getImageDigest(
-          runtime,
-          prefixedName(containerName),
-        );
-        refs.push({ image: entry.image, runningImageId });
-      }
-    }
-    return refs;
+    return collectManagedImageRefsFromManifests(
+      runtime,
+      await manifestStore.list(),
+      (msg) => app.debug(msg),
+    );
   }
 
   // Re-created on every start() so each plugin-lifecycle gets a fresh

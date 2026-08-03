@@ -19,6 +19,7 @@ export type ErrorKind =
   | "not-found"
   | "socket-unreachable"
   | "invalid-config"
+  | "storage-corrupt"
   | "unknown";
 
 export interface CategorizedError {
@@ -89,11 +90,29 @@ const INVALID_CONFIG_PATTERNS = [
   /invalid (host)?config/i,
 ];
 
+// Container-storage corruption (issue #219): a power loss can zero-truncate
+// the overlay `link`/`lower` metadata files of layers whose writes were still
+// in flight. Every inspect of the affected container then 500s at the daemon
+// ("getting graph driver info … readlink …: invalid argument"), while
+// force-remove still works — so callers can recover by removing and
+// recreating the container. Classification drives that destructive recovery,
+// so it is deliberately strict: the daemon must have returned a 500 (keeps
+// registry/network texts out) AND the body must match every pattern of one
+// group — a graph-driver wrapper alone (which can carry unrelated storage
+// errors) is not enough evidence.
+const STORAGE_CORRUPT_PATTERN_GROUPS = [
+  [/getting graph driver info/i, /readlink .*: invalid argument/i],
+  [/layer not known/i],
+];
+
 /**
  * Pull a status code off a dockerode error when present. dockerode attaches
  * `statusCode` (HTTP status from the daemon) to the errors it throws; we use it
  * to classify 404 → not-found cheaply before falling back to message matching.
  */
+const HTTP_NOT_FOUND = 404;
+const HTTP_INTERNAL_SERVER_ERROR = 500;
+
 function statusCodeOf(err: unknown): number | undefined {
   if (typeof err !== "object" || err === null) return undefined;
   const code = (err as { statusCode?: unknown }).statusCode;
@@ -104,8 +123,24 @@ export function categorizeError(err: unknown): CategorizedError {
   const raw = err instanceof Error ? err.message : String(err);
   const status = statusCodeOf(err);
 
-  if (status === 404) {
+  if (status === HTTP_NOT_FOUND) {
     return { kind: "not-found", userMessage: "Resource not found.", raw };
+  }
+
+  if (
+    status === HTTP_INTERNAL_SERVER_ERROR &&
+    STORAGE_CORRUPT_PATTERN_GROUPS.some((group) =>
+      group.every((p) => p.test(raw)),
+    )
+  ) {
+    return {
+      kind: "storage-corrupt",
+      userMessage:
+        "Container storage is corrupt (typically overlay metadata truncated by a power loss). " +
+        "Managed containers are removed and recreated automatically; if this persists, run " +
+        "`podman system check --repair --force` or remove the container with `podman rm -f <name>`.",
+      raw,
+    };
   }
 
   if (SOCKET_PATTERNS.some((p) => p.test(raw))) {
@@ -187,4 +222,18 @@ export function describeError(err: unknown): string {
     return err.cause.raw;
   }
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Whether a caught error is a `safe()`/`safeInspect()` rethrow whose
+ * classified cause is `storage-corrupt` — the "this container's overlay
+ * metadata is damaged, remove + recreate to recover" family.
+ */
+export function isStorageCorruptError(err: unknown): boolean {
+  return (
+    err instanceof Error &&
+    typeof err.cause === "object" &&
+    err.cause !== null &&
+    (err.cause as { kind?: unknown }).kind === "storage-corrupt"
+  );
 }

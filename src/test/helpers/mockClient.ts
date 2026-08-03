@@ -48,10 +48,18 @@ export interface MockClientSpec {
   calls?: Map<string, unknown[]>;
 }
 
-function notFound(msg: string): Error {
+/**
+ * An error shaped like docker-modem's daemon-response errors: the HTTP
+ * status lands on `statusCode`, which `categorizeError` reads.
+ */
+export function httpError(msg: string, statusCode: number): Error {
   const err = new Error(msg) as Error & { statusCode?: number };
-  err.statusCode = 404;
+  err.statusCode = statusCode;
   return err;
+}
+
+function notFound(msg: string): Error {
+  return httpError(msg, 404);
 }
 
 function record(spec: MockClientSpec, op: string, arg: unknown): void {
