@@ -4,6 +4,7 @@ import {
   ensureRunning,
   parseProcLimitsNofile,
   readContainerNofile,
+  _clearNofileRegrantAttemptsForTesting,
   _setNofileCeilingForTesting,
   _setProcLimitsReaderForTesting,
 } from "../containers.js";
@@ -39,6 +40,7 @@ after(() => {
 afterEach(() => {
   _setNofileCeilingForTesting(null);
   _setProcLimitsReaderForTesting(null);
+  _clearNofileRegrantAttemptsForTesting();
 });
 
 function procLimits(soft: number | string, hard: number | string): string {
@@ -462,6 +464,57 @@ describe("ensureRunning — nofile regrant", () => {
       (calls.get("remove") ?? []).length,
       1,
       "second call must not recreate again",
+    );
+    assert.equal(clamps.at(-1)?.granted, 524288);
+  });
+
+  it("attempts a futile regrant once, not per call (podman <5.5 shape)", async () => {
+    // Rootless podman < 5.5.0 ignores the compat API's ulimit request
+    // (containers/podman#25881) and echoes the EFFECTIVE limits through
+    // inspect, so after a recreate both `asked` and `live` still read the
+    // old inherited value — the ask-bound alone cannot see that the attempt
+    // failed. The per-observed-limit guard must hold the line: one recreate
+    // attempt, then advisories only.
+    _setNofileCeilingForTesting(() => 1048576);
+    _setProcLimitsReaderForTesting(() => procLimits(524288, 524288));
+    const calls = new Map<string, unknown[]>();
+    const inspect = (): Promise<Json> => {
+      const created = (calls.get("createContainer") ?? []).length > 0;
+      const removed = (calls.get("remove") ?? []).length > 0;
+      if (removed && !created) {
+        return Promise.reject(notFound("no such object"));
+      }
+      // Echo never improves — the runtime dropped the request.
+      return Promise.resolve(
+        liveInspect({
+          pid: 4242,
+          ulimits: [{ Name: "RLIMIT_NOFILE", Soft: 524288, Hard: 524288 }],
+        }),
+      );
+    };
+    const client = makeMockClient({
+      containers: { "sk-questdb": { inspect } },
+      images: { "questdb/questdb:latest": { Id: "sha256:abc", Config: {} } },
+      calls,
+    });
+    const clamps: UlimitClamp[] = [];
+    const opts = {
+      onUlimitClamped: (e: UlimitClamp) => {
+        clamps.push(e);
+      },
+    };
+    await ensureRunning(docker, "questdb", requested, () => {}, opts, client);
+    assert.equal(
+      (calls.get("remove") ?? []).length,
+      1,
+      "first call may attempt the regrant",
+    );
+    await ensureRunning(docker, "questdb", requested, () => {}, opts, client);
+    await ensureRunning(docker, "questdb", requested, () => {}, opts, client);
+    assert.equal(
+      (calls.get("remove") ?? []).length,
+      1,
+      "further calls must not recreate while the observed limit is unchanged",
     );
     assert.equal(clamps.at(-1)?.granted, 524288);
   });

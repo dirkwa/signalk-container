@@ -2073,6 +2073,23 @@ function requestedNofileHard(
   return typeof nofile === "number" ? nofile : nofile.hard;
 }
 
+// The live nofile hard limit observed the last time a regrant recreate was
+// attempted, per (prefixed) container name. Rootless podman < 5.5.0 ignores
+// the compat API's ulimit request entirely (containers/podman#25881, fixed
+// by #25908) and echoes the EFFECTIVE limits back through inspect — there
+// the asked-vs-grantable comparison cannot detect that a recreate already
+// failed to lift the limit, so without this guard a host whose Signal K
+// process carries a higher limit than its podman service would recreate the
+// container on every ensureRunning. Value-keyed on the observed limit: a
+// retry unlocks by itself as soon as the observed limit actually changes
+// (e.g. the operator raised the podman service's limit and the next
+// recreate would inherit it). In-memory by design — at worst one recreate
+// attempt per Signal K process lifetime per observed value.
+const nofileRegrantAttempts = new Map<string, number>();
+export function _clearNofileRegrantAttemptsForTesting(): void {
+  nofileRegrantAttempts.clear();
+}
+
 /**
  * Translate `ContainerConfig.ulimits` into the dockerode
  * `HostConfig.Ulimits` array (`{ Name, Soft, Hard }`). A bare number sets
@@ -2621,7 +2638,11 @@ export async function ensureRunning(
     // asking again cannot help), recreating would thrash the container on
     // every ensureRunning without ever lifting the limit.
     const asked = state.asked ?? live;
-    if (grantable > asked.hard) {
+    if (
+      grantable > asked.hard &&
+      nofileRegrantAttempts.get(fullName) !== live.hard
+    ) {
+      nofileRegrantAttempts.set(fullName, live.hard);
       debug(
         `Container ${fullName} was created asking nofile ${asked.hard} but ` +
           `the host now grants ${grantable}; recreating to apply it`,
@@ -2639,9 +2660,10 @@ export async function ensureRunning(
           requested: requestedHard,
           granted: live.hard,
           reason:
-            `${fullName} is running with a nofile limit of ${live.hard}, below ` +
-            `the requested ${requestedHard}; the host cannot currently grant ` +
-            `more. Raise the host limit to lift it.`,
+            `${fullName} is running with a nofile limit of ${live.hard}, ` +
+            `below the requested ${requestedHard}, and a recreate cannot ` +
+            `currently do better. Raise the limit of the host service that ` +
+            `runs the containers to lift it.`,
         },
         (err) =>
           debug(
