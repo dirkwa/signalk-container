@@ -2680,10 +2680,20 @@ export async function ensureRunning(
         // fine) and this path returned before the still-capped check below.
         // Best-effort telemetry: the recreate itself succeeded, so a probe
         // failure here must degrade to "no advisory", never fail the start.
+        // A container that landed exactly on `grantable` got what the create
+        // asked after clamping — the create-time clamp event (if any) already
+        // reported that value, so advising again would duplicate it. A
+        // container that landed anywhere else (a runtime that dropped the
+        // ask) makes the create-time event wrong, and this advisory is the
+        // correction.
         try {
           const after = await readContainerNofileState(name, client);
           const afterLive = after ? (after.live ?? after.asked) : null;
-          if (afterLive && requestedHard > afterLive.hard) {
+          if (
+            afterLive &&
+            requestedHard > afterLive.hard &&
+            afterLive.hard !== grantable
+          ) {
             adviseNofileCapped(afterLive.hard, requestedHard);
           }
         } catch (err) {

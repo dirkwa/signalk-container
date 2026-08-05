@@ -532,6 +532,37 @@ describe("ensureRunning — nofile regrant", () => {
     assert.equal(clamps.at(-1)?.granted, 524288);
   });
 
+  it("partial regrant advises exactly once, from the create-time clamp", async () => {
+    // Ceiling raised from 524288 to 786432, request 1048576: the recreate's
+    // create emits the clamp {requested, granted: 786432}, and the container
+    // lands exactly on that grant — the post-recreate verification must not
+    // duplicate it.
+    _setNofileCeilingForTesting(() => 786432);
+    const { client, calls } = makeRegrantClient(liveInspect({ pid: 4242 }));
+    _setProcLimitsReaderForTesting(() =>
+      (calls.get("createContainer") ?? []).length > 0
+        ? procLimits(786432, 786432)
+        : procLimits(524288, 524288),
+    );
+    const clamps: UlimitClamp[] = [];
+    await ensureRunning(
+      docker,
+      "questdb",
+      requested,
+      () => {},
+      {
+        onUlimitClamped: (e) => {
+          clamps.push(e);
+        },
+      },
+      client,
+    );
+    assert.ok((calls.get("remove") ?? []).length > 0, "expected a recreate");
+    assert.equal(clamps.length, 1, "exactly one advisory for one capped state");
+    assert.equal(clamps[0].granted, 786432);
+    assert.equal(clamps[0].requested, 1048576);
+  });
+
   it("post-regrant verify failure never fails the start", async () => {
     // The recreate succeeded; the verification probe is best-effort
     // telemetry. A daemon hiccup on that final inspect must degrade to
