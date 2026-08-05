@@ -1460,7 +1460,11 @@ export interface SelfDeploymentResult {
    * unreadable, no rootless Podman detected).
    */
   containerStorage: {
-    /** Mount point covering the rootless storage root, or `null` if unknown. */
+    /**
+     * Rootless storage root that was probed: the graphroot the daemon
+     * reported (honors `storage.conf` overrides), falling back to the
+     * XDG-derived default path. `null` if unknown.
+     */
     storagePath: string | null;
     /** Filesystem type as reported by `/proc/mounts`, or `null` if unknown. */
     fstype: string | null;

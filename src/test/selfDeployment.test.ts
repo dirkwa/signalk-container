@@ -1152,6 +1152,86 @@ describe("selfDeployment — containerStorage probe (rootless podman)", () => {
     assert.match(advice, /disableUserNamespaceRemap|Disable user-namespace/i);
   });
 
+  it("prefers the daemon-reported graphroot over the XDG-derived guess", async () => {
+    // storage.conf points graphroot at /var/lib/podman-users/... (ext4)
+    // while $HOME sits on ZFS. The daemon's DockerRootDir must win, or
+    // the doctor probes a directory Podman doesn't use and false-flags
+    // the idmap hazard.
+    const client = makeMockClient({
+      version: { Version: "5.4.2", Components: [{ Name: "Podman Engine" }] },
+      info: {
+        Rootless: true,
+        SecurityOptions: ["name=rootless"],
+        DockerRootDir: "/var/lib/podman-users/synthetic/storage",
+      },
+    });
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({
+        isContainerized: () => false,
+        resolveClient: resolveTo(client),
+        readMounts: async () => zfsHomeMounts,
+        resolveContainerStoragePath: () =>
+          "/home/synthetic/.local/share/containers",
+      }),
+    );
+    assert.equal(
+      result.containerStorage?.storagePath,
+      "/var/lib/podman-users/synthetic/storage",
+    );
+    assert.equal(result.containerStorage?.fstype, "ext4");
+    assert.equal(result.containerStorage?.idmapHazard, false);
+  });
+
+  it("falls back to the XDG-derived path when info() lacks DockerRootDir", async () => {
+    // rootlessPodman()'s info payload carries no DockerRootDir, so the
+    // resolveContainerStoragePath fallback drives the probe.
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({
+        isContainerized: () => false,
+        resolveClient: resolveTo(rootlessPodman()),
+        readMounts: async () => zfsHomeMounts,
+        resolveContainerStoragePath: () =>
+          "/home/synthetic/.local/share/containers",
+      }),
+    );
+    assert.equal(
+      result.containerStorage?.storagePath,
+      "/home/synthetic/.local/share/containers",
+    );
+    assert.equal(result.containerStorage?.fstype, "zfs");
+    assert.equal(result.containerStorage?.idmapHazard, true);
+  });
+
+  it("ignores a non-absolute DockerRootDir and uses the fallback", async () => {
+    const client = makeMockClient({
+      version: { Version: "5.4.2", Components: [{ Name: "Podman Engine" }] },
+      info: {
+        Rootless: true,
+        SecurityOptions: ["name=rootless"],
+        DockerRootDir: "not/an/absolute/path",
+      },
+    });
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({
+        isContainerized: () => false,
+        resolveClient: resolveTo(client),
+        readMounts: async () => zfsHomeMounts,
+        resolveContainerStoragePath: () =>
+          "/home/synthetic/.local/share/containers",
+      }),
+    );
+    assert.equal(
+      result.containerStorage?.storagePath,
+      "/home/synthetic/.local/share/containers",
+    );
+  });
+
   it("does not flag idmapHazard on rootless podman backed by ext4", async () => {
     const result = await selfDeployment(
       "auto",

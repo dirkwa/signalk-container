@@ -194,13 +194,14 @@ export interface SelfDeploymentProbes {
    * Read `/proc/mounts` (or equivalent) as parsed entries. Returns
    * `null` when the file is unreadable (non-Linux, sandboxed). Used by
    * the rootless-Podman storage-driver probe to determine the
-   * filesystem backing `~/.local/share/containers` and warn on
-   * filesystems known to interact poorly with `--userns=keep-id`.
+   * filesystem backing the storage graphroot and warn on filesystems
+   * known to interact poorly with `--userns=keep-id`.
    */
   readMounts?: () => Promise<MountEntry[] | null>;
   /**
-   * Resolve the path of the rootless container-storage root for the
-   * current user. Defaults to `$XDG_DATA_HOME/containers` (or
+   * Fallback resolver for the rootless container-storage root, used
+   * only when the daemon's `info()` doesn't report its graphroot
+   * (`DockerRootDir`). Defaults to `$XDG_DATA_HOME/containers` (or
    * `$HOME/.local/share/containers`) — tests can override.
    */
   resolveContainerStoragePath?: () => string | null;
@@ -463,14 +464,18 @@ function defaultResolveContainerStoragePath(): string | null {
 /**
  * Probe the filesystem backing the rootless Podman storage root. Only
  * meaningful for rootless Podman; callers gate before invoking.
+ * `daemonStorageRoot` (the graphroot the daemon itself reported) wins
+ * over the XDG-derived default-path guess — a `storage.conf` graphroot
+ * override otherwise sends the probe to a directory Podman doesn't use.
  * Returns `null` when the mount list or storage path can't be
  * determined (non-Linux, sandboxed read of /proc/mounts, etc.).
  */
 async function probeContainerStorage(
   readMounts: () => Promise<MountEntry[] | null>,
   resolveStoragePath: () => string | null,
+  daemonStorageRoot: string | null,
 ): Promise<SelfDeploymentResult["containerStorage"]> {
-  const storagePath = resolveStoragePath();
+  const storagePath = daemonStorageRoot ?? resolveStoragePath();
   if (!storagePath) return null;
   const mounts = await readMounts();
   if (!mounts) return null;
@@ -623,7 +628,11 @@ export async function selfDeployment(
   // in the slow path.
   const containerStorage =
     binaryName === "podman" && info.reachable && info.rootless === true
-      ? await probeContainerStorage(probeReadMounts, probeResolveStoragePath)
+      ? await probeContainerStorage(
+          probeReadMounts,
+          probeResolveStoragePath,
+          info.storageRoot,
+        )
       : null;
 
   // Linger advisory. Runtime-agnostic but rootless-only: rootless podman
@@ -764,6 +773,11 @@ export async function selfDeployment(
 interface DaemonProbeResult {
   reachable: boolean;
   rootless: boolean | null;
+  /**
+   * Daemon-reported storage root (`DockerRootDir` from `info()`); null
+   * when the daemon didn't report one or `info()` failed.
+   */
+  storageRoot: string | null;
   /** Runtime name from `version()` classification; null when version failed. */
   runtime: RuntimeName | null;
   /** Server version from `version().Version`; null when version failed. */
@@ -796,6 +810,13 @@ interface DaemonVersion {
 interface DaemonInfo {
   Rootless?: boolean;
   SecurityOptions?: string[];
+  /**
+   * Podman's compat `/info` populates this with the storage graphroot
+   * (honoring `storage.conf` overrides) — the authoritative answer to
+   * "where does container storage actually live", unlike the
+   * XDG-derived default-path guess.
+   */
+  DockerRootDir?: string;
 }
 
 function classifyRuntimeFromVersion(version: DaemonVersion): RuntimeName {
@@ -829,6 +850,7 @@ async function probeDaemon(
     return {
       reachable: false,
       rootless: null,
+      storageRoot: null,
       runtime: null,
       version: null,
       errorKind: versionResult.error.kind,
@@ -845,6 +867,14 @@ async function probeDaemon(
   return {
     reachable: true,
     rootless: rootlessFromInfo(info),
+    // Only an absolute path is usable — findCoveringMount matches mount
+    // points against it, so a relative or empty value (malformed daemon
+    // payload) must fall back to the resolver instead.
+    storageRoot:
+      typeof info.DockerRootDir === "string" &&
+      info.DockerRootDir.startsWith("/")
+        ? info.DockerRootDir
+        : null,
     runtime: classifyRuntimeFromVersion(version),
     version: version.Version ?? null,
     errorKind: null,
