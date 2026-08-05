@@ -2609,17 +2609,6 @@ export async function ensureRunning(
     );
   };
 
-  // ulimits sit outside drift detection (changing one doesn't justify the
-  // recreate downtime), which leaves one gap: after an operator raises the
-  // host nofile ceiling, the existing container keeps the lower limit it was
-  // created with forever — a restart re-applies the stored value. Close the
-  // gap here: when the host would now ask for MORE nofile than the previous
-  // create asked, recreate to apply it (completing the documented "raise the
-  // host limit" fix without manual container surgery). When it can't do
-  // better, re-emit the clamp advisory so consumers reflect the live capped
-  // state across Signal K restarts — the create-time event alone would
-  // vanish on the next plugin start while the container stayed capped. A
-  // null probe means "unknown", never capped: no recreate, no advisory.
   // Emit the still-capped advisory so consumers keep showing the true live
   // state; `granted` is the limit the container actually runs with.
   const adviseNofileCapped = (grantedHard: number, requestedHard: number) =>
@@ -2643,6 +2632,17 @@ export async function ensureRunning(
         ),
     );
 
+  // ulimits sit outside drift detection (changing one doesn't justify the
+  // recreate downtime), which leaves one gap: after an operator raises the
+  // host nofile ceiling, the existing container keeps the lower limit it was
+  // created with forever — a restart re-applies the stored value. Close the
+  // gap here: when the host would now ask for MORE nofile than the previous
+  // create asked, recreate to apply it (completing the documented "raise the
+  // host limit" fix without manual container surgery). When it can't do
+  // better, re-emit the clamp advisory so consumers reflect the live capped
+  // state across Signal K restarts — the create-time event alone would
+  // vanish on the next plugin start while the container stayed capped. A
+  // null probe means "unknown", never capped: no recreate, no advisory.
   const checkNofileRegrant = async (): Promise<boolean> => {
     const requestedHard = requestedNofileHard(config.ulimits);
     if (requestedHard === null) return false;
