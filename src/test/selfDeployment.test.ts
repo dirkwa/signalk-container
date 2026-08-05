@@ -1184,6 +1184,40 @@ describe("selfDeployment — containerStorage probe (rootless podman)", () => {
     assert.equal(result.containerStorage?.idmapHazard, false);
   });
 
+  it("ignores the daemon graphroot when Signal K is containerized", async () => {
+    // In-container SK talks to the HOST daemon: DockerRootDir is a host
+    // path, but readMounts() sees the container's mount table. Matching
+    // the host path against container mounts could classify a host ZFS
+    // graphroot as the container's overlay root and suppress the
+    // warning — so the daemon path must be ignored and the fallback
+    // (same-namespace) path probed instead.
+    const client = makeMockClient({
+      version: { Version: "5.4.2", Components: [{ Name: "Podman Engine" }] },
+      info: {
+        Rootless: true,
+        SecurityOptions: ["name=rootless"],
+        DockerRootDir: "/var/lib/podman-users/synthetic/storage",
+      },
+    });
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({
+        isContainerized: () => true,
+        resolveClient: resolveTo(client),
+        readMounts: async () => zfsHomeMounts,
+        resolveContainerStoragePath: () =>
+          "/var/lib/synthetic/.local/share/containers",
+      }),
+    );
+    assert.equal(
+      result.containerStorage?.storagePath,
+      "/var/lib/synthetic/.local/share/containers",
+    );
+    assert.equal(result.containerStorage?.fstype, "zfs");
+    assert.equal(result.containerStorage?.idmapHazard, true);
+  });
+
   it("falls back to the XDG-derived path when info() lacks DockerRootDir", async () => {
     // rootlessPodman()'s info payload carries no DockerRootDir, so the
     // resolveContainerStoragePath fallback drives the probe.

@@ -467,6 +467,11 @@ function defaultResolveContainerStoragePath(): string | null {
  * `daemonStorageRoot` (the graphroot the daemon itself reported) wins
  * over the XDG-derived default-path guess — a `storage.conf` graphroot
  * override otherwise sends the probe to a directory Podman doesn't use.
+ * Callers must pass it as `null` when Signal K is containerized: the
+ * daemon's path is a host path while `readMounts()` sees the container's
+ * mount table, and matching across the two namespaces can classify a
+ * host ZFS graphroot as the container's overlay root and silently
+ * suppress the hazard warning.
  * Returns `null` when the mount list or storage path can't be
  * determined (non-Linux, sandboxed read of /proc/mounts, etc.).
  */
@@ -631,7 +636,9 @@ export async function selfDeployment(
       ? await probeContainerStorage(
           probeReadMounts,
           probeResolveStoragePath,
-          info.storageRoot,
+          // The daemon-reported graphroot is a host path; only usable
+          // when our mount table is the host's too.
+          containerized ? null : info.storageRoot,
         )
       : null;
 
