@@ -324,12 +324,28 @@ sudo systemctl daemon-reload
 The new limit only applies once the **user manager itself restarts** — and
 `daemon-reload` does **not** restart an already-running `user@<uid>.service`.
 On a headless boat the SK user has linger enabled (`loginctl enable-linger`),
-so logging out and back in does not tear it down. Force a fresh user manager,
-then restart the container:
+so logging out and back in does not tear it down. Force a fresh user manager:
 
 ```bash
 sudo systemctl restart user@$(id -u <sk-user>).service   # or just reboot
 ```
+
+Note that restarting the **container** is not enough on its own: a restart
+re-applies the nofile value stored when the container was created, so a
+container created under the old ceiling keeps the lower limit. Since
+signalk-container 1.26.0 this resolves itself — on the next Signal K start,
+`ensureRunning` compares the limit the container actually runs with against
+what the host can now grant and recreates the container to apply the raise.
+On older versions, remove the container (`podman rm -f sk-<name>`) so the
+next plugin start recreates it with the raised limit.
+
+> **Rootless Podman < 5.5.0**: the docker-compat API silently drops the
+> ulimit request at container create
+> ([containers/podman#25881](https://github.com/containers/podman/issues/25881),
+> fixed in 5.5.0) — containers instead **inherit the podman service's own
+> limits**. The user-manager drop-in above is then not just the ceiling but
+> the actual source of the container's limit, and the recreate described
+> above is what picks it up.
 
 **2. System-wide default (Raspberry Pi OS / openplotter, and the reliable
 fallback).** Stock Debian / Pi OS ships `/etc/systemd/system.conf` with a
@@ -785,6 +801,7 @@ See [doc/plugin-developer-guide.md](doc/plugin-developer-guide.md) for the full 
 | `stop(name)`                                    | Stop a running container                                                                                                                                                                                                                                                                                             |
 | `remove(name)`                                  | Stop and remove a container                                                                                                                                                                                                                                                                                          |
 | `getState(name)`                                | Returns `running`, `stopped`, `missing`, or `no-runtime`                                                                                                                                                                                                                                                             |
+| `getContainerNofile(name)`                      | Read the `nofile` limits the container actually runs with (live `/proc` probe, falling back to the create-time inspect echo); `null` = unknown. Use it to verify a reported ulimit clamp against reality (1.26.0+)                                                                                                   |
 | `runJob(config)`                                | Execute a one-shot container job. Pass `config.signal` (an `AbortSignal`) to cancel a job mid-run — aborting force-removes the container and resolves with status `cancelled` (1.16.0+)                                                                                                                              |
 | `cleanupOrphanedJobs(filter)`                   | Reap this namespace's job containers (`<ns>-job-*`, `sk-job-*` by default) leaked by a previous server lifecycle, filtered by the caller's `ownerPluginId`. Idempotent — returns `{ reaped: OrphanJobInfo[] }` so the plugin can roll back any per-job state it had written                                          |
 | `getLogs(name, options?)`                       | One-shot fetch of the last N lines of a container's combined stdout+stderr log. `tail` defaults to 200, max 10000; `since` is unix-epoch seconds                                                                                                                                                                     |

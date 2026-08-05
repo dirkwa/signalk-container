@@ -14,6 +14,7 @@ import {
   HealthcheckOverride,
   LocalImageSummary,
   ManagedImageRef,
+  NofileLimits,
   PruneResult,
   UlimitClamp,
   VolumeIssue,
@@ -1939,19 +1940,154 @@ export function readNofileHardCeiling(
   };
 
   if (runtime.isRootless) {
-    // "Max open files   <soft>   <hard>   files" — the third column.
     try {
-      const line = readFileSync("/proc/self/limits", "utf8")
-        .split("\n")
-        .find((l) => l.startsWith("Max open files"));
-      const hard = line?.trim().split(/\s+/)[4];
-      const n = hard === "unlimited" ? Infinity : Number(hard);
-      return Number.isFinite(n) && n > 0 ? n : null;
+      return (
+        parseProcLimitsNofile(readFileSync("/proc/self/limits", "utf8"))
+          ?.hard ?? null
+      );
     } catch {
       return null;
     }
   }
   return read("/proc/sys/fs/nr_open");
+}
+
+/**
+ * Parse the `Max open files` row out of a `/proc/<pid>/limits` file:
+ * `Max open files   <soft>   <hard>   files`. Returns null on any shape
+ * surprise — callers treat null as "unknown", never as a limit.
+ */
+export function parseProcLimitsNofile(content: string): NofileLimits | null {
+  const line = content.split("\n").find((l) => l.startsWith("Max open files"));
+  if (!line) return null;
+  const toLimit = (raw: string | undefined): number | null => {
+    if (raw === "unlimited") return Infinity;
+    const n = Number(raw);
+    return Number.isSafeInteger(n) && n > 0 ? n : null;
+  };
+  const cols = line.trim().split(/\s+/);
+  const soft = toLimit(cols[3]);
+  const hard = toLimit(cols[4]);
+  return soft !== null && hard !== null ? { soft, hard } : null;
+}
+
+// Injection seam for tests: the /proc/<pid>/limits reader used by
+// readContainerNofile. Production always uses readFileSync.
+let procLimitsReader: (path: string) => string = (p) => readFileSync(p, "utf8");
+export function _setProcLimitsReaderForTesting(
+  fn: ((path: string) => string) | null,
+): void {
+  procLimitsReader = fn ?? ((p) => readFileSync(p, "utf8"));
+}
+
+// Injection seam for tests: the host nofile ceiling probe used by the
+// create-time clamp and the regrant check. Production always uses
+// readNofileHardCeiling (real /proc reads), which tests can't control.
+let nofileCeilingFn: (runtime: ContainerRuntimeInfo) => number | null =
+  readNofileHardCeiling;
+export function _setNofileCeilingForTesting(
+  fn: ((runtime: ContainerRuntimeInfo) => number | null) | null,
+): void {
+  nofileCeilingFn = fn ?? readNofileHardCeiling;
+}
+
+/**
+ * The two nofile observations a container inspect yields: `live` is the
+ * kernel's truth from `/proc/<pid>/limits` (readable when the Signal K
+ * process shares the pid namespace and uid with the container's — the
+ * bare-metal + rootless-Podman deployment); `asked` is the create-time
+ * request the runtime echoes back through `HostConfig.Ulimits`. They
+ * differ when the runtime silently granted less than it was asked for
+ * (e.g. a daemon whose own unit limit caps what it can hand out).
+ */
+interface ContainerNofileState {
+  live: NofileLimits | null;
+  asked: NofileLimits | null;
+}
+
+async function readContainerNofileState(
+  name: string,
+  client: ContainerClient,
+): Promise<ContainerNofileState | null> {
+  const inspect = (await safeInspect(() =>
+    client.getContainer(prefixedName(name)).inspect(),
+  )) as {
+    State?: { Running?: boolean; Pid?: number };
+    HostConfig?: {
+      Ulimits?: { Name?: string; Soft?: number; Hard?: number }[] | null;
+    };
+  } | null;
+  if (!inspect) return null;
+
+  let live: NofileLimits | null = null;
+  const pid = inspect.State?.Running ? inspect.State?.Pid : undefined;
+  if (typeof pid === "number" && pid > 0) {
+    try {
+      live = parseProcLimitsNofile(procLimitsReader(`/proc/${pid}/limits`));
+    } catch {
+      // unreadable (different pidns/uid) — the inspect echo remains
+    }
+  }
+
+  let asked: NofileLimits | null = null;
+  for (const entry of inspect.HostConfig?.Ulimits ?? []) {
+    // podman's libpod shape spells it RLIMIT_NOFILE; docker/compat use nofile.
+    const entryName = entry.Name?.toLowerCase().replace(/^rlimit_/, "");
+    if (
+      entryName === "nofile" &&
+      typeof entry.Soft === "number" &&
+      typeof entry.Hard === "number"
+    ) {
+      asked = { soft: entry.Soft, hard: entry.Hard };
+      break;
+    }
+  }
+  return { live, asked };
+}
+
+/**
+ * Read the nofile limits a managed container is ACTUALLY running with —
+ * as opposed to the value that was requested when it was created.
+ *
+ * Primary source is the live `/proc/<container-pid>/limits`; where that
+ * is not readable (containerized Signal K, rootful runtimes), fall back
+ * to the create-time request echoed through inspect, which the runtime
+ * applied verbatim or refused, so it equals the live value whenever it
+ * is present. Null means "unknown": no such container, or neither
+ * source available.
+ */
+export async function readContainerNofile(
+  name: string,
+  client: ContainerClient = getClient(),
+): Promise<NofileLimits | null> {
+  const state = await readContainerNofileState(name, client);
+  return state ? (state.live ?? state.asked) : null;
+}
+
+/** The hard nofile limit a `ContainerConfig.ulimits` request asks for, if any. */
+function requestedNofileHard(
+  ulimits: ContainerConfig["ulimits"],
+): number | null {
+  const nofile = ulimits?.["nofile"];
+  if (nofile === undefined) return null;
+  return typeof nofile === "number" ? nofile : nofile.hard;
+}
+
+// The live nofile hard limit observed the last time a regrant recreate was
+// attempted, per (prefixed) container name. Rootless podman < 5.5.0 ignores
+// the compat API's ulimit request entirely (containers/podman#25881, fixed
+// by #25908) and echoes the EFFECTIVE limits back through inspect — there
+// the asked-vs-grantable comparison cannot detect that a recreate already
+// failed to lift the limit, so without this guard a host whose Signal K
+// process carries a higher limit than its podman service would recreate the
+// container on every ensureRunning. Value-keyed on the observed limit: a
+// retry unlocks by itself as soon as the observed limit actually changes
+// (e.g. the operator raised the podman service's limit and the next
+// recreate would inherit it). In-memory by design — at worst one recreate
+// attempt per Signal K process lifetime per observed value.
+const nofileRegrantAttempts = new Map<string, number>();
+export function _clearNofileRegrantAttemptsForTesting(): void {
+  nofileRegrantAttempts.clear();
 }
 
 /**
@@ -2191,7 +2327,7 @@ function buildCreateOptions(
   // than let the container fail.
   const ulimits = ulimitsForRun(
     config.ulimits,
-    readNofileHardCeiling(runtime),
+    nofileCeilingFn(runtime),
     (requested, granted) => {
       const reason =
         `nofile ulimit ${requested} exceeds this host's hard limit; clamped to ${granted}. ` +
@@ -2473,6 +2609,73 @@ export async function ensureRunning(
     );
   };
 
+  // ulimits sit outside drift detection (changing one doesn't justify the
+  // recreate downtime), which leaves one gap: after an operator raises the
+  // host nofile ceiling, the existing container keeps the lower limit it was
+  // created with forever — a restart re-applies the stored value. Close the
+  // gap here: when the host would now ask for MORE nofile than the previous
+  // create asked, recreate to apply it (completing the documented "raise the
+  // host limit" fix without manual container surgery). When it can't do
+  // better, re-emit the clamp advisory so consumers reflect the live capped
+  // state across Signal K restarts — the create-time event alone would
+  // vanish on the next plugin start while the container stayed capped. A
+  // null probe means "unknown", never capped: no recreate, no advisory.
+  const checkNofileRegrant = async (): Promise<boolean> => {
+    const requestedHard = requestedNofileHard(config.ulimits);
+    if (requestedHard === null) return false;
+    const state = await readContainerNofileState(name, client);
+    const live = state ? (state.live ?? state.asked) : null;
+    if (!state || !live) return false;
+    const ceiling = nofileCeilingFn(runtime);
+    const grantable =
+      ceiling !== null && Number.isFinite(ceiling)
+        ? Math.min(requestedHard, ceiling)
+        : requestedHard;
+    // Compare against what the previous create ASKED for, not what the
+    // container got: a recreate re-asks with `grantable`, so it can only
+    // improve on a smaller previous ask. When the runtime granted less
+    // than asked (a daemon whose own unit limit caps what it hands out —
+    // asking again cannot help), recreating would thrash the container on
+    // every ensureRunning without ever lifting the limit.
+    const asked = state.asked ?? live;
+    if (
+      grantable > asked.hard &&
+      nofileRegrantAttempts.get(fullName) !== live.hard
+    ) {
+      nofileRegrantAttempts.set(fullName, live.hard);
+      debug(
+        `Container ${fullName} was created asking nofile ${asked.hard} but ` +
+          `the host now grants ${grantable}; recreating to apply it`,
+      );
+      if (await recreateUnlessWedged(`nofile ${asked.hard} → ${grantable}`)) {
+        return true;
+      }
+      // Wedged — kept running on the old limit; fall through to advise.
+    }
+    if (requestedHard > live.hard) {
+      safeInvokeUlimitClamped(
+        options?.onUlimitClamped,
+        {
+          ulimit: "nofile",
+          requested: requestedHard,
+          granted: live.hard,
+          reason:
+            `${fullName} is running with a nofile limit of ${live.hard}, ` +
+            `below the requested ${requestedHard}, and a recreate cannot ` +
+            `currently do better. Raise the limit of the host service that ` +
+            `runs the containers to lift it.`,
+        },
+        (err) =>
+          debug(
+            `ensureRunning(${name}): onUlimitClamped handler threw: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          ),
+      );
+    }
+    return false;
+  };
+
   switch (state) {
     case "running": {
       if (_postRecreate) {
@@ -2485,6 +2688,7 @@ export async function ensureRunning(
       }
       if (await checkAndRecreateOnDrift("already running")) return;
       if (await checkAndRecreateOnDigestDrift()) return;
+      if (await checkNofileRegrant()) return;
       debug(`Container ${fullName} already running`);
       return;
     }
@@ -2501,6 +2705,7 @@ export async function ensureRunning(
       }
       if (await checkAndRecreateOnDrift("stopped")) return;
       if (await checkAndRecreateOnDigestDrift()) return;
+      if (await checkNofileRegrant()) return;
       debug(`Starting stopped container ${fullName}`);
       await startByFullName(client, fullName);
       return;
