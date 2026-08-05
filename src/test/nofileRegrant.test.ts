@@ -231,8 +231,14 @@ describe("readContainerNofile", () => {
 describe("ensureRunning — nofile regrant", () => {
   it("recreates a running container when the host now grants more nofile", async () => {
     _setNofileCeilingForTesting(() => 1048576);
-    _setProcLimitsReaderForTesting(() => procLimits(524288, 524288));
     const { client, calls } = makeRegrantClient(liveInspect({ pid: 4242 }));
+    // The recreated container really gets the full limit — the post-recreate
+    // verification must then stay silent.
+    _setProcLimitsReaderForTesting(() =>
+      (calls.get("createContainer") ?? []).length > 0
+        ? procLimits(1048576, 1048576)
+        : procLimits(524288, 524288),
+    );
     const clamps: UlimitClamp[] = [];
     await ensureRunning(
       docker,
@@ -509,6 +515,13 @@ describe("ensureRunning — nofile regrant", () => {
       1,
       "first call may attempt the regrant",
     );
+    assert.equal(
+      clamps.length,
+      1,
+      "the futile recreate must advise in the same call — the create emits " +
+        "no clamp (the ceiling looks fine) so this is the only signal",
+    );
+    assert.equal(clamps[0].granted, 524288);
     await ensureRunning(docker, "questdb", requested, () => {}, opts, client);
     await ensureRunning(docker, "questdb", requested, () => {}, opts, client);
     assert.equal(
@@ -517,6 +530,51 @@ describe("ensureRunning — nofile regrant", () => {
       "further calls must not recreate while the observed limit is unchanged",
     );
     assert.equal(clamps.at(-1)?.granted, 524288);
+  });
+
+  it("post-regrant verify failure never fails the start", async () => {
+    // The recreate succeeded; the verification probe is best-effort
+    // telemetry. A daemon hiccup on that final inspect must degrade to
+    // "no advisory", not reject an ensureRunning that actually worked.
+    _setNofileCeilingForTesting(() => 1048576);
+    _setProcLimitsReaderForTesting(() => procLimits(524288, 524288));
+    const calls = new Map<string, unknown[]>();
+    const daemonFault = new Error("server error") as Error & {
+      statusCode?: number;
+    };
+    daemonFault.statusCode = 500;
+    const inspect = (): Promise<Json> => {
+      if ((calls.get("createContainer") ?? []).length > 0) {
+        return Promise.reject(daemonFault);
+      }
+      if ((calls.get("remove") ?? []).length > 0) {
+        return Promise.reject(notFound("no such object"));
+      }
+      return Promise.resolve(liveInspect({ pid: 4242 }));
+    };
+    const client = makeMockClient({
+      containers: { "sk-questdb": { inspect } },
+      images: { "questdb/questdb:latest": { Id: "sha256:abc", Config: {} } },
+      calls,
+    });
+    const clamps: UlimitClamp[] = [];
+    await ensureRunning(
+      docker,
+      "questdb",
+      requested,
+      () => {},
+      {
+        onUlimitClamped: (e) => {
+          clamps.push(e);
+        },
+      },
+      client,
+    );
+    assert.ok(
+      (calls.get("createContainer") ?? []).length > 0,
+      "the recreate itself must have completed",
+    );
+    assert.deepEqual(clamps, [], "no advisory on an unverifiable outcome");
   });
 
   it("skips the probe entirely when the config requests no nofile ulimit", async () => {
