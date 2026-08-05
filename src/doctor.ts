@@ -1,5 +1,6 @@
 import { readFile, readdir } from "node:fs/promises";
 import { userInfo } from "node:os";
+import { posix } from "node:path";
 import { PassThrough } from "node:stream";
 import type {
   ContainerConfig,
@@ -194,14 +195,17 @@ export interface SelfDeploymentProbes {
    * Read `/proc/mounts` (or equivalent) as parsed entries. Returns
    * `null` when the file is unreadable (non-Linux, sandboxed). Used by
    * the rootless-Podman storage-driver probe to determine the
-   * filesystem backing `~/.local/share/containers` and warn on
-   * filesystems known to interact poorly with `--userns=keep-id`.
+   * filesystem backing the storage graphroot and warn on filesystems
+   * known to interact poorly with `--userns=keep-id`.
    */
   readMounts?: () => Promise<MountEntry[] | null>;
   /**
-   * Resolve the path of the rootless container-storage root for the
-   * current user. Defaults to `$XDG_DATA_HOME/containers` (or
-   * `$HOME/.local/share/containers`) — tests can override.
+   * Fallback resolver for the rootless container-storage root, used
+   * when the daemon's `info()` doesn't report its graphroot
+   * (`DockerRootDir`) or when Signal K is containerized (the daemon's
+   * host path is in a foreign mount namespace). Defaults to
+   * `$XDG_DATA_HOME/containers` (or `$HOME/.local/share/containers`) —
+   * tests can override.
    */
   resolveContainerStoragePath?: () => string | null;
   /**
@@ -463,14 +467,23 @@ function defaultResolveContainerStoragePath(): string | null {
 /**
  * Probe the filesystem backing the rootless Podman storage root. Only
  * meaningful for rootless Podman; callers gate before invoking.
+ * `daemonStorageRoot` (the graphroot the daemon itself reported) wins
+ * over the XDG-derived default-path guess — a `storage.conf` graphroot
+ * override otherwise sends the probe to a directory Podman doesn't use.
+ * Callers must pass it as `null` when Signal K is containerized: the
+ * daemon's path is a host path while `readMounts()` sees the container's
+ * mount table, and matching across the two namespaces can classify a
+ * host ZFS graphroot as the container's overlay root and silently
+ * suppress the hazard warning.
  * Returns `null` when the mount list or storage path can't be
  * determined (non-Linux, sandboxed read of /proc/mounts, etc.).
  */
 async function probeContainerStorage(
   readMounts: () => Promise<MountEntry[] | null>,
   resolveStoragePath: () => string | null,
+  daemonStorageRoot: string | null,
 ): Promise<SelfDeploymentResult["containerStorage"]> {
-  const storagePath = resolveStoragePath();
+  const storagePath = daemonStorageRoot ?? resolveStoragePath();
   if (!storagePath) return null;
   const mounts = await readMounts();
   if (!mounts) return null;
@@ -623,7 +636,13 @@ export async function selfDeployment(
   // in the slow path.
   const containerStorage =
     binaryName === "podman" && info.reachable && info.rootless === true
-      ? await probeContainerStorage(probeReadMounts, probeResolveStoragePath)
+      ? await probeContainerStorage(
+          probeReadMounts,
+          probeResolveStoragePath,
+          // The daemon-reported graphroot is a host path; only usable
+          // when our mount table is the host's too.
+          containerized ? null : info.storageRoot,
+        )
       : null;
 
   // Linger advisory. Runtime-agnostic but rootless-only: rootless podman
@@ -764,6 +783,11 @@ export async function selfDeployment(
 interface DaemonProbeResult {
   reachable: boolean;
   rootless: boolean | null;
+  /**
+   * Daemon-reported storage root (`DockerRootDir` from `info()`); null
+   * when the daemon didn't report one or `info()` failed.
+   */
+  storageRoot: string | null;
   /** Runtime name from `version()` classification; null when version failed. */
   runtime: RuntimeName | null;
   /** Server version from `version().Version`; null when version failed. */
@@ -796,6 +820,13 @@ interface DaemonVersion {
 interface DaemonInfo {
   Rootless?: boolean;
   SecurityOptions?: string[];
+  /**
+   * Podman's compat `/info` populates this with the storage graphroot
+   * (honoring `storage.conf` overrides) — the authoritative answer to
+   * "where does container storage actually live", unlike the
+   * XDG-derived default-path guess.
+   */
+  DockerRootDir?: string;
 }
 
 function classifyRuntimeFromVersion(version: DaemonVersion): RuntimeName {
@@ -816,6 +847,18 @@ function rootlessFromInfo(info: DaemonInfo): boolean | null {
 }
 
 /**
+ * Sanitize the daemon-reported storage root before it drives mount
+ * matching: `findCoveringMount` compares path prefixes, so only an
+ * absolute path is usable and `.`/`..` segments (malformed daemon
+ * payload) would select the wrong mount. Non-string, relative, or empty
+ * values return `null` so the caller falls back to the resolver.
+ */
+function validatedStorageRoot(value: unknown): string | null {
+  if (typeof value !== "string" || !posix.isAbsolute(value)) return null;
+  return posix.normalize(value);
+}
+
+/**
  * Talk to the daemon over the socket: `version()` decides the runtime
  * name + version and doubles as the reachability check; `info()` yields
  * the rootless flag. Both go through `safe()` so a refused or unreadable
@@ -829,6 +872,7 @@ async function probeDaemon(
     return {
       reachable: false,
       rootless: null,
+      storageRoot: null,
       runtime: null,
       version: null,
       errorKind: versionResult.error.kind,
@@ -845,6 +889,7 @@ async function probeDaemon(
   return {
     reachable: true,
     rootless: rootlessFromInfo(info),
+    storageRoot: validatedStorageRoot(info.DockerRootDir),
     runtime: classifyRuntimeFromVersion(version),
     version: version.Version ?? null,
     errorKind: null,

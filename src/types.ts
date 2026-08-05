@@ -1500,7 +1500,14 @@ export interface SelfDeploymentResult {
    * unreadable, no rootless Podman detected).
    */
   containerStorage: {
-    /** Mount point covering the rootless storage root, or `null` if unknown. */
+    /**
+     * Rootless storage root that was probed. On bare-metal Signal K the
+     * daemon-reported graphroot (honors `storage.conf` overrides) wins
+     * over the XDG-derived default path. When Signal K is containerized
+     * the daemon's host path is in a foreign mount namespace, so only
+     * the XDG-derived (same-namespace) path is probed. The enclosing
+     * `containerStorage` value is `null` when no path is available.
+     */
     storagePath: string | null;
     /** Filesystem type as reported by `/proc/mounts`, or `null` if unknown. */
     fstype: string | null;
