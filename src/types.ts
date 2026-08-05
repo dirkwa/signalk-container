@@ -1253,7 +1253,7 @@ export interface ContainerManagerApi {
    * reflects reality — e.g. clear a "capped by the host" advisory once
    * the container actually runs with the full requested limit.
    *
-   * Available in signalk-container 1.26.0+.
+   * Available in signalk-container 1.25.3+.
    */
   getContainerNofile(name: string): Promise<NofileLimits | null>;
   /**
