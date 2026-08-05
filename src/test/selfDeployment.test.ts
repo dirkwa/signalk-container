@@ -1240,6 +1240,36 @@ describe("selfDeployment — containerStorage probe (rootless podman)", () => {
     assert.equal(result.containerStorage?.idmapHazard, true);
   });
 
+  it("normalizes dot segments in DockerRootDir before mount matching", async () => {
+    // A `..` segment must not defeat the prefix comparison in
+    // findCoveringMount — the normalized path resolves to the ext4 root,
+    // not whatever mount the raw string happens to prefix-match.
+    const client = makeMockClient({
+      version: { Version: "5.4.2", Components: [{ Name: "Podman Engine" }] },
+      info: {
+        Rootless: true,
+        SecurityOptions: ["name=rootless"],
+        DockerRootDir: "/var/tmp/../lib/podman-users/synthetic/storage",
+      },
+    });
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({
+        isContainerized: () => false,
+        resolveClient: resolveTo(client),
+        readMounts: async () => zfsHomeMounts,
+        resolveContainerStoragePath: () => null,
+      }),
+    );
+    assert.equal(
+      result.containerStorage?.storagePath,
+      "/var/lib/podman-users/synthetic/storage",
+    );
+    assert.equal(result.containerStorage?.fstype, "ext4");
+    assert.equal(result.containerStorage?.idmapHazard, false);
+  });
+
   it("ignores a non-absolute DockerRootDir and uses the fallback", async () => {
     const client = makeMockClient({
       version: { Version: "5.4.2", Components: [{ Name: "Podman Engine" }] },

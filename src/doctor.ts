@@ -1,5 +1,6 @@
 import { readFile, readdir } from "node:fs/promises";
 import { userInfo } from "node:os";
+import { posix } from "node:path";
 import { PassThrough } from "node:stream";
 import type {
   ContainerConfig,
@@ -844,6 +845,18 @@ function rootlessFromInfo(info: DaemonInfo): boolean | null {
 }
 
 /**
+ * Sanitize the daemon-reported storage root before it drives mount
+ * matching: `findCoveringMount` compares path prefixes, so only an
+ * absolute path is usable and `.`/`..` segments (malformed daemon
+ * payload) would select the wrong mount. Non-string, relative, or empty
+ * values return `null` so the caller falls back to the resolver.
+ */
+function validatedStorageRoot(value: unknown): string | null {
+  if (typeof value !== "string" || !posix.isAbsolute(value)) return null;
+  return posix.normalize(value);
+}
+
+/**
  * Talk to the daemon over the socket: `version()` decides the runtime
  * name + version and doubles as the reachability check; `info()` yields
  * the rootless flag. Both go through `safe()` so a refused or unreadable
@@ -874,14 +887,7 @@ async function probeDaemon(
   return {
     reachable: true,
     rootless: rootlessFromInfo(info),
-    // Only an absolute path is usable — findCoveringMount matches mount
-    // points against it, so a relative or empty value (malformed daemon
-    // payload) must fall back to the resolver instead.
-    storageRoot:
-      typeof info.DockerRootDir === "string" &&
-      info.DockerRootDir.startsWith("/")
-        ? info.DockerRootDir
-        : null,
+    storageRoot: validatedStorageRoot(info.DockerRootDir),
     runtime: classifyRuntimeFromVersion(version),
     version: version.Version ?? null,
     errorKind: null,
