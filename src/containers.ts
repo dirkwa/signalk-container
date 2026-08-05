@@ -2609,6 +2609,29 @@ export async function ensureRunning(
     );
   };
 
+  // Emit the still-capped advisory so consumers keep showing the true live
+  // state; `granted` is the limit the container actually runs with.
+  const adviseNofileCapped = (grantedHard: number, requestedHard: number) =>
+    safeInvokeUlimitClamped(
+      options?.onUlimitClamped,
+      {
+        ulimit: "nofile",
+        requested: requestedHard,
+        granted: grantedHard,
+        reason:
+          `${fullName} is running with a nofile limit of ${grantedHard}, ` +
+          `below the requested ${requestedHard}, and a recreate cannot ` +
+          `currently do better. Raise the limit of the host service that ` +
+          `runs the containers to lift it.`,
+      },
+      (err) =>
+        debug(
+          `ensureRunning(${name}): onUlimitClamped handler threw: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        ),
+    );
+
   // ulimits sit outside drift detection (changing one doesn't justify the
   // recreate downtime), which leaves one gap: after an operator raises the
   // host nofile ceiling, the existing container keeps the lower limit it was
@@ -2648,30 +2671,44 @@ export async function ensureRunning(
           `the host now grants ${grantable}; recreating to apply it`,
       );
       if (await recreateUnlessWedged(`nofile ${asked.hard} → ${grantable}`)) {
+        // Verify the recreate actually lifted the limit. On rootless podman
+        // < 5.5.0 the re-ask is dropped like the original ask (see
+        // nofileRegrantAttempts), so a skewed host — Signal K process limit
+        // above the podman service's — recreates once and lands back on the
+        // old value. Without this post-check that session would show no
+        // advisory at all: the create emits no clamp (the ceiling looks
+        // fine) and this path returned before the still-capped check below.
+        // Best-effort telemetry: the recreate itself succeeded, so a probe
+        // failure here must degrade to "no advisory", never fail the start.
+        // A container that landed exactly on `grantable` got what the create
+        // asked after clamping — the create-time clamp event (if any) already
+        // reported that value, so advising again would duplicate it. A
+        // container that landed anywhere else (a runtime that dropped the
+        // ask) makes the create-time event wrong, and this advisory is the
+        // correction.
+        try {
+          const after = await readContainerNofileState(name, client);
+          const afterLive = after ? (after.live ?? after.asked) : null;
+          if (
+            afterLive &&
+            requestedHard > afterLive.hard &&
+            afterLive.hard !== grantable
+          ) {
+            adviseNofileCapped(afterLive.hard, requestedHard);
+          }
+        } catch (err) {
+          debug(
+            `ensureRunning(${name}): post-regrant nofile verify failed: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
         return true;
       }
       // Wedged — kept running on the old limit; fall through to advise.
     }
     if (requestedHard > live.hard) {
-      safeInvokeUlimitClamped(
-        options?.onUlimitClamped,
-        {
-          ulimit: "nofile",
-          requested: requestedHard,
-          granted: live.hard,
-          reason:
-            `${fullName} is running with a nofile limit of ${live.hard}, ` +
-            `below the requested ${requestedHard}, and a recreate cannot ` +
-            `currently do better. Raise the limit of the host service that ` +
-            `runs the containers to lift it.`,
-        },
-        (err) =>
-          debug(
-            `ensureRunning(${name}): onUlimitClamped handler threw: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          ),
-      );
+      adviseNofileCapped(live.hard, requestedHard);
     }
     return false;
   };

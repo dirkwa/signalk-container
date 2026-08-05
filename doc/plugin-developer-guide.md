@@ -548,7 +548,7 @@ does not exist or neither source is available — treat `null` as "unknown",
 never as a limit. Use it to verify whether a previously reported ulimit
 clamp still reflects reality (e.g. clear a "capped by the host" advisory
 once the container runs with the full requested limit). Available in
-signalk-container 1.26.0+.
+signalk-container 1.25.3+.
 
 ### `pullImage(image, onProgress?): Promise<void>`
 
