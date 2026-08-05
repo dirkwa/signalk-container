@@ -201,9 +201,11 @@ export interface SelfDeploymentProbes {
   readMounts?: () => Promise<MountEntry[] | null>;
   /**
    * Fallback resolver for the rootless container-storage root, used
-   * only when the daemon's `info()` doesn't report its graphroot
-   * (`DockerRootDir`). Defaults to `$XDG_DATA_HOME/containers` (or
-   * `$HOME/.local/share/containers`) — tests can override.
+   * when the daemon's `info()` doesn't report its graphroot
+   * (`DockerRootDir`) or when Signal K is containerized (the daemon's
+   * host path is in a foreign mount namespace). Defaults to
+   * `$XDG_DATA_HOME/containers` (or `$HOME/.local/share/containers`) —
+   * tests can override.
    */
   resolveContainerStoragePath?: () => string | null;
   /**

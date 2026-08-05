@@ -1219,8 +1219,6 @@ describe("selfDeployment — containerStorage probe (rootless podman)", () => {
   });
 
   it("falls back to the XDG-derived path when info() lacks DockerRootDir", async () => {
-    // rootlessPodman()'s info payload carries no DockerRootDir, so the
-    // resolveContainerStoragePath fallback drives the probe.
     const result = await selfDeployment(
       "auto",
       null,
