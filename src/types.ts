@@ -422,6 +422,14 @@ export interface ContainerConfig {
    * clamp is logged. Values must be non-negative integers with `hard >=
    * soft` — an invalid limit throws at `ensureRunning` time.
    *
+   * Known runtime gap: rootless podman < 5.5.0 silently DROPS the ulimit
+   * request sent over the docker-compat API (containers/podman#25881,
+   * fixed by #25908) — the container instead inherits the podman
+   * service's own limits. On such hosts the effective lever is the limit
+   * of the systemd user manager that parents the podman service; the
+   * `nofile` regrant in `ensureRunning` still converges the container
+   * onto whatever that allows.
+   *
    * Not part of drift detection — like `labels`/`healthcheck`, changing a
    * ulimit does not recreate a running container; it takes effect on the
    * next recreate for another reason or a clean start. One targeted

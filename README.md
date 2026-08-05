@@ -339,6 +339,14 @@ what the host can now grant and recreates the container to apply the raise.
 On older versions, remove the container (`podman rm -f sk-<name>`) so the
 next plugin start recreates it with the raised limit.
 
+> **Rootless Podman < 5.5.0**: the docker-compat API silently drops the
+> ulimit request at container create
+> ([containers/podman#25881](https://github.com/containers/podman/issues/25881),
+> fixed in 5.5.0) — containers instead **inherit the podman service's own
+> limits**. The user-manager drop-in above is then not just the ceiling but
+> the actual source of the container's limit, and the recreate described
+> above is what picks it up.
+
 **2. System-wide default (Raspberry Pi OS / openplotter, and the reliable
 fallback).** Stock Debian / Pi OS ships `/etc/systemd/system.conf` with a
 commented `#DefaultLimitNOFILE=1024:524288` — that 524288 _hard_ default is

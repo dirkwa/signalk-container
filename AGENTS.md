@@ -61,6 +61,14 @@ Every managed container, one-shot job container, and job label carries a **names
 - The **label keys** are namespaced too (`<ns>-charts-job`, `<ns>-job-owner`, `<ns>-job-label`, `<ns>-requested-resources`), so a dev instance's reap query doesn't even _list_ production's jobs. The name-prefix guard in `orphanFromContainer` (`name.startsWith(jobPrefix())`) remains the unspoofable-by-label trait — and being namespaced, it can never match a foreign-namespace helper.
 - The devcontainer sets `SIGNALK_CONTAINER_NAMESPACE=devpod` (in the installer repo's `dev/dev.sh`), so its containers are `devpod-<name>`. Note the prefix isolates **names and reaping**, not host **ports** — a consumer plugin that publishes a fixed host port still collides port-wise with its production twin; that is handled separately (pick non-colliding ports for dev).
 
+### nofile ulimits: rootless podman < 5.5.0 drops the API request
+
+Rootless podman below 5.5.0 silently ignores `HostConfig.Ulimits` on the docker-compat create endpoint (containers/podman#25881, fixed by #25908) — verified live on 5.4.2: the created container inherits the **podman service's** limits and inspect echoes those effective values back as `RLIMIT_NOFILE`, not the request. Three consequences baked into the code:
+
+- `readContainerNofile` treats the inspect echo as "asked" and `/proc/<pid>/limits` as "live"; on broken podman the two sources agree on the effective value, so the probe stays truthful even though the request was dropped.
+- The `ensureRunning` nofile regrant bounds recreates two ways: against the previous create's _ask_ (daemon-capped Docker, where re-asking can't help) **and** against a per-observed-limit attempt map (`nofileRegrantAttempts`) — required because on broken podman the echo is not the ask, so the ask-bound alone cannot detect a failed attempt. Never remove either bound in isolation.
+- The integration canary `src/test/integration/nofileProbe.test.ts` asserts probe-vs-/proc agreement and stopped-echo consistency on every runtime, and pins the requested value only where the runtime honors the API request (docker, podman ≥ 5.5.0).
+
 ### Podman SELinux flag
 
 `volumeArg(hostPath, containerPath, runtime)` adds `:Z` for podman bind mounts (Fedora/RHEL SELinux relabel). Named volumes — host strings without a leading `/` or `.` — MUST NOT receive `:Z`; podman rejects them with `"invalid option z for named volume"`. Always go through `volumeArg`, never build `-v host:container[:flags]` strings inline.
