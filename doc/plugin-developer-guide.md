@@ -537,6 +537,19 @@ await containers.removeManagedData("questdb", questdbDataDir, {
 
 Returns `'running'`, `'stopped'`, `'missing'`, or `'no-runtime'`.
 
+### `getContainerNofile(name): Promise<NofileLimits | null>`
+
+Reads the `nofile` (`RLIMIT_NOFILE`) limits the managed container is
+_actually_ running with — as opposed to the value requested at create time,
+which may have been clamped to the host ceiling. Primary source is the live
+`/proc/<container-pid>/limits`; falls back to the create-time
+`HostConfig.Ulimits` echoed by inspect. Returns `null` when the container
+does not exist or neither source is available — treat `null` as "unknown",
+never as a limit. Use it to verify whether a previously reported ulimit
+clamp still reflects reality (e.g. clear a "capped by the host" advisory
+once the container runs with the full requested limit). Available in
+signalk-container 1.26.0+.
+
 ### `pullImage(image, onProgress?): Promise<void>`
 
 Pulls an image. `onProgress` receives line-by-line pull output.

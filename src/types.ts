@@ -424,7 +424,13 @@ export interface ContainerConfig {
    *
    * Not part of drift detection — like `labels`/`healthcheck`, changing a
    * ulimit does not recreate a running container; it takes effect on the
-   * next recreate for another reason or a clean start.
+   * next recreate for another reason or a clean start. One targeted
+   * exception: `nofile` is live-probed on every `ensureRunning`, and when
+   * the host ceiling has been RAISED since the container was created (so
+   * more of the request has become grantable than the container runs
+   * with), the container is recreated to apply it — that is an operator
+   * completing the documented "raise the host limit" fix, not a config
+   * edit, and without the recreate the raise could never take effect.
    */
   ulimits?: Record<string, number | { soft: number; hard: number }>;
   /**
@@ -1024,6 +1030,12 @@ export interface EnsureRunningOptions extends HealthCheckOptions {
   pluginVersion?: string;
 }
 
+/** The nofile (`RLIMIT_NOFILE`) limits a process runs with. `Infinity` = unlimited. */
+export interface NofileLimits {
+  soft: number;
+  hard: number;
+}
+
 export interface ContainerManagerApi {
   getRuntime(): ContainerRuntimeInfo | null;
   /**
@@ -1216,6 +1228,26 @@ export interface ContainerManagerApi {
     options?: { ownerPluginId?: string },
   ): Promise<void>;
   getState(name: string): Promise<ContainerState>;
+  /**
+   * Read the nofile (`RLIMIT_NOFILE`) limits a managed container is
+   * ACTUALLY running with — as opposed to the value requested at create
+   * time, which may have been clamped to the host ceiling.
+   *
+   * Primary source is the kernel's live `/proc/<container-pid>/limits`
+   * (readable under bare-metal Signal K + rootless Podman); falls back to
+   * the create-time `HostConfig.Ulimits` echoed by inspect, which equals
+   * the live value whenever present. Returns null when the container does
+   * not exist or neither source is available (e.g. containerized Signal K
+   * without pid-namespace access) — treat null as "unknown", never as a
+   * limit.
+   *
+   * Use this to verify whether a previously reported ulimit clamp still
+   * reflects reality — e.g. clear a "capped by the host" advisory once
+   * the container actually runs with the full requested limit.
+   *
+   * Available in signalk-container 1.26.0+.
+   */
+  getContainerNofile(name: string): Promise<NofileLimits | null>;
   /**
    * Run a one-shot helper container to completion, streaming its output
    * via the `onProgress`/`onStdoutLine`/`onStderrLine` callbacks and

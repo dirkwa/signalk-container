@@ -68,6 +68,7 @@ import {
   prefixedName,
   pruneImages,
   pullImage,
+  readContainerNofile,
   runScheduledPrune,
   qualifyImage as qualifyImageForRuntime,
   removeContainer,
@@ -1628,6 +1629,13 @@ export default (app: App) => {
     async getState(name: string): Promise<ContainerState> {
       if (!runtimeInfo) return "no-runtime";
       return getContainerState(runtimeInfo, name);
+    },
+
+    async getContainerNofile(
+      name: string,
+    ): Promise<{ soft: number; hard: number } | null> {
+      if (!runtimeInfo) return null;
+      return readContainerNofile(name);
     },
 
     async runJob(config: ContainerJobConfig): Promise<ContainerJobResult> {
