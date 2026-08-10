@@ -95,21 +95,29 @@ describe("doctor — rootless Podman nofile advisory (live runtime)", () => {
     }
 
     const result = await selfDeployment("auto");
-    const versionOnly =
-      result.remediation.length > 0 &&
-      result.remediation.every(
-        (l) =>
-          l.includes(NOFILE_ADVICE_MARKER) ||
-          l.includes(EPIPE_ADVICE_MARKER) ||
-          // Continuation lines of the two version advisories.
-          l.includes("Containers inherit") ||
-          l.includes("Impact:") ||
-          l.includes("Upgrade Podman") ||
-          l.includes("Workaround without upgrading"),
-      );
 
-    if (!versionOnly) {
-      t.skip("host carries non-version remediation; status not attributable");
+    // Attribute by which advisory BLOCKS are present rather than by
+    // matching every line: the blocks carry indented continuation lines
+    // (command examples), and an exhaustive line matcher silently turns
+    // this assertion into a skip the moment one is reworded — which is
+    // exactly how it stopped running once already.
+    const hasVersionAdvice =
+      hasMarker(result.remediation, NOFILE_ADVICE_MARKER) ||
+      hasMarker(result.remediation, EPIPE_ADVICE_MARKER);
+    const hasOtherAdviceBlock = result.remediation.some(
+      (l) =>
+        // Headline lines of the other advisory blocks the doctor can
+        // attach to a healthy host.
+        l.includes("Rootless Podman storage appears") ||
+        l.includes("aardvark-dns is not installed") ||
+        l.includes("systemd linger is not enabled"),
+    );
+
+    if (!hasVersionAdvice || hasOtherAdviceBlock) {
+      t.skip(
+        `host carries no version-only remediation (version=${String(hasVersionAdvice)}, ` +
+          `other=${String(hasOtherAdviceBlock)}); status not attributable`,
+      );
       return;
     }
 

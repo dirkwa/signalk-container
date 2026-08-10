@@ -317,7 +317,10 @@ const REMEDIATION_OLD_PODMAN_NOFILE = [
   "Containers inherit the podman service's limits instead of the requested value, and inspect reports the inherited value back — so the drop is invisible unless you compare against /proc/<pid>/limits.",
   "Impact: containers that need a high descriptor ceiling (QuestDB is the common case) can hit 'too many open files' under load even though the limit was requested.",
   "Upgrade Podman to >= 5.5 (Debian Trixie ships 5.4.x; use backports or the OBS repo).",
-  "Workaround without upgrading: raise the limit for the podman service itself, which the containers then inherit — e.g. LimitNOFILE= in a systemd drop-in for the user's podman.service.",
+  "Workaround without upgrading: raise the limit on the podman service itself, which the containers then inherit. Set LimitNOFILE= to at least the value your containers request, in a systemd drop-in for the user's podman.service:",
+  "  systemctl --user edit podman.service   # then, under [Service]:",
+  "    LimitNOFILE=65536",
+  "  systemctl --user daemon-reload && systemctl --user restart podman.socket",
 ];
 
 // Parse the leading `major.minor` from a version string like "4.3.1" or
@@ -1552,4 +1555,26 @@ export function isDashboardDeploymentError(
   status: SelfDeploymentStatus,
 ): boolean {
   return DASHBOARD_ERROR_STATUSES.has(status);
+}
+
+/**
+ * How a doctor result should reach the operator at plugin startup.
+ *
+ * `"error"` — degraded deployment: dashboard error plus a logged
+ * remediation block. `"advisory"` — healthy host that still carries
+ * remediation (an old-Podman version finding is the canonical case):
+ * log it, but never set a plugin error, or a working install goes red
+ * on the dashboard. `"none"` — nothing to say.
+ *
+ * Split out from the startup closure so the decision is testable at a
+ * function boundary: an advisory on a healthy status is otherwise only
+ * reachable on a host that happens to be old, which no CI runner
+ * guarantees.
+ */
+export function doctorSurfacing(
+  status: SelfDeploymentStatus,
+  remediationCount: number,
+): "error" | "advisory" | "none" {
+  if (isDashboardDeploymentError(status)) return "error";
+  return remediationCount > 0 ? "advisory" : "none";
 }
