@@ -318,8 +318,10 @@ const REMEDIATION_OLD_PODMAN_NOFILE = [
   "Impact: containers that need a high descriptor ceiling (QuestDB is the common case) can hit 'too many open files' under load even though the limit was requested.",
   "Fix without upgrading: raise the limit on the podman service itself, which the containers then inherit. Set LimitNOFILE= to at least the value your containers request, in a systemd drop-in for the user's podman.service:",
   "  systemctl --user edit podman.service   # then, under [Service]:",
-  "    LimitNOFILE=65536",
+  "    LimitNOFILE=<at least the requested value>   # e.g. 65536",
   "  systemctl --user daemon-reload && systemctl --user restart podman.service",
+  "A container inherits this limit when it is CREATED, so restarting the service does not raise it for containers that are already running — they must be recreated (removing a managed container is enough; Signal K recreates it on the next start or config change).",
+  "Containers run from their own systemd units (Quadlet, as the universal installer deploys) inherit from THAT unit, not from podman.service — set LimitNOFILE= there instead.",
   "Upgrading to Podman >= 5.5 also fixes it, but on Debian Trixie (podman 5.4.x) there is no stable upgrade path: trixie-backports carries no podman package, so a newer version means the upstream OBS/Kubic repo or a non-Debian build. The drop-in above is the lower-risk route on a stable host.",
 ];
 
