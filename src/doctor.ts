@@ -304,6 +304,25 @@ const REMEDIATION_OLD_PODMAN = [
   "Upgrade Podman to >= 4.5 (ideally 5.x). On Debian/Ubuntu this usually means a backports or OBS/Kubic repo; on Fedora/RHEL a dnf update.",
 ];
 
+// Rootless Podman below this silently DROPS `HostConfig.Ulimits` on the
+// docker-compat create endpoint (containers/podman#25881): the container
+// inherits the podman service's limits and inspect echoes those effective
+// values back, so the request fails without an error. Rootful Podman and
+// Docker honour the request and are not affected. Advisory only; we never
+// escalate status for it.
+const PODMAN_MIN_NOFILE_HONORED = { major: 5, minor: 5 };
+
+const REMEDIATION_OLD_PODMAN_NOFILE = [
+  "Rootless Podman is older than 5.5; it silently ignores file-descriptor (nofile) limit requests on the docker-compat API (containers/podman#25881).",
+  "Containers inherit the podman service's limits instead of the requested value, and inspect reports the inherited value back — so the drop is invisible unless you compare against /proc/<pid>/limits.",
+  "Impact: containers that need a high descriptor ceiling (QuestDB is the common case) can hit 'too many open files' under load even though the limit was requested.",
+  "Upgrade Podman to >= 5.5 (Debian Trixie ships 5.4.x; use backports or the OBS repo).",
+  "Workaround without upgrading: raise the limit on the podman service itself, which the containers then inherit. Set LimitNOFILE= to at least the value your containers request, in a systemd drop-in for the user's podman.service:",
+  "  systemctl --user edit podman.service   # then, under [Service]:",
+  "    LimitNOFILE=65536",
+  "  systemctl --user daemon-reload && systemctl --user restart podman.service",
+];
+
 // Parse the leading `major.minor` from a version string like "4.3.1" or
 // "5.4.2-dev". Returns null when it doesn't start with two dot-separated ints.
 function parseMajorMinor(
@@ -753,11 +772,20 @@ export async function selfDeployment(
   // surface the upgrade hint so a future large helper job's EPIPE isn't a
   // mystery. Never escalate status (mirrors the storage-driver advice).
   const podmanVersion = parseMajorMinor(binaryVersion);
+  const isPodman = binaryName === "podman" && podmanVersion !== null;
   const oldPodmanAdvice =
-    binaryName === "podman" &&
-    podmanVersion !== null &&
-    isBelow(podmanVersion, PODMAN_MIN_RECOMMENDED)
+    isPodman && isBelow(podmanVersion, PODMAN_MIN_RECOMMENDED)
       ? [...REMEDIATION_OLD_PODMAN]
+      : [];
+
+  // The nofile drop is rootless-only: rootful Podman honours the API
+  // request. Reported alongside (not instead of) the 4.5 advice — a
+  // 4.3 host hits both defects, and each names a different symptom.
+  const nofileAdvice =
+    isPodman &&
+    info.rootless === true &&
+    isBelow(podmanVersion, PODMAN_MIN_NOFILE_HONORED)
+      ? [...REMEDIATION_OLD_PODMAN_NOFILE]
       : [];
 
   return {
@@ -770,7 +798,7 @@ export async function selfDeployment(
     },
     selfId,
     status: "ok",
-    remediation: oldPodmanAdvice,
+    remediation: [...oldPodmanAdvice, ...nofileAdvice],
   };
 }
 
@@ -1527,4 +1555,25 @@ export function isDashboardDeploymentError(
   status: SelfDeploymentStatus,
 ): boolean {
   return DASHBOARD_ERROR_STATUSES.has(status);
+}
+
+/**
+ * How a doctor result should reach the operator at plugin startup.
+ *
+ * `"error"` — degraded deployment: dashboard error plus a logged
+ * remediation block. `"advisory"` — healthy host that still carries
+ * remediation (an old-Podman version finding is the canonical case):
+ * log it, but never set a plugin error, or a working install goes red
+ * on the dashboard. `"none"` — nothing to say.
+ *
+ * A standalone function rather than inline startup logic so the decision
+ * is testable at a function boundary on any host: the advisory case
+ * depends on the daemon's version, which no CI runner guarantees.
+ */
+export function doctorSurfacing(
+  status: SelfDeploymentStatus,
+  remediationCount: number,
+): "error" | "advisory" | "none" {
+  if (isDashboardDeploymentError(status)) return "error";
+  return remediationCount > 0 ? "advisory" : "none";
 }

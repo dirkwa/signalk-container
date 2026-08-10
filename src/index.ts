@@ -104,6 +104,7 @@ import { PruneScheduler, FilePruneStateStore } from "./pruneScheduler.js";
 import {
   generateSetupSnippet,
   imageRunsAsUser,
+  doctorSurfacing,
   isDashboardDeploymentError,
   selfDeployment,
 } from "./doctor.js";
@@ -2366,7 +2367,11 @@ export default (app: App) => {
         // with a green status hiding a real problem. The headline mirrors
         // the no-runtime path; full remediation goes to the server log.
         const doctor = await selfDeployment(preference);
-        if (isDashboardDeploymentError(doctor.status)) {
+        const surfacing = doctorSurfacing(
+          doctor.status,
+          doctor.remediation.length,
+        );
+        if (surfacing === "error") {
           const headline = headlineForDoctorStatus(doctor.status);
           app.setPluginError(
             `${headline}. Open this plugin's config screen and click Doctor for details and remediation.`,
@@ -2376,6 +2381,14 @@ export default (app: App) => {
               `signalk-container deployment doctor — ${headline}:\n${doctor.remediation.join("\n")}`,
             );
           }
+        } else if (surfacing === "advisory") {
+          // A healthy host can still carry advisory remediation (old
+          // Podman, rootless nofile drop). Log it without calling
+          // setPluginError, so the hint is discoverable without turning a
+          // working install red on the dashboard.
+          app.error(
+            `signalk-container deployment doctor — advisory:\n${doctor.remediation.join("\n")}`,
+          );
         }
         // Raise/clear the deployment notification for BOTH the degraded and
         // the healthy case (a prior start's alert clears when the host
