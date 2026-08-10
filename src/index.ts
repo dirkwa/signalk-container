@@ -2376,6 +2376,13 @@ export default (app: App) => {
               `signalk-container deployment doctor — ${headline}:\n${doctor.remediation.join("\n")}`,
             );
           }
+        } else if (doctor.remediation.length > 0) {
+          // A healthy host can still carry advisory remediation (old
+          // Podman, rootless nofile drop). Log it at warn level so the
+          // hint is discoverable without turning a working install red.
+          app.error(
+            `signalk-container deployment doctor — advisory:\n${doctor.remediation.join("\n")}`,
+          );
         }
         // Raise/clear the deployment notification for BOTH the degraded and
         // the healthy case (a prior start's alert clears when the host
