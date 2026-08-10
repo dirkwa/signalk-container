@@ -301,7 +301,7 @@ const PODMAN_MIN_RECOMMENDED = { major: 4, minor: 5 };
 
 const REMEDIATION_OLD_PODMAN = [
   "Podman is older than 4.5; its docker-compat API can reset the socket on large helper-job requests (e.g. converting big chart bundles fails with 'write EPIPE').",
-  "Upgrade Podman to >= 4.5 (ideally 5.x). On Debian/Ubuntu this usually means a backports or OBS/Kubic repo; on Fedora/RHEL a dnf update.",
+  "Upgrade Podman to >= 4.5 (ideally 5.x). Debian carries no podman in backports, so on Debian this means the upstream OBS/Kubic repo or a newer release; on Ubuntu a PPA or release upgrade; on Fedora/RHEL a dnf update.",
 ];
 
 // Rootless Podman below this silently DROPS `HostConfig.Ulimits` on the
@@ -316,11 +316,13 @@ const REMEDIATION_OLD_PODMAN_NOFILE = [
   "Rootless Podman is older than 5.5; it silently ignores file-descriptor (nofile) limit requests on the docker-compat API (containers/podman#25881).",
   "Containers inherit the podman service's limits instead of the requested value, and inspect reports the inherited value back — so the drop is invisible unless you compare against /proc/<pid>/limits.",
   "Impact: containers that need a high descriptor ceiling (QuestDB is the common case) can hit 'too many open files' under load even though the limit was requested.",
-  "Upgrade Podman to >= 5.5 (Debian Trixie ships 5.4.x; use backports or the OBS repo).",
-  "Workaround without upgrading: raise the limit on the podman service itself, which the containers then inherit. Set LimitNOFILE= to at least the value your containers request, in a systemd drop-in for the user's podman.service:",
+  "Fix without upgrading: raise the limit on the podman service itself, which the containers then inherit. Set LimitNOFILE= to at least the value your containers request, in a systemd drop-in for the user's podman.service:",
   "  systemctl --user edit podman.service   # then, under [Service]:",
-  "    LimitNOFILE=65536",
+  "    LimitNOFILE=<at least the requested value>   # e.g. 65536",
   "  systemctl --user daemon-reload && systemctl --user restart podman.service",
+  "A container inherits this limit when it is CREATED, so restarting the service does not raise it for containers that are already running — they must be recreated (removing a managed container is enough; Signal K recreates it on the next start or config change).",
+  "Containers run from their own systemd units (Quadlet, as the universal installer deploys) inherit from THAT unit, not from podman.service — set LimitNOFILE= there instead.",
+  "Upgrading to Podman >= 5.5 also fixes it, but on Debian Trixie (podman 5.4.x) there is no stable upgrade path: trixie-backports carries no podman package, so a newer version means the upstream OBS/Kubic repo or a non-Debian build. The drop-in above is the lower-risk route on a stable host.",
 ];
 
 // Parse the leading `major.minor` from a version string like "4.3.1" or
