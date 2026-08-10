@@ -1,9 +1,16 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { selfDeployment } from "../../doctor.js";
 import { detectRuntime } from "../../runtime.js";
-import { compareVersions } from "../../updates/semver.js";
-import type { ContainerRuntimeInfo } from "../../types.js";
+import containerManagerPlugin from "../../index.js";
+import type {
+  ContainerManagerApi,
+  ContainerRuntimeInfo,
+  PluginConfig,
+} from "../../types.js";
 
 async function hasContainerRuntime(): Promise<ContainerRuntimeInfo | null> {
   if (process.platform === "win32") return null;
@@ -14,7 +21,25 @@ async function hasContainerRuntime(): Promise<ContainerRuntimeInfo | null> {
 // exported: this test is the independent check that the doctor's verdict
 // matches the host's real version, so deriving both from one constant
 // would make the assertion circular.
-const PODMAN_NOFILE_FIXED = "5.5.0";
+const PODMAN_NOFILE_FIXED = { major: 5, minor: 5 };
+
+/**
+ * Compare the live version against the floor on major.minor only —
+ * the same policy the doctor applies. A semver comparison would rank a
+ * prerelease build ("5.5.0-dev") BELOW 5.5.0 and expect an advisory,
+ * while the doctor reads its leading major.minor as 5.5 and emits none;
+ * such a host would then fail this test despite correct behaviour.
+ */
+function isBelowNofileFloor(version: string): boolean {
+  const m = /^(\d+)\.(\d+)/.exec(version.trim());
+  if (!m) return false;
+  const major = Number(m[1]);
+  const minor = Number(m[2]);
+  return (
+    major < PODMAN_NOFILE_FIXED.major ||
+    (major === PODMAN_NOFILE_FIXED.major && minor < PODMAN_NOFILE_FIXED.minor)
+  );
+}
 
 const NOFILE_ADVICE_MARKER = "older than 5.5";
 const EPIPE_ADVICE_MARKER = "older than 4.5";
@@ -52,7 +77,7 @@ describe("doctor — rootless Podman nofile advisory (live runtime)", () => {
     const isOldRootlessPodman =
       runtime.runtime === "podman" &&
       result.daemon.rootless === true &&
-      compareVersions(runtime.version, PODMAN_NOFILE_FIXED) < 0;
+      isBelowNofileFloor(runtime.version);
 
     assert.equal(
       hasMarker(result.remediation, NOFILE_ADVICE_MARKER),
@@ -96,5 +121,92 @@ describe("doctor — rootless Podman nofile advisory (live runtime)", () => {
       "ok",
       "a version advisory alone must never degrade deployment status",
     );
+  });
+});
+
+/**
+ * Boot the real plugin against the live runtime with an `app` that
+ * records what reached the operator, so the startup path's surfacing
+ * decision can be asserted rather than inferred from `selfDeployment`.
+ */
+async function bootRecordingPlugin(): Promise<{
+  errors: string[];
+  pluginErrors: string[];
+  stop: () => Promise<void>;
+}> {
+  const dataDir = mkdtempSync(join(tmpdir(), "skc-version-advisory-test-"));
+  const errors: string[] = [];
+  const pluginErrors: string[] = [];
+  const noop = () => {};
+  const app = {
+    debug: noop,
+    error: (...args: unknown[]) => {
+      errors.push(args.map(String).join(" "));
+    },
+    setPluginStatus: noop,
+    setPluginError: (...args: unknown[]) => {
+      pluginErrors.push(args.map(String).join(" "));
+    },
+    getDataDirPath: () => dataDir,
+    config: { configPath: dataDir },
+  };
+  const plugin = containerManagerPlugin(app);
+  await plugin.start({ disableUserNamespaceRemap: true } as PluginConfig);
+  const api = (
+    globalThis as { __signalk_containerManager?: ContainerManagerApi }
+  ).__signalk_containerManager;
+  if (!api) throw new Error("plugin did not expose containerManager API");
+  await api.whenReady();
+  return {
+    errors,
+    pluginErrors,
+    stop: async () => {
+      if (plugin.stop) await plugin.stop();
+      rmSync(dataDir, { recursive: true, force: true });
+    },
+  };
+}
+
+// The startup path decides how a doctor finding reaches the operator.
+// `selfDeployment` returning advice proves nothing on its own — before
+// this branch existed, remediation on a healthy host was computed and
+// then silently dropped.
+describe("plugin startup — advisory surfacing (live runtime)", () => {
+  it("logs advisory remediation without flagging the plugin as errored", async (t) => {
+    const runtime = await hasContainerRuntime();
+    if (!runtime) {
+      t.skip("no container runtime available");
+      return;
+    }
+
+    const doctor = await selfDeployment("auto");
+    if (doctor.status !== "ok" || doctor.remediation.length === 0) {
+      t.skip(
+        `host carries no advisory on a healthy status (status=${doctor.status}, ` +
+          `remediation=${String(doctor.remediation.length)})`,
+      );
+      return;
+    }
+
+    const booted = await bootRecordingPlugin();
+    try {
+      const advisoryLogged = booted.errors.some((m) =>
+        m.includes("deployment doctor — advisory"),
+      );
+      assert.ok(
+        advisoryLogged,
+        `advisory remediation must reach the log; saw: ${JSON.stringify(booted.errors)}`,
+      );
+
+      // Warn-only contract: the operator learns about the finding, but
+      // the dashboard stays green.
+      assert.deepEqual(
+        booted.pluginErrors,
+        [],
+        "a healthy host must not be flagged via setPluginError",
+      );
+    } finally {
+      await booted.stop();
+    }
   });
 });

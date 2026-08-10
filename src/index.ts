@@ -2378,8 +2378,9 @@ export default (app: App) => {
           }
         } else if (doctor.remediation.length > 0) {
           // A healthy host can still carry advisory remediation (old
-          // Podman, rootless nofile drop). Log it at warn level so the
-          // hint is discoverable without turning a working install red.
+          // Podman, rootless nofile drop). Log it without calling
+          // setPluginError, so the hint is discoverable without turning a
+          // working install red on the dashboard.
           app.error(
             `signalk-container deployment doctor — advisory:\n${doctor.remediation.join("\n")}`,
           );

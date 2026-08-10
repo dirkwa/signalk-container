@@ -305,11 +305,11 @@ const REMEDIATION_OLD_PODMAN = [
 ];
 
 // Rootless Podman below this silently DROPS `HostConfig.Ulimits` on the
-// docker-compat create endpoint (containers/podman#25881, fixed by #25908):
-// the container inherits the podman service's limits and inspect echoes
-// those effective values back, so the request fails without an error.
-// Rootful Podman and Docker honour the request and are not affected.
-// Advisory only; we never escalate status for it.
+// docker-compat create endpoint (containers/podman#25881): the container
+// inherits the podman service's limits and inspect echoes those effective
+// values back, so the request fails without an error. Rootful Podman and
+// Docker honour the request and are not affected. Advisory only; we never
+// escalate status for it.
 const PODMAN_MIN_NOFILE_HONORED = { major: 5, minor: 5 };
 
 const REMEDIATION_OLD_PODMAN_NOFILE = [
