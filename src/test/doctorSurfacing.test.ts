@@ -4,8 +4,8 @@ import { doctorSurfacing } from "../doctor.js";
 
 // The startup path's surfacing decision. The live-runtime integration
 // test only exercises the advisory branch on a host that HAS an advisory
-// (old rootless podman), so on a 5.5+ or Docker CI runner it skips —
-// these cases are what keep the branch covered everywhere.
+// (old rootless podman); these cases cover it on every host, including a
+// 5.5+ or Docker CI runner.
 describe("doctorSurfacing", () => {
   it("degraded status → error, regardless of remediation count", () => {
     assert.equal(doctorSurfacing("cgroup-controllers-incomplete", 0), "error");
@@ -14,8 +14,8 @@ describe("doctorSurfacing", () => {
   });
 
   it("healthy status with remediation → advisory, never error", () => {
-    // The regression this guards: remediation on an `ok` status used to
-    // be computed and then silently dropped.
+    // Remediation on an `ok` status must reach the operator as an
+    // advisory; it is never dropped just because the host is healthy.
     assert.equal(doctorSurfacing("ok", 5), "advisory");
     assert.equal(doctorSurfacing("ok", 1), "advisory");
   });

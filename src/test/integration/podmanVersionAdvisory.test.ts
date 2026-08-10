@@ -97,10 +97,10 @@ describe("doctor — rootless Podman nofile advisory (live runtime)", () => {
     const result = await selfDeployment("auto");
 
     // Attribute by which advisory BLOCKS are present rather than by
-    // matching every line: the blocks carry indented continuation lines
-    // (command examples), and an exhaustive line matcher silently turns
-    // this assertion into a skip the moment one is reworded — which is
-    // exactly how it stopped running once already.
+    // matching every line. The blocks carry indented continuation lines
+    // (command examples), so headline matching keeps this assertion
+    // running when they are reworded; an exhaustive line matcher would
+    // silently degrade it to a skip.
     const hasVersionAdvice =
       hasMarker(result.remediation, NOFILE_ADVICE_MARKER) ||
       hasMarker(result.remediation, EPIPE_ADVICE_MARKER);

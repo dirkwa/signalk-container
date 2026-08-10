@@ -320,7 +320,7 @@ const REMEDIATION_OLD_PODMAN_NOFILE = [
   "Workaround without upgrading: raise the limit on the podman service itself, which the containers then inherit. Set LimitNOFILE= to at least the value your containers request, in a systemd drop-in for the user's podman.service:",
   "  systemctl --user edit podman.service   # then, under [Service]:",
   "    LimitNOFILE=65536",
-  "  systemctl --user daemon-reload && systemctl --user restart podman.socket",
+  "  systemctl --user daemon-reload && systemctl --user restart podman.service",
 ];
 
 // Parse the leading `major.minor` from a version string like "4.3.1" or
@@ -1566,10 +1566,9 @@ export function isDashboardDeploymentError(
  * log it, but never set a plugin error, or a working install goes red
  * on the dashboard. `"none"` — nothing to say.
  *
- * Split out from the startup closure so the decision is testable at a
- * function boundary: an advisory on a healthy status is otherwise only
- * reachable on a host that happens to be old, which no CI runner
- * guarantees.
+ * A standalone function rather than inline startup logic so the decision
+ * is testable at a function boundary on any host: the advisory case
+ * depends on the daemon's version, which no CI runner guarantees.
  */
 export function doctorSurfacing(
   status: SelfDeploymentStatus,
