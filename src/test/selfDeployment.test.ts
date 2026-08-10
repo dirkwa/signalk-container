@@ -216,7 +216,10 @@ describe("selfDeployment — happy paths", () => {
       null,
       probesWith({
         isContainerized: () => false,
-        resolveClient: resolveTo(rootlessPodman()),
+        // Pinned above every version floor so this "everything is fine"
+        // baseline asserts an empty remediation without an advisory
+        // (the default 5.4.2 trips the rootless nofile advice).
+        resolveClient: resolveTo(rootlessPodman("5.5.0")),
       }),
     );
     assert.equal(result.status, "ok");
@@ -224,7 +227,7 @@ describe("selfDeployment — happy paths", () => {
     assert.equal(result.binary.name, "podman");
     // No binary concept over the socket — path is always null now.
     assert.equal(result.binary.path, null);
-    assert.equal(result.binary.version, "5.4.2");
+    assert.equal(result.binary.version, "5.5.0");
     assert.equal(result.daemon.reachable, true);
     assert.equal(result.daemon.rootless, true);
     assert.equal(result.isContainerized, false);
@@ -252,7 +255,7 @@ describe("selfDeployment — happy paths", () => {
     assert.match(joined, /EPIPE/);
   });
 
-  it("current podman (>= 4.5) → ok with no upgrade advisory", async () => {
+  it("current podman (>= 4.5) → ok with no EPIPE advisory", async () => {
     const result = await selfDeployment(
       "auto",
       null,
@@ -262,7 +265,12 @@ describe("selfDeployment — happy paths", () => {
       }),
     );
     assert.equal(result.status, "ok");
-    assert.equal(result.remediation.length, 0);
+    // Scoped to the 4.5 floor this test is about: 4.5.0 is still below
+    // the rootless nofile floor (5.5), which has its own advisory.
+    assert.equal(
+      result.remediation.some((l) => l.includes("older than 4.5")),
+      false,
+    );
   });
 
   it("bare-metal, podman reachable, rootful → ok + rootless false", async () => {
@@ -1636,5 +1644,107 @@ describe("selfDeployment — network DNS helper advisory (podman/netavark)", () 
     );
     assert.equal(result.networkDns, null);
     assert.equal(called, false);
+  });
+});
+
+describe("selfDeployment — Podman version advisories", () => {
+  /**
+   * Rootful podman at an arbitrary version. The nofile defect is
+   * rootless-only, so the rootful variant is the negative control for
+   * the 5.5 gate.
+   */
+  function rootfulPodmanAt(version: string): ContainerClient {
+    return makeMockClient({
+      version: { Version: version, Components: [{ Name: "Podman Engine" }] },
+      info: { Rootless: false, SecurityOptions: ["name=cgroupns"] },
+    });
+  }
+
+  const hasNofileAdvice = (lines: string[]): boolean =>
+    lines.some((l) => l.includes("older than 5.5"));
+  const hasEpipeAdvice = (lines: string[]): boolean =>
+    lines.some((l) => l.includes("older than 4.5"));
+
+  it("rootless podman 5.4.2 → nofile advisory, status stays ok", async () => {
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({ resolveClient: resolveTo(rootlessPodman("5.4.2")) }),
+    );
+    assert.equal(result.status, "ok");
+    assert.ok(hasNofileAdvice(result.remediation));
+    // The 5.4 host is above the 4.5 floor, so only one advisory fires.
+    assert.equal(hasEpipeAdvice(result.remediation), false);
+  });
+
+  it("rootless podman 5.5.0 → no nofile advisory (boundary is inclusive)", async () => {
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({ resolveClient: resolveTo(rootlessPodman("5.5.0")) }),
+    );
+    assert.equal(result.status, "ok");
+    assert.deepEqual(result.remediation, []);
+  });
+
+  it("rootless podman 6.0.0 → no advisory", async () => {
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({ resolveClient: resolveTo(rootlessPodman("6.0.0")) }),
+    );
+    assert.deepEqual(result.remediation, []);
+  });
+
+  it("rootFUL podman 5.4.2 → no nofile advisory (defect is rootless-only)", async () => {
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({ resolveClient: resolveTo(rootfulPodmanAt("5.4.2")) }),
+    );
+    assert.equal(result.status, "ok");
+    assert.equal(hasNofileAdvice(result.remediation), false);
+  });
+
+  it("rootless podman 4.3 → BOTH advisories, each naming its own symptom", async () => {
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({ resolveClient: resolveTo(rootlessPodman("4.3.1")) }),
+    );
+    assert.equal(result.status, "ok");
+    assert.ok(hasEpipeAdvice(result.remediation));
+    assert.ok(hasNofileAdvice(result.remediation));
+  });
+
+  it("docker is never subject to the podman version advisories", async () => {
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({ resolveClient: resolveTo(dockerRootless()) }),
+    );
+    assert.deepEqual(result.remediation, []);
+  });
+
+  it("unparseable podman version → no advisory rather than a false positive", async () => {
+    const client = makeMockClient({
+      version: { Version: "unknown", Components: [{ Name: "Podman Engine" }] },
+      info: { Rootless: true, SecurityOptions: ["name=rootless"] },
+    });
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({ resolveClient: resolveTo(client) }),
+    );
+    assert.deepEqual(result.remediation, []);
+  });
+
+  it("dev-suffixed version parses on its leading major.minor", async () => {
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({ resolveClient: resolveTo(rootlessPodman("5.4.2-dev")) }),
+    );
+    assert.ok(hasNofileAdvice(result.remediation));
   });
 });
