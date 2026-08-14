@@ -28,6 +28,8 @@ export interface MockContainerBehaviour {
 }
 
 export interface MockClientSpec {
+  /** When set, `pull()` rejects with this error instead of streaming. */
+  pull?: Error;
   /** Per-container behaviour keyed by the (prefixed) container name/id. */
   containers?: Record<string, MockContainerBehaviour>;
   /** Default behaviour for any container id not explicitly listed. */
@@ -219,7 +221,10 @@ export function makeMockClient(spec: MockClientSpec = {}): ContainerClient {
       spec.listImages instanceof Error
         ? Promise.reject(spec.listImages)
         : Promise.resolve(spec.listImages ?? []),
-    pull: () => Promise.resolve(streamFrom("")),
+    pull: () =>
+      spec.pull instanceof Error
+        ? Promise.reject(spec.pull)
+        : Promise.resolve(streamFrom("")),
     pruneImages: () =>
       spec.pruneImages instanceof Error
         ? Promise.reject(spec.pruneImages)

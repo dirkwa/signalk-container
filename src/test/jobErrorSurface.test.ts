@@ -67,6 +67,32 @@ describe("runJob error surfacing", () => {
     assert.match(result.error ?? "", /HTTP code 500.*no such file/);
     assert.doesNotMatch(result.error ?? "", /See logs for details/);
   });
+
+  it("carries the raw registry text when the image pull fails", async () => {
+    // Image absent locally, pull rejects with a kind-unknown daemon text:
+    // the consumer-facing JobResult.error must carry the categorized
+    // message AND the raw snippet — "Pull failed: Unexpected error." alone
+    // is undiagnosable in a consumer plugin's UI.
+    const client = makeMockClient({
+      pull: new Error(
+        "(HTTP code 500) server error - blob unknown to registry",
+      ),
+    });
+
+    const result = await runJob(
+      docker,
+      { image: "alpine:3.19", command: ["true"] },
+      client,
+    );
+
+    assert.equal(result.status, "failed");
+    assert.match(result.error ?? "", /^Pull failed: /);
+    assert.match(
+      result.error ?? "",
+      /Unexpected error\. See logs for details\./,
+    );
+    assert.match(result.error ?? "", /blob unknown to registry/);
+  });
 });
 
 describe("categorizeError — socket reset (EPIPE/ECONNRESET)", () => {
