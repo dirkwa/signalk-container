@@ -301,8 +301,13 @@ raise its hard limit above the limit of the user that runs the runtime.
 When a plugin requests more than the host allows, signalk-container clamps
 the request to the host ceiling so the container still starts (you'll see
 an advisory in the requesting plugin's config panel, e.g. QuestDB's
-"open-files limit capped by the host"). To grant the full value, raise the
-host limit.
+"open-files limit capped by the host"). Where the ceiling cannot be read
+at all (Signal K on macOS with podman machine — the limits live inside the
+VM), the request goes through unclamped; if the runtime then rejects it,
+signalk-container retries once **without** the nofile request, so the
+container still starts — with the runtime's default limits — and the same
+advisory reports the shortfall. To grant the full value, raise the host
+limit.
 
 **Check the limit the container actually got:**
 
@@ -376,6 +381,37 @@ sudo reboot                    # respawns the lingering user@.service + podman
 For Docker, set `LimitNOFILE=1048576` in a `docker.service` drop-in
 (`/etc/systemd/system/docker.service.d/nofile.conf`), `daemon-reload`, and
 restart the daemon.
+
+**podman machine (macOS).** Signal K runs on macOS but the containers run
+inside podman machine's Linux VM, so signalk-container cannot see the VM's
+limits: the request passes through unclamped, the VM's runtime rejects it,
+and signalk-container starts the container with the runtime's default
+limits and reports the shortfall (see above) instead of failing the start.
+To grant the full value, raise the limits inside the VM:
+
+```bash
+podman machine ssh
+sudo mkdir -p /etc/systemd/system/user@.service.d /etc/systemd/system/podman.service.d
+sudo tee /etc/systemd/system/user@.service.d/nofile.conf <<'EOF'
+[Service]
+LimitNOFILE=1048576
+EOF
+sudo cp /etc/systemd/system/user@.service.d/nofile.conf /etc/systemd/system/podman.service.d/nofile.conf
+sudo systemctl daemon-reload
+exit
+podman machine stop && podman machine start
+```
+
+The `user@.service` drop-in covers the default rootless connection; the
+`podman.service` copy covers a rootful connection. Verify from macOS —
+
+```bash
+podman run --rm --ulimit nofile=1048576:1048576 docker.io/library/alpine sh -c 'ulimit -n -H'
+```
+
+— should print `1048576`. Then remove the container
+(`podman rm -f sk-<name>`) so the next plugin start recreates it with the
+full request granted.
 
 The value cannot exceed the kernel's absolute per-process cap, `fs.nr_open`
 (`cat /proc/sys/fs/nr_open` — typically ~1 billion, so not a practical limit).

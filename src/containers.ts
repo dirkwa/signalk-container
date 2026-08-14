@@ -37,6 +37,7 @@ import {
 import {
   describeError,
   isStorageCorruptError,
+  isUlimitRejectionText,
   messageWithRaw,
   type ErrorKind,
 } from "./errors.js";
@@ -2837,19 +2838,79 @@ export async function ensureRunning(
         created = await createAndStart(client, createOpts);
       }
 
+      // Two start-time fallbacks share one retry loop because a create can
+      // trip both — in either order — and every retry must carry ALL
+      // concessions made so far: rebuilding a retry from the pristine
+      // config would re-introduce a bind or an ask the runtime already
+      // refused and turn a recoverable start into a failure. Termination:
+      // each iteration either records a newly rejected device path
+      // (bounded by the number of unverified entries) or drops the nofile
+      // ask (at most once).
+      //
       // Optimistic-device fallback: an unverified device bind (emitted
       // because a containerized manager cannot see the host path locally)
       // was rejected by the runtime — the path is missing on the REAL
       // host too. Retry without the rejected entries so a missing device
       // never prevents container start, and stamp the dropped host paths
       // into DEVICES_UNRESOLVED_LABEL so diffContainerConfig doesn't
-      // recreate-loop over them. One iteration per rejected path,
-      // bounded by the number of unverified entries.
+      // recreate-loop over them.
+      //
+      // Ulimit-rejection fallback: the OCI runtime refused the nofile ask
+      // at start (crun/runc setrlimit). Reaching here means the create-time
+      // clamp could not see the real ceiling — the process that starts the
+      // container is not one whose limits this manager can read (podman
+      // machine on macOS: the limits live inside the VM; or a Signal K
+      // process whose own limit exceeds the podman service's). Retry
+      // without the nofile ask so the container runs on the runtime's
+      // default limits instead of not at all, and advise the shortfall.
+      //
+      // Regrant coherence: the fallback container carries NO nofile entry in
+      // its inspect echo, so checkNofileRegrant reads `asked` from the live
+      // limit. Where the manager cannot read the container's /proc either
+      // (macOS), both sources are null and the regrant never fires — no
+      // recreate ping-pong. Where it can (bare-metal Linux with a skewed
+      // Signal K limit), the regrant may attempt ONE recreate with the
+      // original ask; that create fails the same way, re-enters this
+      // fallback, and the per-observed-limit nofileRegrantAttempts guard
+      // pins every later call to advisories only — the same one-bounce
+      // bound the podman <5.5 dropped-ask shape relies on. No extra
+      // attempt state is needed here.
       const unverified = deviceIssues.filter(
         (i) => i.disposition === "optimistic",
       );
       const unresolvedPaths: string[] = [];
-      while (!created.ok && unverified.length > 0) {
+      const requestedNofile = requestedNofileHard(config.ulimits);
+      let droppedNofileAsk: number | null = null;
+      const concededConfig = (): ContainerConfig => {
+        let cfg = config;
+        if (unresolvedPaths.length > 0) {
+          cfg = {
+            ...cfg,
+            devices: filterUnresolvedDeviceEntries(
+              cfg.devices ?? [],
+              unresolvedPaths,
+            ),
+            labels: {
+              ...cfg.labels,
+              [DEVICES_UNRESOLVED_LABEL]: JSON.stringify(
+                [...unresolvedPaths].sort(),
+              ),
+            },
+          };
+        }
+        if (droppedNofileAsk !== null) {
+          cfg = {
+            ...cfg,
+            ulimits: Object.fromEntries(
+              Object.entries(cfg.ulimits ?? {}).filter(
+                ([ulimitName]) => ulimitName !== "nofile",
+              ),
+            ),
+          };
+        }
+        return cfg;
+      };
+      while (!created.ok) {
         const rawError = created.raw;
         const rejected = MISSING_HOST_PATH_RE.test(rawError)
           ? unverified.filter(
@@ -2858,40 +2919,79 @@ export async function ensureRunning(
                 rawError.includes(i.hostPath),
             )
           : [];
-        if (rejected.length === 0) break;
-        unresolvedPaths.push(...rejected.map((i) => i.hostPath));
-        for (const issue of rejected) {
-          const reason =
-            `Device "${issue.entry}" does not exist on the host — the ` +
-            `runtime rejected the container create. Starting ${fullName} ` +
-            `without it; the entry is retried on the next recreate.`;
-          debug(`ensureRunning(${name}): ${reason}`);
-          fireDeviceIssue({
-            entry: issue.entry,
-            hostPath: issue.hostPath,
-            action: "unresolved",
-            reason,
-          });
+        if (rejected.length > 0) {
+          unresolvedPaths.push(...rejected.map((i) => i.hostPath));
+          for (const issue of rejected) {
+            const reason =
+              `Device "${issue.entry}" does not exist on the host — the ` +
+              `runtime rejected the container create. Starting ${fullName} ` +
+              `without it; the entry is retried on the next recreate.`;
+            debug(`ensureRunning(${name}): ${reason}`);
+            fireDeviceIssue({
+              entry: issue.entry,
+              hostPath: issue.hostPath,
+              action: "unresolved",
+              reason,
+            });
+          }
+        } else if (
+          droppedNofileAsk === null &&
+          requestedNofile !== null &&
+          isUlimitRejectionText(rawError)
+        ) {
+          debug(
+            `ensureRunning(${name}): host rejected the nofile ulimit ` +
+              `(${rawError}); retrying once without it`,
+          );
+          droppedNofileAsk = requestedNofile;
+        } else {
+          break;
         }
-        // A failed start (podman resolves binds at start) leaves the
-        // created container behind; remove it before the retry.
-        // removeContainer tolerates "already gone".
+        // A failed start (podman resolves binds and applies rlimits at
+        // start) leaves the created container behind; remove it before
+        // the retry. removeContainer tolerates "already gone".
         await removeContainer(runtime, name, client);
-        created = await createAndStart(
-          client,
-          buildOpts({
-            ...config,
-            devices: filterUnresolvedDeviceEntries(
-              config.devices ?? [],
-              unresolvedPaths,
+        created = await createAndStart(client, buildOpts(concededConfig()));
+      }
+
+      if (created.ok && droppedNofileAsk !== null) {
+        // Advise with the limit the container actually got; where no
+        // source is readable (macOS) degrade to 0 = unknown rather than
+        // fail a start that just succeeded.
+        let grantedHard = 0;
+        try {
+          grantedHard = (await readContainerNofile(name, client))?.hard ?? 0;
+        } catch {
+          // unreadable — granted stays unknown
+        }
+        // The remediation must say remove AND restart: a bare Signal K
+        // restart cannot re-grant on macOS — the regrant probe reads
+        // neither the inspect echo (no nofile entry) nor the VM's /proc —
+        // so removing the container is the only universal path back to
+        // the full ask.
+        const reason =
+          `The container host rejected the requested nofile limit of ` +
+          `${droppedNofileAsk}; ${fullName} now runs with the runtime's ` +
+          `default limits instead. Raise the limits of the service that ` +
+          `runs the container runtime (podman machine on macOS: inside ` +
+          `the VM, via \`podman machine ssh\`), then remove the container ` +
+          `(\`${runtime.runtime} rm -f ${fullName}\`) and restart Signal K ` +
+          `so it is re-created with the requested value.`;
+        debug(reason);
+        safeInvokeUlimitClamped(
+          options?.onUlimitClamped,
+          {
+            ulimit: "nofile",
+            requested: droppedNofileAsk,
+            granted: grantedHard,
+            reason,
+          },
+          (err) =>
+            debug(
+              `ensureRunning(${name}): onUlimitClamped handler threw: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
             ),
-            labels: {
-              ...config.labels,
-              [DEVICES_UNRESOLVED_LABEL]: JSON.stringify(
-                [...unresolvedPaths].sort(),
-              ),
-            },
-          }),
         );
       }
 

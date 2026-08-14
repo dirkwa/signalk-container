@@ -8,6 +8,10 @@ import {
   _setNofileCeilingForTesting,
   _setProcLimitsReaderForTesting,
 } from "../containers.js";
+import {
+  DEVICES_UNRESOLVED_LABEL,
+  _setDeviceProbeForTesting,
+} from "../devices.js";
 import { _setCurrentHostIdsForTesting } from "../runtime.js";
 import { makeMockClient } from "./helpers/mockClient.js";
 import type {
@@ -621,5 +625,377 @@ describe("ensureRunning — nofile regrant", () => {
       client,
     );
     assert.equal(calls.get("remove"), undefined);
+  });
+});
+
+// The crun phrasing observed on podman machine (macOS): the manager cannot
+// read the VM's limits, so the ask goes through unclamped and the runtime
+// rejects it at container start.
+const CRUN_RLIMIT_REJECT =
+  "crun: setrlimit `RLIMIT_NOFILE`: Operation not permitted: OCI permission denied";
+
+describe("ensureRunning — nofile rejection fallback", () => {
+  /**
+   * Mock for the "missing" create path: the container 404s until a create
+   * has been recorded (then inspects as running WITHOUT a nofile ask — the
+   * fallback container's shape); `start` behaviours are consumed in order.
+   */
+  function makeMissingClient(startBehaviours: Array<() => Promise<unknown>>): {
+    client: ReturnType<typeof makeMockClient>;
+    calls: Map<string, unknown[]>;
+  } {
+    const calls = new Map<string, unknown[]>();
+    let startCall = 0;
+    const inspect = (): Promise<Json> =>
+      (calls.get("createContainer") ?? []).length > 0
+        ? Promise.resolve(liveInspect({ pid: 4242, ulimits: null }))
+        : Promise.reject(notFound("no such container"));
+    const client = makeMockClient({
+      containers: {
+        "sk-questdb": {
+          inspect,
+          start: () => {
+            const behaviour = startBehaviours[startCall];
+            startCall += 1;
+            return behaviour ? behaviour() : Promise.resolve();
+          },
+        },
+      },
+      images: { "questdb/questdb:latest": { Id: "sha256:abc", Config: {} } },
+      calls,
+    });
+    return { client, calls };
+  }
+
+  function ulimitsOfCreate(
+    calls: Map<string, unknown[]>,
+    index: number,
+  ): { Name?: string; Soft?: number; Hard?: number }[] | undefined {
+    const created = calls.get("createContainer") ?? [];
+    assert.ok(created.length > index, `expected create call #${index + 1}`);
+    return (
+      created[index] as {
+        HostConfig?: {
+          Ulimits?: { Name?: string; Soft?: number; Hard?: number }[];
+        };
+      }
+    ).HostConfig?.Ulimits;
+  }
+
+  it("retries once without the nofile ask and advises the shortfall", async () => {
+    // Unknown ceiling (macOS shape): the ask passes through unclamped.
+    _setNofileCeilingForTesting(() => null);
+    // The fallback container's live limits — the runtime's defaults.
+    _setProcLimitsReaderForTesting(() => procLimits(524288, 524288));
+    const { client, calls } = makeMissingClient([
+      () => Promise.reject(new Error(CRUN_RLIMIT_REJECT)),
+      () => Promise.resolve(),
+    ]);
+    const clamps: UlimitClamp[] = [];
+    await ensureRunning(
+      docker,
+      "questdb",
+      {
+        image: "questdb/questdb",
+        tag: "latest",
+        ulimits: { nofile: 1048576, nproc: 4096 },
+      },
+      () => {},
+      {
+        onUlimitClamped: (e) => {
+          clamps.push(e);
+        },
+      },
+      client,
+    );
+    assert.deepEqual(ulimitsOfCreate(calls, 0), [
+      { Name: "nofile", Soft: 1048576, Hard: 1048576 },
+      { Name: "nproc", Soft: 4096, Hard: 4096 },
+    ]);
+    // The retry drops only the nofile entry; other ulimits survive.
+    assert.deepEqual(ulimitsOfCreate(calls, 1), [
+      { Name: "nproc", Soft: 4096, Hard: 4096 },
+    ]);
+    assert.ok(
+      (calls.get("remove") ?? []).length >= 1,
+      "the failed-start container must be removed before the retry",
+    );
+    assert.equal(clamps.length, 1);
+    assert.equal(clamps[0].ulimit, "nofile");
+    assert.equal(clamps[0].requested, 1048576);
+    assert.equal(clamps[0].granted, 524288);
+    assert.match(clamps[0].reason, /rejected/);
+    assert.match(clamps[0].reason, /default limits/);
+    // The remediation must couple removal with the restart: on macOS a bare
+    // Signal K restart cannot re-grant (the regrant probe reads neither the
+    // inspect echo nor the VM's /proc), so an "or restart" phrasing would
+    // send the operator down a path that silently does nothing. The remove
+    // command must name this fixture's runtime (docker), not a hardcoded
+    // podman.
+    assert.match(clamps[0].reason, /docker rm -f sk-questdb/);
+    assert.match(clamps[0].reason, /and restart Signal K/);
+  });
+
+  it("reports granted 0 when no live source is readable (macOS shape)", async () => {
+    _setNofileCeilingForTesting(() => null);
+    _setProcLimitsReaderForTesting(() => {
+      throw new Error("ENOENT");
+    });
+    const { client, calls } = makeMissingClient([
+      () => Promise.reject(new Error(CRUN_RLIMIT_REJECT)),
+      () => Promise.resolve(),
+    ]);
+    const clamps: UlimitClamp[] = [];
+    await ensureRunning(
+      docker,
+      "questdb",
+      requested,
+      () => {},
+      {
+        onUlimitClamped: (e) => {
+          clamps.push(e);
+        },
+      },
+      client,
+    );
+    // The lone nofile entry gone, the retry emits no Ulimits at all.
+    assert.equal(ulimitsOfCreate(calls, 1), undefined);
+    assert.equal(clamps.length, 1);
+    assert.equal(clamps[0].requested, 1048576);
+    assert.equal(clamps[0].granted, 0);
+  });
+
+  it("does not retry an unrelated create failure", async () => {
+    _setNofileCeilingForTesting(() => null);
+    const { client, calls } = makeMissingClient([
+      () => Promise.reject(new Error("boom")),
+    ]);
+    await assert.rejects(
+      ensureRunning(docker, "questdb", requested, () => {}, undefined, client),
+      /Failed to create sk-questdb/,
+    );
+    assert.equal((calls.get("createContainer") ?? []).length, 1);
+    assert.equal(calls.get("remove"), undefined);
+  });
+
+  it("does not retry a rejection when the config asks no nofile", async () => {
+    _setNofileCeilingForTesting(() => null);
+    const { client, calls } = makeMissingClient([
+      () => Promise.reject(new Error(CRUN_RLIMIT_REJECT)),
+    ]);
+    await assert.rejects(
+      ensureRunning(
+        docker,
+        "questdb",
+        { image: "questdb/questdb", tag: "latest", ulimits: { nproc: 4096 } },
+        () => {},
+        undefined,
+        client,
+      ),
+      /Failed to create sk-questdb/,
+    );
+    assert.equal((calls.get("createContainer") ?? []).length, 1);
+  });
+
+  it("throws the retry's error when the retry is rejected too", async () => {
+    _setNofileCeilingForTesting(() => null);
+    const { client, calls } = makeMissingClient([
+      () => Promise.reject(new Error(CRUN_RLIMIT_REJECT)),
+      () => Promise.reject(new Error(CRUN_RLIMIT_REJECT)),
+    ]);
+    const clamps: UlimitClamp[] = [];
+    await assert.rejects(
+      ensureRunning(
+        docker,
+        "questdb",
+        requested,
+        () => {},
+        {
+          onUlimitClamped: (e) => {
+            clamps.push(e);
+          },
+        },
+        client,
+      ),
+      // The categorized message names the mechanism, not the misleading
+      // socket/mount permission remediation.
+      /Failed to create sk-questdb: A requested per-process limit \(ulimit/,
+    );
+    assert.equal(
+      (calls.get("createContainer") ?? []).length,
+      2,
+      "exactly one retry, never a loop",
+    );
+    assert.deepEqual(clamps, [], "no advisory for a container that never ran");
+  });
+
+  describe("composed with the optimistic-device fallback", () => {
+    // A containerized manager cannot see /dev/snd locally, so the bind is
+    // emitted unverified; the REAL host lacks it too AND rejects the nofile
+    // ask. Whichever failure the runtime reports first, the other fallback
+    // must still engage — and every retry must carry the concessions
+    // already made, or the final create re-fails on a problem that was
+    // already conceded away.
+    const dockerInContainer: ContainerRuntimeInfo = {
+      runtime: "docker",
+      version: "27.0.0",
+      isPodmanDockerShim: false,
+      isContainerized: true,
+    };
+    const DEVICE_REJECT =
+      'invalid mount config for type "bind": ' +
+      "bind source path does not exist: /dev/snd";
+    const composedConfig: ContainerConfig = {
+      image: "questdb/questdb",
+      tag: "latest",
+      devices: ["/dev/snd"],
+      ulimits: { nofile: 1048576 },
+    };
+
+    before(() =>
+      _setDeviceProbeForTesting({ stat: () => null, readdir: () => [] }),
+    );
+    after(() => _setDeviceProbeForTesting(null));
+
+    function createShapes(calls: Map<string, unknown[]>): Array<{
+      hasBind: boolean;
+      asksNofile: boolean;
+      label: string | undefined;
+    }> {
+      return (calls.get("createContainer") ?? []).map((opts) => {
+        const o = opts as {
+          HostConfig?: { Binds?: string[]; Ulimits?: { Name?: string }[] };
+          Labels?: Record<string, string>;
+        };
+        return {
+          hasBind: (o.HostConfig?.Binds ?? []).includes("/dev/snd:/dev/snd"),
+          asksNofile: (o.HostConfig?.Ulimits ?? []).some(
+            (u) => u.Name === "nofile",
+          ),
+          label: o.Labels?.[DEVICES_UNRESOLVED_LABEL],
+        };
+      });
+    }
+
+    async function runComposed(
+      client: ReturnType<typeof makeMockClient>,
+    ): Promise<UlimitClamp[]> {
+      const clamps: UlimitClamp[] = [];
+      await ensureRunning(
+        dockerInContainer,
+        "questdb",
+        composedConfig,
+        () => {},
+        {
+          onUlimitClamped: (e) => {
+            clamps.push(e);
+          },
+        },
+        client,
+      );
+      return clamps;
+    }
+
+    it("keeps the dropped device when the rlimit rejection follows it", async () => {
+      _setNofileCeilingForTesting(() => null);
+      _setProcLimitsReaderForTesting(() => procLimits(524288, 524288));
+      const { client, calls } = makeMissingClient([
+        () => Promise.reject(new Error(DEVICE_REJECT)),
+        () => Promise.reject(new Error(CRUN_RLIMIT_REJECT)),
+        () => Promise.resolve(),
+      ]);
+      const clamps = await runComposed(client);
+      assert.deepEqual(createShapes(calls), [
+        { hasBind: true, asksNofile: true, label: undefined },
+        { hasBind: false, asksNofile: true, label: '["/dev/snd"]' },
+        { hasBind: false, asksNofile: false, label: '["/dev/snd"]' },
+      ]);
+      assert.equal(clamps.length, 1);
+      assert.equal(clamps[0].requested, 1048576);
+      assert.equal(clamps[0].granted, 524288);
+    });
+
+    it("re-enters the device fallback after the rlimit concession", async () => {
+      _setNofileCeilingForTesting(() => null);
+      _setProcLimitsReaderForTesting(() => procLimits(524288, 524288));
+      const { client, calls } = makeMissingClient([
+        () => Promise.reject(new Error(CRUN_RLIMIT_REJECT)),
+        () => Promise.reject(new Error(DEVICE_REJECT)),
+        () => Promise.resolve(),
+      ]);
+      const clamps = await runComposed(client);
+      assert.deepEqual(createShapes(calls), [
+        { hasBind: true, asksNofile: true, label: undefined },
+        { hasBind: true, asksNofile: false, label: undefined },
+        { hasBind: false, asksNofile: false, label: '["/dev/snd"]' },
+      ]);
+      assert.equal(clamps.length, 1, "one advisory even across two retries");
+      assert.equal(clamps[0].requested, 1048576);
+    });
+  });
+
+  it("regrant after the fallback bounces once, then advisories only", async () => {
+    // Bare-metal Linux with a skewed Signal K limit: the ceiling probe
+    // over-reports what the podman service can grant, so the regrant
+    // recreates WITH the doomed ask; the create re-enters the fallback and
+    // the per-observed-limit attempt map must then hold the line.
+    _setNofileCeilingForTesting(() => 1048576);
+    _setProcLimitsReaderForTesting(() => procLimits(524288, 524288));
+    const calls = new Map<string, unknown[]>();
+    const inspect = (): Promise<Json> => {
+      const removed = (calls.get("remove") ?? []).length;
+      const created = (calls.get("createContainer") ?? []).length;
+      // More removes than creates = the container is currently gone.
+      return removed > created
+        ? Promise.reject(notFound("no such object"))
+        : Promise.resolve(liveInspect({ pid: 4242, ulimits: null }));
+    };
+    const client = makeMockClient({
+      containers: {
+        "sk-questdb": {
+          inspect,
+          // The host rejects exactly the creates that carry a nofile ask.
+          start: () => {
+            const creates = calls.get("createContainer") ?? [];
+            const last = creates[creates.length - 1] as {
+              HostConfig?: { Ulimits?: { Name?: string }[] };
+            };
+            return last?.HostConfig?.Ulimits?.some((u) => u.Name === "nofile")
+              ? Promise.reject(new Error(CRUN_RLIMIT_REJECT))
+              : Promise.resolve();
+          },
+        },
+      },
+      images: { "questdb/questdb:latest": { Id: "sha256:abc", Config: {} } },
+      calls,
+    });
+    const clamps: UlimitClamp[] = [];
+    const opts = {
+      onUlimitClamped: (e: UlimitClamp) => {
+        clamps.push(e);
+      },
+    };
+    await ensureRunning(docker, "questdb", requested, () => {}, opts, client);
+    assert.equal(
+      (calls.get("remove") ?? []).length,
+      2,
+      "one regrant remove + one fallback remove",
+    );
+    assert.equal((calls.get("createContainer") ?? []).length, 2);
+    assert.equal(clamps[0]?.requested, 1048576);
+    assert.equal(clamps[0]?.granted, 524288);
+    const clampsAfterFirstCall = clamps.length;
+    await ensureRunning(docker, "questdb", requested, () => {}, opts, client);
+    assert.equal(
+      (calls.get("remove") ?? []).length,
+      2,
+      "no recreate ping-pong while the observed limit is unchanged",
+    );
+    assert.equal((calls.get("createContainer") ?? []).length, 2);
+    assert.ok(
+      clamps.length > clampsAfterFirstCall,
+      "the capped state stays advised on later calls",
+    );
+    assert.equal(clamps.at(-1)?.granted, 524288);
   });
 });

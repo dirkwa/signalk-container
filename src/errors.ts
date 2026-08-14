@@ -21,6 +21,7 @@ export type ErrorKind =
   | "auth"
   | "disk"
   | "permission"
+  | "ulimit-rejected"
   | "not-found"
   | "socket-unreachable"
   | "invalid-config"
@@ -77,6 +78,30 @@ const PERM_PATTERNS = [
   /eperm/i,
   /operation not permitted/i,
 ];
+
+// A requested ulimit the host cannot grant, rejected by the OCI runtime at
+// container start. crun phrases it "setrlimit `RLIMIT_NOFILE`: Operation not
+// permitted"; runc "error setting rlimits for ready process: setting rlimit
+// type 7: operation not permitted". Both texts contain "operation not
+// permitted", so this MUST be checked before PERM_PATTERNS — the generic
+// `permission` bucket's socket/mount remediation would send the operator
+// chasing the wrong problem entirely.
+const ULIMIT_REJECTED_PATTERNS = [
+  /setrlimit/i,
+  /RLIMIT_[A-Z]+/,
+  /setting rlimits?/i,
+  /rlimit type \d+/i,
+];
+
+/**
+ * Whether a raw runtime error text is an OCI-runtime ulimit rejection.
+ * Exposed separately from `categorizeError` so retry logic that only holds
+ * a raw error string (e.g. `createAndStart`'s result) can test for the
+ * condition without re-categorizing.
+ */
+export function isUlimitRejectionText(raw: string): boolean {
+  return ULIMIT_REJECTED_PATTERNS.some((p) => p.test(raw));
+}
 
 const NOT_FOUND_PATTERNS = [/no such (image|container|network)/i, /not found/i];
 
@@ -174,6 +199,18 @@ export function categorizeError(err: unknown): CategorizedError {
     return {
       kind: "disk",
       userMessage: "Disk full. Free space and retry.",
+      raw,
+    };
+  }
+  if (isUlimitRejectionText(raw)) {
+    return {
+      kind: "ulimit-rejected",
+      userMessage:
+        "A requested per-process limit (ulimit, typically the open-files " +
+        "nofile limit) exceeds the container host's hard limit. Raise the " +
+        "limit of the service that runs the container runtime (systemd: a " +
+        "user@.service LimitNOFILE drop-in; podman machine on macOS: inside " +
+        "the VM), then remove the container and restart Signal K.",
       raw,
     };
   }
