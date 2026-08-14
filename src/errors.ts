@@ -10,6 +10,11 @@
  * and started meaning "socket missing or refusing the connection". That is the
  * single most common failure in the in-container topology (socket not
  * bind-mounted) and the doctor needs to name it distinctly.
+ *
+ * Throw sites that build a user-facing message from a `CategorizedError`
+ * compose it via `messageWithRaw` (so the raw runtime text stays visible) and
+ * attach the `CategorizedError` as `cause` (so `describeError` can recover
+ * the untruncated text).
  */
 export type ErrorKind =
   | "network"
@@ -197,6 +202,42 @@ export function categorizeError(err: unknown): CategorizedError {
   };
 }
 
+/**
+ * Longest raw-runtime-text snippet embedded into a thrown message. Daemon
+ * error bodies can run to kilobytes (multi-line OCI/crun dumps); untruncated
+ * they make setPluginStatus rows and UI error banners unusable, while the
+ * full text stays reachable via `describeError` on the attached cause.
+ */
+export const RAW_SNIPPET_MAX_LENGTH = 300;
+
+/**
+ * Compose a user-facing failure message that keeps the runtime's raw error
+ * text visible. For kind "unknown" the `userMessage` is a generic
+ * "Unexpected error. See logs for details." — the raw daemon text is the only
+ * actionable part, so dropping it leaves the user (and support) with nothing
+ * to diagnose. The suffix is skipped when it would duplicate: the
+ * `invalid-config` kind embeds `raw` in its `userMessage`. The appended
+ * snippet is whitespace-collapsed and truncated to `RAW_SNIPPET_MAX_LENGTH`;
+ * callers that need the full text attach the `CategorizedError` as `cause`
+ * and read it back via `describeError`.
+ */
+export function messageWithRaw(userMessage: string, raw: string): string {
+  const trimmed = raw.trim();
+  if (
+    trimmed === "" ||
+    userMessage.includes(trimmed) ||
+    trimmed.includes(userMessage)
+  ) {
+    return userMessage;
+  }
+  const collapsed = trimmed.replace(/\s+/g, " ");
+  const snippet =
+    collapsed.length > RAW_SNIPPET_MAX_LENGTH
+      ? `${collapsed.slice(0, RAW_SNIPPET_MAX_LENGTH)}…`
+      : collapsed;
+  return `${userMessage} (${snippet})`;
+}
+
 // Narrow to just the field describeError reads. safe()/safeInspect() attach a
 // full CategorizedError as the cause, but guarding only `raw` keeps the check
 // honest about what it actually asserts (and consumes).
@@ -211,11 +252,12 @@ function hasRawErrorText(value: unknown): value is { raw: string } {
 
 /**
  * The most informative message for a caught error, for surfacing to a
- * consumer/log. `safe()`/`safeInspect()` rethrow as `Error(userMessage, {
- * cause: CategorizedError })` — so the message alone is the generic
- * `userMessage` (e.g. "Unexpected error. See logs for details.") and the real
- * runtime text lives in `cause.raw`. Prefer that raw text when present; fall
- * back to the error's own message for errors thrown directly (not via `safe`).
+ * consumer/log. `safeInspect()` rethrows as
+ * `Error(messageWithRaw(userMessage, raw), { cause: CategorizedError })` —
+ * the message carries a truncated raw snippet, while the untruncated
+ * runtime text lives in `cause.raw`. Prefer that raw text when present;
+ * fall back to the error's own message for errors thrown directly (not via
+ * `safe`).
  */
 export function describeError(err: unknown): string {
   if (err instanceof Error && hasRawErrorText(err.cause)) {

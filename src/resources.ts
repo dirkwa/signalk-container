@@ -5,6 +5,7 @@ import {
   safeInspect,
   type ContainerClient,
 } from "./client.js";
+import { messageWithRaw } from "./errors.js";
 
 /**
  * dockerode `HostConfig` resource fields. The Docker API takes CPU as a
@@ -566,7 +567,10 @@ export async function tryLiveUpdate(
     client.getContainer(fullName).update(payload),
   );
   if (!result.ok) {
-    return { ok: false, stderr: result.error.userMessage };
+    return {
+      ok: false,
+      stderr: messageWithRaw(result.error.userMessage, result.error.raw),
+    };
   }
   return { ok: true };
 }

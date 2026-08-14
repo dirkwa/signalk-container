@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { categorizeError, describeError } from "../errors.js";
+import { safeInspect } from "../client.js";
 import { runJob } from "../jobs.js";
 import { makeMockClient } from "./helpers/mockClient.js";
 import type { ContainerRuntimeInfo } from "../types.js";
@@ -45,6 +46,36 @@ describe("describeError", () => {
   });
 });
 
+describe("safeInspect error surfacing", () => {
+  it("composes the raw text into the rethrown message", async () => {
+    // A kind-unknown inspect failure: without the composed snippet, every
+    // wrapper surface that renders err.message dead-ends at the generic
+    // sentence while the only diagnosable text hides in cause.raw.
+    const raw =
+      "(HTTP code 500) server error - readlink /var/lib/containers/storage: invalid argument";
+    await assert.rejects(
+      safeInspect(() => Promise.reject(new Error(raw))),
+      (err: unknown) => {
+        const message = (err as Error).message;
+        assert.match(message, /Unexpected error\. See logs for details\./);
+        assert.ok(
+          message.includes(raw),
+          `message should carry raw, got: ${message}`,
+        );
+        assert.equal(describeError(err), raw);
+        return true;
+      },
+    );
+  });
+
+  it("still maps a 404 to null instead of throwing", async () => {
+    const notFound = Object.assign(new Error("no such container"), {
+      statusCode: 404,
+    });
+    assert.equal(await safeInspect(() => Promise.reject(notFound)), null);
+  });
+});
+
 describe("runJob error surfacing", () => {
   it("surfaces the real runtime error when the image inspect fails (not the generic message)", async () => {
     // A non-404 inspect failure that matches none of the known categorize
@@ -66,6 +97,32 @@ describe("runJob error surfacing", () => {
     assert.equal(result.status, "failed");
     assert.match(result.error ?? "", /HTTP code 500.*no such file/);
     assert.doesNotMatch(result.error ?? "", /See logs for details/);
+  });
+
+  it("carries the raw registry text when the image pull fails", async () => {
+    // Image absent locally, pull rejects with a kind-unknown daemon text:
+    // the consumer-facing JobResult.error must carry the categorized
+    // message AND the raw snippet — "Pull failed: Unexpected error." alone
+    // is undiagnosable in a consumer plugin's UI.
+    const client = makeMockClient({
+      pull: new Error(
+        "(HTTP code 500) server error - blob unknown to registry",
+      ),
+    });
+
+    const result = await runJob(
+      docker,
+      { image: "alpine:3.19", command: ["true"] },
+      client,
+    );
+
+    assert.equal(result.status, "failed");
+    assert.match(result.error ?? "", /^Pull failed: /);
+    assert.match(
+      result.error ?? "",
+      /Unexpected error\. See logs for details\./,
+    );
+    assert.match(result.error ?? "", /blob unknown to registry/);
   });
 });
 

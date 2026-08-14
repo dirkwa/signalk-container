@@ -327,6 +327,40 @@ describe("tryLiveUpdate", () => {
     assert.equal(result.ok, false);
   });
 
+  it("carries the raw runtime text in stderr when update fails", async () => {
+    // A kind-unknown update failure: the categorized userMessage alone
+    // ("Unexpected error. See logs for details.") is the dead end the
+    // raw snippet exists to break — the caller renders stderr verbatim
+    // in the panel's "Live update failed" warning.
+    const client = makeMockClient({
+      containers: {
+        "sk-nope": {
+          update: () =>
+            Promise.reject(
+              Object.assign(
+                new Error(
+                  "(HTTP code 500) server error - cannot update: cgroup v1 detected",
+                ),
+                { statusCode: 500 },
+              ),
+            ),
+        },
+      },
+    });
+    const result = await tryLiveUpdate(
+      dummyRuntime,
+      "sk-nope",
+      { cpus: 1.5 },
+      client,
+    );
+    assert.equal(result.ok, false);
+    assert.match(
+      result.stderr ?? "",
+      /Unexpected error\. See logs for details\./,
+    );
+    assert.match(result.stderr ?? "", /cgroup v1 detected/);
+  });
+
   it("returns ok=false WITHOUT calling update when limits include cpusetCpus", async () => {
     const calls = new Map<string, unknown[]>();
     // No update behaviour: payload is null, so update must never be reached.

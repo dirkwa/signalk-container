@@ -23,7 +23,7 @@ import {
   safeInspect,
   type ContainerClient,
 } from "./client.js";
-import { describeError } from "./errors.js";
+import { describeError, messageWithRaw } from "./errors.js";
 
 // `userMappingFlags` and the host-id test setter (`_setCurrentHostIdsForTesting`)
 // live in `runtime.ts` so both `jobs.ts` (one-shot helpers) and
@@ -101,7 +101,7 @@ export async function runJob(
       );
       if (!pullResult.ok) {
         result.status = "failed";
-        result.error = `Pull failed: ${pullResult.error.userMessage}`;
+        result.error = `Pull failed: ${messageWithRaw(pullResult.error.userMessage, pullResult.error.raw)}`;
         return result;
       }
     }
@@ -396,7 +396,11 @@ export async function cleanupOrphanedJobs(
   // there were zero leaked jobs. Surface it so the caller's catch logs it.
   if (!listResult.ok) {
     throw new Error(
-      `cleanupOrphanedJobs: list failed: ${listResult.error.userMessage}`,
+      `cleanupOrphanedJobs: list failed: ${messageWithRaw(
+        listResult.error.userMessage,
+        listResult.error.raw,
+      )}`,
+      { cause: listResult.error },
     );
   }
 
@@ -414,7 +418,7 @@ export async function cleanupOrphanedJobs(
     );
     if (!rm.ok && rm.error.kind !== "not-found") {
       console.warn(
-        `[signalk-container] cleanupOrphanedJobs: remove ${parsed.name} failed: ${rm.error.userMessage}`,
+        `[signalk-container] cleanupOrphanedJobs: remove ${parsed.name} failed: ${messageWithRaw(rm.error.userMessage, rm.error.raw)}`,
       );
       continue;
     }

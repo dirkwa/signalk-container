@@ -18,7 +18,11 @@
 import Docker from "dockerode";
 import { stat } from "node:fs/promises";
 import { PassThrough } from "node:stream";
-import { categorizeError, type CategorizedError } from "./errors.js";
+import {
+  categorizeError,
+  messageWithRaw,
+  type CategorizedError,
+} from "./errors.js";
 
 /**
  * The dockerode surface the plugin actually uses. Production passes the real
@@ -353,7 +357,9 @@ export async function safeInspect<T>(op: () => Promise<T>): Promise<T | null> {
   const result = await safe(op);
   if (result.ok) return result.value;
   if (result.error.kind === "not-found") return null;
-  throw new Error(result.error.userMessage, { cause: result.error });
+  throw new Error(messageWithRaw(result.error.userMessage, result.error.raw), {
+    cause: result.error,
+  });
 }
 
 /**
