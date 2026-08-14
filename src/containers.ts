@@ -2699,6 +2699,13 @@ export async function ensureRunning(
           const afterLive = after ? (after.live ?? after.asked) : null;
           if (
             afterLive &&
+            // A null echo is the rejection-fallback container (created
+            // without the ask): its recursive ensureRunning already advised
+            // the rejection with the remove-and-restart remediation, and a
+            // second, weaker advisory would overwrite it in last-event-wins
+            // consumers. Every dropped-ask shape (podman <5.5) carries an
+            // echo, so those still get their correction here.
+            after?.asked != null &&
             requestedHard > afterLive.hard &&
             afterLive.hard !== grantable
           ) {
@@ -2944,7 +2951,8 @@ export async function ensureRunning(
         } else if (
           droppedNofileAsk === null &&
           requestedNofile !== null &&
-          isUlimitRejectionText(rawError)
+          isUlimitRejectionText(rawError) &&
+          NOFILE_REJECTION_RE.test(rawError)
         ) {
           debug(
             `ensureRunning(${name}): host rejected the nofile ulimit ` +
@@ -3028,6 +3036,15 @@ export async function ensureRunning(
  * the fallback.
  */
 const MISSING_HOST_PATH_RE = /no such file or directory|does not exist/i;
+
+/**
+ * Rejection texts name the limit they refused (crun spells it
+ * `RLIMIT_NOFILE`, runc "rlimit type 7"). The fallback drops only the
+ * nofile ask, so it must fire only on nofile evidence — dropping nofile
+ * for a rejected memlock/nproc request would waste a doomed retry and
+ * misattribute the failure in the debug log.
+ */
+const NOFILE_REJECTION_RE = /RLIMIT_NOFILE|rlimit type 7|nofile/i;
 
 /** Start an existing container by its prefixed name, tolerating 304 (already running). */
 async function startByFullName(

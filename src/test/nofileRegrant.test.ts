@@ -764,6 +764,27 @@ describe("ensureRunning — nofile rejection fallback", () => {
     assert.equal(calls.get("remove"), undefined);
   });
 
+  it("does not drop the ask for a non-nofile rejection", async () => {
+    _setNofileCeilingForTesting(() => null);
+    const { client, calls } = makeMissingClient([
+      () =>
+        Promise.reject(
+          new Error(
+            "crun: setrlimit `RLIMIT_MEMLOCK`: Operation not permitted: OCI permission denied",
+          ),
+        ),
+    ]);
+    await assert.rejects(
+      ensureRunning(docker, "questdb", requested, () => {}, {}, client),
+      /Failed to create sk-questdb: A requested per-process limit/,
+    );
+    assert.equal(
+      (calls.get("createContainer") ?? []).length,
+      1,
+      "no retry — the nofile ask is not the named culprit",
+    );
+  });
+
   it("does not retry a rejection when the config asks no nofile", async () => {
     _setNofileCeilingForTesting(() => null);
     const { client, calls } = makeMissingClient([
@@ -990,6 +1011,12 @@ describe("ensureRunning — nofile rejection fallback", () => {
     assert.equal((calls.get("createContainer") ?? []).length, 2);
     assert.equal(clamps[0]?.requested, 1048576);
     assert.equal(clamps[0]?.granted, 524288);
+    assert.equal(
+      clamps.length,
+      1,
+      "the bounce advises the rejection once — no weaker duplicate follows",
+    );
+    assert.match(clamps[0]?.reason ?? "", /rm -f/);
     const clampsAfterFirstCall = clamps.length;
     await ensureRunning(docker, "questdb", requested, () => {}, opts, client);
     assert.equal(
