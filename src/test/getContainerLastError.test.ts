@@ -75,9 +75,14 @@ describe("getContainerLastError", () => {
     });
     const result = await getContainerLastError("x", client);
     assert.ok(result);
-    assert.equal(result.length, LAST_ERROR_MAX_CHARS + 1);
+    // The cut can land on a space; the snippet drops it so the ellipsis
+    // never renders detached ("boom …").
+    assert.equal(
+      result.slice(0, -1),
+      long.slice(0, LAST_ERROR_MAX_CHARS).trimEnd(),
+    );
     assert.ok(result.endsWith("…"));
-    assert.equal(result.slice(0, -1), long.slice(0, LAST_ERROR_MAX_CHARS));
+    assert.ok(result.length <= LAST_ERROR_MAX_CHARS + 1);
   });
 
   it("prefixes the container name with sk- automatically", async () => {

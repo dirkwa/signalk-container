@@ -944,7 +944,7 @@ export async function getContainerLastError(
   const trimmed = raw.trim();
   if (trimmed === "") return undefined;
   if (trimmed.length <= LAST_ERROR_MAX_CHARS) return trimmed;
-  return `${trimmed.slice(0, LAST_ERROR_MAX_CHARS)}…`;
+  return `${trimmed.slice(0, LAST_ERROR_MAX_CHARS).trimEnd()}…`;
 }
 
 /**
