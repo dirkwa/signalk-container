@@ -266,7 +266,8 @@ describe("selfDeployment — happy paths", () => {
     );
     assert.equal(result.status, "ok");
     // Scoped to the 4.5 floor this test is about: 4.5.0 is still below
-    // the rootless nofile floor (5.5), which has its own advisory.
+    // the rootless nofile floor (5.5) and the supported baseline (5.4),
+    // each of which has its own advisory.
     assert.equal(
       result.remediation.some((l) => l.includes("older than 4.5")),
       false,
@@ -1664,8 +1665,10 @@ describe("selfDeployment — Podman version advisories", () => {
     lines.some((l) => l.includes("older than 5.5"));
   const hasEpipeAdvice = (lines: string[]): boolean =>
     lines.some((l) => l.includes("older than 4.5"));
+  const hasBaselineAdvice = (lines: string[]): boolean =>
+    lines.some((l) => l.includes("older than 5.4"));
 
-  it("rootless podman 5.4.2 → nofile advisory, status stays ok", async () => {
+  it("rootless podman 5.4.2 → only the nofile advisory, status stays ok", async () => {
     const result = await selfDeployment(
       "auto",
       null,
@@ -1673,8 +1676,49 @@ describe("selfDeployment — Podman version advisories", () => {
     );
     assert.equal(result.status, "ok");
     assert.ok(hasNofileAdvice(result.remediation));
-    // The 5.4 host is above the 4.5 floor, so only one advisory fires.
+    // 5.4.2 meets the supported baseline and is above the 4.5 floor, so
+    // exactly one advisory fires.
     assert.equal(hasEpipeAdvice(result.remediation), false);
+    assert.equal(hasBaselineAdvice(result.remediation), false);
+  });
+
+  it("rootless podman 5.3 → baseline advisory, status stays ok", async () => {
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({ resolveClient: resolveTo(rootlessPodman("5.3.1")) }),
+    );
+    assert.equal(result.status, "ok");
+    assert.ok(hasBaselineAdvice(result.remediation));
+  });
+
+  it("rootless podman 5.4.0 → no baseline advisory (boundary is inclusive)", async () => {
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({ resolveClient: resolveTo(rootlessPodman("5.4.0")) }),
+    );
+    assert.equal(result.status, "ok");
+    assert.equal(hasBaselineAdvice(result.remediation), false);
+  });
+
+  it("rootFUL podman 5.3 → baseline advisory (gate ignores rootless)", async () => {
+    // The baseline states support/test coverage, not a rootless-only
+    // defect — unlike the nofile advisory it must fire rootful too.
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({ resolveClient: resolveTo(rootfulPodmanAt("5.3.1")) }),
+    );
+    assert.equal(result.status, "ok");
+    assert.ok(hasBaselineAdvice(result.remediation));
+    assert.equal(hasNofileAdvice(result.remediation), false);
+    // Wording pinned HERE and not in the rootless-5.3 case: there the
+    // nofile advisory also fires and its text mentions trixie-backports,
+    // which would shadow a baseline advisory that lost its own mention.
+    const joined = result.remediation.join("\n");
+    assert.match(joined, /trixie/);
+    assert.match(joined, /5\.4\.2/);
   });
 
   it("rootless podman 5.5.0 → no nofile advisory (boundary is inclusive)", async () => {
@@ -1706,13 +1750,14 @@ describe("selfDeployment — Podman version advisories", () => {
     assert.equal(hasNofileAdvice(result.remediation), false);
   });
 
-  it("rootless podman 4.3 → BOTH advisories, each naming its own symptom", async () => {
+  it("rootless podman 4.3 → all THREE advisories, each naming its own mechanism", async () => {
     const result = await selfDeployment(
       "auto",
       null,
       probesWith({ resolveClient: resolveTo(rootlessPodman("4.3.1")) }),
     );
     assert.equal(result.status, "ok");
+    assert.ok(hasBaselineAdvice(result.remediation));
     assert.ok(hasEpipeAdvice(result.remediation));
     assert.ok(hasNofileAdvice(result.remediation));
   });

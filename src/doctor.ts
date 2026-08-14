@@ -325,6 +325,20 @@ const REMEDIATION_OLD_PODMAN_NOFILE = [
   "Upgrading to Podman >= 5.5 also fixes it, but on Debian Trixie (podman 5.4.x) there is no stable upgrade path: trixie-backports carries no podman package, so a newer version means the upstream OBS/Kubic repo or a non-Debian build. The drop-in above is the lower-risk route on a stable host.",
 ];
 
+// Podman below this is outside the supported baseline: the plugin is
+// developed and tested against 5.4+ (Debian 13 "trixie" ships 5.4.2), and
+// older versions additionally carry the known compat-API defects the two
+// floors above describe. Unlike the nofile advisory this applies regardless
+// of rootless — the baseline states support and test coverage, not a
+// rootless-only defect. Advisory only; we never escalate status for it.
+const PODMAN_MIN_BASELINE = { major: 5, minor: 4 };
+
+const REMEDIATION_PODMAN_BASELINE = [
+  "Podman is older than 5.4, the supported baseline for this plugin (Debian 13 'trixie' ships 5.4.2).",
+  "Older versions are untested here and carry known docker-compat API defects.",
+  "Upgrade the OS to a release that ships podman >= 5.4 (Debian: bookworm -> trixie), or install a newer podman (e.g. from the upstream OBS/Kubic repo) if a release upgrade is not an option.",
+];
+
 // Parse the leading `major.minor` from a version string like "4.3.1" or
 // "5.4.2-dev". Returns null when it doesn't start with two dot-separated ints.
 function parseMajorMinor(
@@ -775,6 +789,15 @@ export async function selfDeployment(
   // mystery. Never escalate status (mirrors the storage-driver advice).
   const podmanVersion = parseMajorMinor(binaryVersion);
   const isPodman = binaryName === "podman" && podmanVersion !== null;
+
+  // Deliberately not gated on rootless: the baseline is about support and
+  // test coverage, so a rootful 5.0 host gets it even though neither
+  // defect-specific advisory below applies there.
+  const baselineAdvice =
+    isPodman && isBelow(podmanVersion, PODMAN_MIN_BASELINE)
+      ? [...REMEDIATION_PODMAN_BASELINE]
+      : [];
+
   const oldPodmanAdvice =
     isPodman && isBelow(podmanVersion, PODMAN_MIN_RECOMMENDED)
       ? [...REMEDIATION_OLD_PODMAN]
@@ -800,7 +823,9 @@ export async function selfDeployment(
     },
     selfId,
     status: "ok",
-    remediation: [...oldPodmanAdvice, ...nofileAdvice],
+    // Baseline first — it is the umbrella statement the defect-specific
+    // blocks elaborate on when they also fire.
+    remediation: [...baselineAdvice, ...oldPodmanAdvice, ...nofileAdvice],
   };
 }
 

@@ -35,8 +35,17 @@ Instead of each plugin implementing its own container orchestration, they delega
 ## Requirements
 
 - Node.js >= 22
-- Podman or Docker installed on the host
+- Podman >= 5.4 (the supported baseline — Debian 13 "trixie" ships 5.4.2) or Docker installed on the host
 - Signal K server
+
+Older Podman versions may work, but they are untested and carry known
+docker-compat API defects the deployment doctor warns about:
+
+- **below 4.5** — the compat socket can reset the connection
+  (`write EPIPE`) on large create payloads, breaking big helper jobs
+- **below 5.5, rootless** — `--ulimit nofile` requests are silently
+  dropped over the compat API (containers/podman#25881); containers
+  inherit the podman service's limits instead
 
 ## Running Signal K in a Container
 
