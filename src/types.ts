@@ -876,11 +876,12 @@ export interface DeviceIssue {
 
 /**
  * Event delivered to `EnsureRunningOptions.onUlimitClamped` when a
- * requested ulimit had to be lowered to what the host can actually grant.
- * Currently only `nofile` is clamped (a rootless container cannot exceed
- * the calling user's hard limit; a higher request makes the runtime refuse
- * to start the container). The container starts with `granted` — this is an
- * advisory, not a failure.
+ * requested ulimit could not be granted as asked. Currently only `nofile`
+ * is affected: a create-time clamp lowers an over-request to the host
+ * ceiling, and a start-time rejection makes `ensureRunning` retry once
+ * without the ask, leaving the container on the runtime's default limits
+ * (`granted` reports what it ended up with; `0` = unknown). The container
+ * is running either way — this is an advisory, not a failure.
  */
 export interface UlimitClamp {
   /** The ulimit that was clamped, e.g. `"nofile"`. */
