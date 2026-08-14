@@ -252,11 +252,12 @@ function hasRawErrorText(value: unknown): value is { raw: string } {
 
 /**
  * The most informative message for a caught error, for surfacing to a
- * consumer/log. `safe()`/`safeInspect()` rethrow as `Error(userMessage, {
- * cause: CategorizedError })` — so the message alone is the generic
- * `userMessage` (e.g. "Unexpected error. See logs for details.") and the real
- * runtime text lives in `cause.raw`. Prefer that raw text when present; fall
- * back to the error's own message for errors thrown directly (not via `safe`).
+ * consumer/log. `safeInspect()` rethrows as
+ * `Error(messageWithRaw(userMessage, raw), { cause: CategorizedError })` —
+ * the message carries a truncated raw snippet, while the untruncated
+ * runtime text lives in `cause.raw`. Prefer that raw text when present;
+ * fall back to the error's own message for errors thrown directly (not via
+ * `safe`).
  */
 export function describeError(err: unknown): string {
   if (err instanceof Error && hasRawErrorText(err.cause)) {

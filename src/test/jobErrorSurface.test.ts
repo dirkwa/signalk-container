@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { categorizeError, describeError } from "../errors.js";
+import { safeInspect } from "../client.js";
 import { runJob } from "../jobs.js";
 import { makeMockClient } from "./helpers/mockClient.js";
 import type { ContainerRuntimeInfo } from "../types.js";
@@ -42,6 +43,36 @@ describe("describeError", () => {
       describeError(new Error("outer", { cause: new Error("inner") })),
       "outer",
     );
+  });
+});
+
+describe("safeInspect error surfacing", () => {
+  it("composes the raw text into the rethrown message", async () => {
+    // A kind-unknown inspect failure: without the composed snippet, every
+    // wrapper surface that renders err.message dead-ends at the generic
+    // sentence while the only diagnosable text hides in cause.raw.
+    const raw =
+      "(HTTP code 500) server error - readlink /var/lib/containers/storage: invalid argument";
+    await assert.rejects(
+      safeInspect(() => Promise.reject(new Error(raw))),
+      (err: unknown) => {
+        const message = (err as Error).message;
+        assert.match(message, /Unexpected error\. See logs for details\./);
+        assert.ok(
+          message.includes(raw),
+          `message should carry raw, got: ${message}`,
+        );
+        assert.equal(describeError(err), raw);
+        return true;
+      },
+    );
+  });
+
+  it("still maps a 404 to null instead of throwing", async () => {
+    const notFound = Object.assign(new Error("no such container"), {
+      statusCode: 404,
+    });
+    assert.equal(await safeInspect(() => Promise.reject(notFound)), null);
   });
 });
 
