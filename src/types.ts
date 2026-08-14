@@ -888,10 +888,13 @@ export interface UlimitClamp {
   /** The value the consumer requested. */
   requested: number;
   /**
-   * The value actually applied — the host's hard ceiling. `0` means the
-   * effective limit could not be read (e.g. podman machine on macOS, where
-   * the limits live inside the VM): treat it as unknown rather than a grant
-   * of zero, and surface `reason`, which always carries the full story.
+   * The observed effective hard limit the container runs with. A
+   * create-time clamp reports the host ceiling; the rejected-`nofile`
+   * fallback reports the runtime default it landed on, which can be lower
+   * still. `0` means the effective limit could not be read (e.g. podman
+   * machine on macOS, where the limits live inside the VM): treat it as
+   * unknown rather than a grant of zero, and surface `reason`, which
+   * always carries the full story.
    */
   granted: number;
   /** Human-readable explanation; safe to surface in `setPluginStatus`. */
