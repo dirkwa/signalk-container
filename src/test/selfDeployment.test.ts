@@ -1713,6 +1713,7 @@ describe("selfDeployment — Podman version advisories", () => {
     assert.equal(result.status, "ok");
     assert.ok(hasBaselineAdvice(result.remediation));
     assert.equal(hasNofileAdvice(result.remediation), false);
+    assert.equal(hasEpipeAdvice(result.remediation), false);
     // Wording pinned HERE and not in the rootless-5.3 case: there the
     // nofile advisory also fires and its text mentions trixie-backports,
     // which would shadow a baseline advisory that lost its own mention.
