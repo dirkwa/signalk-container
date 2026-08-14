@@ -146,6 +146,11 @@ const S: Record<string, CSSProperties> = {
 
 export default function LogsModal({ name, onClose }: LogsModalProps) {
   const [lines, setLines] = useState<string[]>([]);
+  // Backfill-supplied inspect `.State.Error` — the runtime's record of
+  // the last start failure.  Only rendered while the log buffer is
+  // empty: a container that never started has no logs, and without
+  // this the modal shows nothing actionable.
+  const [lastError, setLastError] = useState<string | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [endReason, setEndReason] = useState<string | null>(null);
   const [autoScroll, setAutoScroll] = useState(true);
@@ -196,6 +201,9 @@ export default function LogsModal({ name, onClose }: LogsModalProps) {
         if (res.ok) {
           const data = await res.json();
           append(Array.isArray(data.lines) ? data.lines : []);
+          setLastError(
+            typeof data.lastError === "string" ? data.lastError : null,
+          );
           setStatus("backfill");
         } else if (res.status === 404) {
           // Container doesn't exist — the SSE endpoint would also
@@ -333,16 +341,26 @@ export default function LogsModal({ name, onClose }: LogsModalProps) {
     });
   }, []);
 
+  // One source for the rendered text and the Copy/Download exports: a user
+  // copying the empty state must get the last-runtime-error line they are
+  // looking at, not an empty clipboard.
+  const visibleText =
+    lines.length === 0
+      ? lastError
+        ? `(no log lines yet — last runtime error: ${lastError})`
+        : "(no log lines yet)"
+      : lines.join("\n");
+
   const doCopy = useCallback(async () => {
-    const ok = await copyTextToClipboard(lines.join("\n"));
+    const ok = await copyTextToClipboard(visibleText);
     if (ok) {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     }
-  }, [lines]);
+  }, [visibleText]);
 
   const doDownload = useCallback(() => {
-    const blob = new Blob([lines.join("\n") + "\n"], {
+    const blob = new Blob([visibleText + "\n"], {
       type: "text/plain;charset=utf-8",
     });
     const url = URL.createObjectURL(blob);
@@ -354,7 +372,7 @@ export default function LogsModal({ name, onClose }: LogsModalProps) {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-  }, [lines, name]);
+  }, [visibleText, name]);
 
   // ESC to close.
   useEffect(() => {
@@ -501,7 +519,7 @@ export default function LogsModal({ name, onClose }: LogsModalProps) {
           aria-label="Container log output"
           tabIndex={0}
         >
-          {lines.length === 0 ? "(no log lines yet)" : lines.join("\n")}
+          {visibleText}
           {/* Sentinel for auto-scroll-to-bottom — see the
               useLayoutEffect above.  `aria-hidden` because it's a
               layout-only element with no semantic meaning to
