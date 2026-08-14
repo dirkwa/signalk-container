@@ -915,6 +915,26 @@ describe("ensureRunning — nofile rejection fallback", () => {
       assert.equal(clamps[0].granted, 524288);
     });
 
+    it("announces the create clamp once across device retries", async () => {
+      // Readable ceiling below the ask: the FIRST build clamps and
+      // advises. The device retry rebuilds with the same clamped ask —
+      // rebuilding must not announce the identical clamp a second time.
+      _setNofileCeilingForTesting(() => 524288);
+      _setProcLimitsReaderForTesting(() => procLimits(524288, 524288));
+      const { client, calls } = makeMissingClient([
+        () => Promise.reject(new Error(DEVICE_REJECT)),
+        () => Promise.resolve(),
+      ]);
+      const clamps = await runComposed(client);
+      assert.deepEqual(createShapes(calls), [
+        { hasBind: true, asksNofile: true, label: undefined },
+        { hasBind: false, asksNofile: true, label: '["/dev/snd"]' },
+      ]);
+      assert.equal(clamps.length, 1, "one advisory despite the rebuild");
+      assert.equal(clamps[0].requested, 1048576);
+      assert.equal(clamps[0].granted, 524288);
+    });
+
     it("re-enters the device fallback after the rlimit concession", async () => {
       _setNofileCeilingForTesting(() => null);
       _setProcLimitsReaderForTesting(() => procLimits(524288, 524288));

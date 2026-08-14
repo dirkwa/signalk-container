@@ -2773,16 +2773,23 @@ export async function ensureRunning(
         config.healthcheck !== undefined
           ? null
           : await getImageHealthcheck(runtime, imageRef, client);
-      const buildOpts = (cfg: ContainerConfig): Docker.ContainerCreateOptions =>
-        buildCreateOptions(name, cfg, runtime, healthcheck, debug, (event) =>
-          safeInvokeUlimitClamped(options?.onUlimitClamped, event, (err) =>
-            debug(
-              `ensureRunning(${name}): onUlimitClamped handler threw: ${
-                err instanceof Error ? err.message : String(err)
-              }`,
-            ),
+      const announceClamp = (event: UlimitClamp): void =>
+        safeInvokeUlimitClamped(options?.onUlimitClamped, event, (err) =>
+          debug(
+            `ensureRunning(${name}): onUlimitClamped handler threw: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
           ),
         );
+      // The clamp advisory belongs to the first build only: fallback
+      // retries rebuild the create options with the same (possibly
+      // clamped) nofile ask, and announcing the identical clamp again on
+      // every retry would duplicate consumer notifications.
+      const buildOpts = (
+        cfg: ContainerConfig,
+        onClamp: (event: UlimitClamp) => void = announceClamp,
+      ): Docker.ContainerCreateOptions =>
+        buildCreateOptions(name, cfg, runtime, healthcheck, debug, onClamp);
       const fireDeviceIssue = (event: DeviceIssue): void =>
         safeInvokeDeviceIssue(options?.onDeviceIssue, event, (err) =>
           debug(
@@ -2951,7 +2958,10 @@ export async function ensureRunning(
         // start) leaves the created container behind; remove it before
         // the retry. removeContainer tolerates "already gone".
         await removeContainer(runtime, name, client);
-        created = await createAndStart(client, buildOpts(concededConfig()));
+        created = await createAndStart(
+          client,
+          buildOpts(concededConfig(), () => {}),
+        );
       }
 
       if (created.ok && droppedNofileAsk !== null) {
