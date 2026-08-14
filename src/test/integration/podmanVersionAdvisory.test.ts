@@ -17,32 +17,34 @@ async function hasContainerRuntime(): Promise<ContainerRuntimeInfo | null> {
   return detectRuntime("auto");
 }
 
-// Mirrors PODMAN_MIN_NOFILE_HONORED in doctor.ts. Duplicated rather than
-// exported: this test is the independent check that the doctor's verdict
-// matches the host's real version, so deriving both from one constant
-// would make the assertion circular.
+// Mirror PODMAN_MIN_NOFILE_HONORED / PODMAN_MIN_BASELINE in doctor.ts.
+// Duplicated rather than exported: this test is the independent check that
+// the doctor's verdict matches the host's real version, so deriving both
+// from one constant would make the assertion circular.
 const PODMAN_NOFILE_FIXED = { major: 5, minor: 5 };
+const PODMAN_BASELINE = { major: 5, minor: 4 };
 
 /**
- * Compare the live version against the floor on major.minor only —
+ * Compare the live version against a floor on major.minor only —
  * the same policy the doctor applies. A semver comparison would rank a
  * prerelease build ("5.5.0-dev") BELOW 5.5.0 and expect an advisory,
  * while the doctor reads its leading major.minor as 5.5 and emits none;
  * such a host would then fail this test despite correct behaviour.
  */
-function isBelowNofileFloor(version: string): boolean {
+function isBelowFloor(
+  version: string,
+  floor: { major: number; minor: number },
+): boolean {
   const m = /^(\d+)\.(\d+)/.exec(version.trim());
   if (!m) return false;
   const major = Number(m[1]);
   const minor = Number(m[2]);
-  return (
-    major < PODMAN_NOFILE_FIXED.major ||
-    (major === PODMAN_NOFILE_FIXED.major && minor < PODMAN_NOFILE_FIXED.minor)
-  );
+  return major < floor.major || (major === floor.major && minor < floor.minor);
 }
 
 const NOFILE_ADVICE_MARKER = "older than 5.5";
 const EPIPE_ADVICE_MARKER = "older than 4.5";
+const BASELINE_ADVICE_MARKER = "older than 5.4";
 
 const hasMarker = (lines: string[], marker: string): boolean =>
   lines.some((l) => l.includes(marker));
@@ -77,13 +79,36 @@ describe("doctor — rootless Podman nofile advisory (live runtime)", () => {
     const isOldRootlessPodman =
       runtime.runtime === "podman" &&
       result.daemon.rootless === true &&
-      isBelowNofileFloor(runtime.version);
+      isBelowFloor(runtime.version, PODMAN_NOFILE_FIXED);
 
     assert.equal(
       hasMarker(result.remediation, NOFILE_ADVICE_MARKER),
       isOldRootlessPodman,
       `nofile advisory presence must match live runtime ${runtime.runtime} ` +
         `${runtime.version} rootless=${String(result.daemon.rootless)}`,
+    );
+  });
+
+  it("baseline advisory fires exactly when the live daemon is podman < 5.4", async (t) => {
+    const runtime = await hasContainerRuntime();
+    if (!runtime) {
+      t.skip("no container runtime available");
+      return;
+    }
+
+    const result = await selfDeployment("auto");
+
+    // No rootless term — the supported-baseline advisory is about test
+    // coverage, so it fires rootful too (unlike the nofile advisory).
+    const isBelowBaseline =
+      runtime.runtime === "podman" &&
+      isBelowFloor(runtime.version, PODMAN_BASELINE);
+
+    assert.equal(
+      hasMarker(result.remediation, BASELINE_ADVICE_MARKER),
+      isBelowBaseline,
+      `baseline advisory presence must match live runtime ${runtime.runtime} ` +
+        `${runtime.version}`,
     );
   });
 
@@ -103,7 +128,8 @@ describe("doctor — rootless Podman nofile advisory (live runtime)", () => {
     // silently degrade it to a skip.
     const hasVersionAdvice =
       hasMarker(result.remediation, NOFILE_ADVICE_MARKER) ||
-      hasMarker(result.remediation, EPIPE_ADVICE_MARKER);
+      hasMarker(result.remediation, EPIPE_ADVICE_MARKER) ||
+      hasMarker(result.remediation, BASELINE_ADVICE_MARKER);
     const hasOtherAdviceBlock = result.remediation.some(
       (l) =>
         // Headline lines of the other advisory blocks the doctor can
