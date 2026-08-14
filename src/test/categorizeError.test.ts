@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   categorizeError,
   isStorageCorruptError,
+  isUlimitRejectionText,
   messageWithRaw,
   RAW_SNIPPET_MAX_LENGTH,
 } from "../errors.js";
@@ -116,6 +117,64 @@ describe("messageWithRaw", () => {
 
     const overLimit = "x".repeat(RAW_SNIPPET_MAX_LENGTH + 1);
     assert.equal(messageWithRaw("Oops.", overLimit), `Oops. (${atLimit}…)`);
+  });
+});
+
+// The two OCI-runtime phrasings for a rejected rlimit request. Both carry
+// "operation not permitted", so without the dedicated kind they land in the
+// `permission` bucket, whose socket/mount remediation is a red herring for
+// a limits problem.
+const CRUN_RLIMIT_TEXT =
+  "crun: setrlimit `RLIMIT_NOFILE`: Operation not permitted: OCI permission denied";
+const RUNC_RLIMIT_TEXT =
+  "error setting rlimits for ready process: setting rlimit type 7: operation not permitted";
+
+describe("categorizeError — ulimit rejection", () => {
+  it("classifies the crun setrlimit rejection as ulimit-rejected", () => {
+    const result = categorizeError(new Error(CRUN_RLIMIT_TEXT));
+    assert.equal(result.kind, "ulimit-rejected");
+    assert.match(result.userMessage, /per-process limit \(ulimit/);
+    assert.match(result.userMessage, /podman machine on macOS/);
+    assert.equal(result.raw, CRUN_RLIMIT_TEXT);
+  });
+
+  it("classifies the runc rlimit rejection as ulimit-rejected", () => {
+    assert.equal(
+      categorizeError(new Error(RUNC_RLIMIT_TEXT)).kind,
+      "ulimit-rejected",
+    );
+  });
+
+  it("takes precedence over the permission bucket", () => {
+    for (const text of [CRUN_RLIMIT_TEXT, RUNC_RLIMIT_TEXT]) {
+      assert.equal(categorizeError(new Error(text)).kind, "ulimit-rejected");
+    }
+  });
+
+  it("leaves a plain 'operation not permitted' in the permission bucket", () => {
+    assert.equal(
+      categorizeError(new Error("mount /x: operation not permitted")).kind,
+      "permission",
+    );
+  });
+});
+
+describe("isUlimitRejectionText", () => {
+  it("matches each pattern independently (any-match)", () => {
+    assert.ok(isUlimitRejectionText("setrlimit failed"));
+    assert.ok(isUlimitRejectionText("RLIMIT_NPROC: cannot apply"));
+    assert.ok(isUlimitRejectionText("error setting rlimits for ready process"));
+    assert.ok(isUlimitRejectionText("setting rlimit type 7: denied"));
+  });
+
+  it("rejects unrelated permission texts", () => {
+    assert.equal(
+      isUlimitRejectionText(
+        "cannot stop container: sending SIGKILL: operation not permitted",
+      ),
+      false,
+    );
+    assert.equal(isUlimitRejectionText("permission denied"), false);
   });
 });
 
