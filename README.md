@@ -45,7 +45,9 @@ docker-compat API defects the deployment doctor warns about:
   (`write EPIPE`) on large create payloads, breaking big helper jobs
 - **below 5.5, rootless** — `--ulimit nofile` requests are silently
   dropped over the compat API (containers/podman#25881); containers
-  inherit the podman service's limits instead
+  inherit the podman service's limits instead. This one also applies to
+  the 5.4.x baseline itself — see the "Rootless Podman < 5.5.0" note in
+  [Raising the open-files limit](#raising-the-open-files-limit-nofile)
 
 ## Running Signal K in a Container
 
