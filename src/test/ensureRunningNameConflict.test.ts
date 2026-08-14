@@ -1,6 +1,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { ensureRunning } from "../containers.js";
+import { describeError } from "../errors.js";
 import { _setCurrentHostIdsForTesting } from "../runtime.js";
 import type { ContainerConfig, ContainerRuntimeInfo } from "../types.js";
 import type { ContainerClient } from "../client.js";
@@ -111,9 +112,19 @@ describe("ensureRunning — stale-container name conflict on create", () => {
     });
     await assert.rejects(
       ensureRunning(docker, "questdb", requested, () => {}, undefined, client),
-      // The thrown message now carries the categorized userMessage rather than
-      // the raw runtime text ("no space left on device" → "Disk full.").
-      /Failed to create .*Disk full/,
+      (err: unknown) => {
+        // The thrown message carries the categorized userMessage AND the raw
+        // runtime text — the raw is what makes the failure diagnosable from a
+        // plugin-status row alone.
+        assert.match(
+          (err as Error).message,
+          /Failed to create .*Disk full.*\(no space left on device\)/,
+        );
+        // The attached cause carries `raw`, so describeError recovers the
+        // untruncated runtime text.
+        assert.equal(describeError(err), "no space left on device");
+        return true;
+      },
     );
     assert.equal(createCount, 1, "create should be attempted exactly once");
     assert.equal(

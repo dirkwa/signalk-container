@@ -37,6 +37,7 @@ import {
 import {
   describeError,
   isStorageCorruptError,
+  messageWithRaw,
   type ErrorKind,
 } from "./errors.js";
 import {
@@ -587,7 +588,10 @@ export async function getContainerLogs(
       client.getContainer(prefixedName(name)).logs(logOpts) as Promise<Buffer>,
   );
   if (!result.ok) {
-    throw new Error(`logs ${name}: ${result.error.userMessage}`);
+    throw new Error(
+      `logs ${name}: ${messageWithRaw(result.error.userMessage, result.error.raw)}`,
+      { cause: result.error },
+    );
   }
   // One-shot logs come back as a multiplexed buffer (non-TTY containers);
   // demux to combined text before splitting. Trailing empties are popped
@@ -877,7 +881,10 @@ export async function pullImage(
       }),
   );
   if (!result.ok) {
-    throw new Error(`Failed to pull ${image}: ${result.error.userMessage}`);
+    throw new Error(
+      `Failed to pull ${image}: ${messageWithRaw(result.error.userMessage, result.error.raw)}`,
+      { cause: result.error },
+    );
   }
 }
 
@@ -2889,7 +2896,12 @@ export async function ensureRunning(
       }
 
       if (!created.ok) {
-        throw new Error(`Failed to create ${fullName}: ${created.error}`);
+        // The result object carries `raw`, so it satisfies the cause shape
+        // describeError reads — the full runtime text stays recoverable.
+        throw new Error(
+          `Failed to create ${fullName}: ${messageWithRaw(created.error, created.raw)}`,
+          { cause: created },
+        );
       }
       return;
     }
@@ -2922,7 +2934,10 @@ async function startByFullName(
     return;
   }
   if (!result.ok) {
-    throw new Error(`Failed to start ${fullName}: ${result.error.userMessage}`);
+    throw new Error(
+      `Failed to start ${fullName}: ${messageWithRaw(result.error.userMessage, result.error.raw)}`,
+      { cause: result.error },
+    );
   }
 }
 
@@ -3032,7 +3047,8 @@ export async function stopContainer(
     const state = await getContainerState(runtime, name, client);
     if (state !== "stopped" && state !== "missing") {
       throw new Error(
-        `Failed to stop ${fullName}: ${result.error.userMessage}`,
+        `Failed to stop ${fullName}: ${messageWithRaw(result.error.userMessage, result.error.raw)}`,
+        { cause: result.error },
       );
     }
   }
@@ -3064,8 +3080,9 @@ export async function removeContainer(
     // the report. Carry the kind so callers can react to a permission/wedge
     // failure (keep a healthy container running) vs hard-fail.
     throw new ContainerRemovalError(
-      `Failed to remove ${fullName}: ${result.error.userMessage} (${result.error.raw})`,
+      `Failed to remove ${fullName}: ${messageWithRaw(result.error.userMessage, result.error.raw)}`,
       result.error.kind,
+      { cause: result.error },
     );
   }
 }
@@ -3081,8 +3098,9 @@ export class ContainerRemovalError extends Error {
   constructor(
     message: string,
     readonly kind: ErrorKind,
+    options?: ErrorOptions,
   ) {
-    super(message);
+    super(message, options);
     this.name = "ContainerRemovalError";
   }
 }
@@ -3288,7 +3306,10 @@ export async function pruneImages(
 ): Promise<{ imagesRemoved: number; spaceReclaimed: string }> {
   const result = await safe(() => client.pruneImages());
   if (!result.ok) {
-    throw new Error(`Prune failed: ${result.error.userMessage}`);
+    throw new Error(
+      `Prune failed: ${messageWithRaw(result.error.userMessage, result.error.raw)}`,
+      { cause: result.error },
+    );
   }
   const deleted = result.value.ImagesDeleted ?? [];
   // ImagesDeleted lists one entry per Untagged + Deleted action; count
@@ -3659,7 +3680,8 @@ export async function ensureNetwork(
   const create = await safe(() => client.createNetwork({ Name: name }));
   if (!create.ok && !/already exists/i.test(create.error.raw)) {
     throw new Error(
-      `Failed to create network ${name}: ${create.error.userMessage}`,
+      `Failed to create network ${name}: ${messageWithRaw(create.error.userMessage, create.error.raw)}`,
+      { cause: create.error },
     );
   }
 }
@@ -3676,7 +3698,8 @@ export async function removeNetwork(
     !/not found/i.test(result.error.raw)
   ) {
     throw new Error(
-      `Failed to remove network ${name}: ${result.error.userMessage}`,
+      `Failed to remove network ${name}: ${messageWithRaw(result.error.userMessage, result.error.raw)}`,
+      { cause: result.error },
     );
   }
 }
@@ -3699,7 +3722,8 @@ export async function connectToNetwork(
     !/already exists in network/i.test(result.error.raw)
   ) {
     throw new Error(
-      `Failed to connect ${fullName} to ${networkName}: ${result.error.userMessage}`,
+      `Failed to connect ${fullName} to ${networkName}: ${messageWithRaw(result.error.userMessage, result.error.raw)}`,
+      { cause: result.error },
     );
   }
 }
@@ -3716,7 +3740,8 @@ export async function disconnectFromNetwork(
   );
   if (!result.ok && !/not connected/i.test(result.error.raw)) {
     throw new Error(
-      `Failed to disconnect ${fullName} from ${networkName}: ${result.error.userMessage}`,
+      `Failed to disconnect ${fullName} from ${networkName}: ${messageWithRaw(result.error.userMessage, result.error.raw)}`,
+      { cause: result.error },
     );
   }
 }
