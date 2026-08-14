@@ -409,9 +409,10 @@ The `user@.service` drop-in covers the default rootless connection; the
 podman run --rm --ulimit nofile=1048576:1048576 docker.io/library/alpine sh -c 'ulimit -n -H'
 ```
 
-— should print `1048576`. Then remove the container
-(`podman rm -f sk-<name>`) so the next plugin start recreates it with the
-full request granted.
+— should print `1048576`. Then remove the container with its actual managed
+name — `sk-` is the default namespace prefix, so for signalk-questdb that is
+`podman rm -f sk-signalk-questdb` — and the next plugin start recreates it
+with the full request granted.
 
 The value cannot exceed the kernel's absolute per-process cap, `fs.nr_open`
 (`cat /proc/sys/fs/nr_open` — typically ~1 billion, so not a practical limit).
