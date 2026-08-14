@@ -119,11 +119,12 @@ function makeRegrantClient(inspectResult: Json): {
 
 function createdUlimits(
   calls: Map<string, unknown[]>,
+  index = 0,
 ): { Name?: string; Soft?: number; Hard?: number }[] | undefined {
   const created = calls.get("createContainer") ?? [];
-  assert.ok(created.length > 0, "expected a createContainer call");
+  assert.ok(created.length > index, `expected create call #${index + 1}`);
   return (
-    created[0] as {
+    created[index] as {
       HostConfig?: {
         Ulimits?: { Name?: string; Soft?: number; Hard?: number }[];
       };
@@ -667,21 +668,6 @@ describe("ensureRunning — nofile rejection fallback", () => {
     return { client, calls };
   }
 
-  function ulimitsOfCreate(
-    calls: Map<string, unknown[]>,
-    index: number,
-  ): { Name?: string; Soft?: number; Hard?: number }[] | undefined {
-    const created = calls.get("createContainer") ?? [];
-    assert.ok(created.length > index, `expected create call #${index + 1}`);
-    return (
-      created[index] as {
-        HostConfig?: {
-          Ulimits?: { Name?: string; Soft?: number; Hard?: number }[];
-        };
-      }
-    ).HostConfig?.Ulimits;
-  }
-
   it("retries once without the nofile ask and advises the shortfall", async () => {
     // Unknown ceiling (macOS shape): the ask passes through unclamped.
     _setNofileCeilingForTesting(() => null);
@@ -708,12 +694,12 @@ describe("ensureRunning — nofile rejection fallback", () => {
       },
       client,
     );
-    assert.deepEqual(ulimitsOfCreate(calls, 0), [
+    assert.deepEqual(createdUlimits(calls, 0), [
       { Name: "nofile", Soft: 1048576, Hard: 1048576 },
       { Name: "nproc", Soft: 4096, Hard: 4096 },
     ]);
     // The retry drops only the nofile entry; other ulimits survive.
-    assert.deepEqual(ulimitsOfCreate(calls, 1), [
+    assert.deepEqual(createdUlimits(calls, 1), [
       { Name: "nproc", Soft: 4096, Hard: 4096 },
     ]);
     assert.ok(
@@ -759,7 +745,7 @@ describe("ensureRunning — nofile rejection fallback", () => {
       client,
     );
     // The lone nofile entry gone, the retry emits no Ulimits at all.
-    assert.equal(ulimitsOfCreate(calls, 1), undefined);
+    assert.equal(createdUlimits(calls, 1), undefined);
     assert.equal(clamps.length, 1);
     assert.equal(clamps[0].requested, 1048576);
     assert.equal(clamps[0].granted, 0);
