@@ -54,6 +54,7 @@ import {
   execInContainer,
   collectManagedImageRefs as collectManagedImageRefsFromManifests,
   getActualPortBindings,
+  getContainerLastError,
   getContainerLogs,
   getContainerState,
   getImageDigest,
@@ -2736,7 +2737,23 @@ export default (app: App) => {
         }
         try {
           const lines = await api.getLogs(name, { tail, since });
-          res.json({ name, lines });
+          // A container that never started has no log lines; the
+          // runtime's record of why (inspect `.State.Error`) is the
+          // only diagnostic it leaves behind. Attach it so the Logs
+          // modal can render an actionable empty state. `undefined`
+          // is dropped by JSON serialization, so the field is absent
+          // when there is nothing to report. Best-effort: the lines
+          // payload already succeeded, so an inspect failure here must
+          // degrade to "no lastError", not fail the response.
+          let lastError: string | undefined;
+          if (lines.length === 0) {
+            try {
+              lastError = await getContainerLastError(name);
+            } catch {
+              lastError = undefined;
+            }
+          }
+          res.json({ name, lines, lastError });
         } catch (err) {
           res.status(500).json({
             error: err instanceof Error ? err.message : String(err),

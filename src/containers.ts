@@ -923,6 +923,38 @@ export async function getContainerState(
 }
 
 /**
+ * Upper bound on the `.State.Error` text surfaced to callers. Some OCI
+ * runtime rejections embed multi-kilobyte detail (spec dumps, nested
+ * wrapper chains); the reader needs the leading human-readable cause,
+ * not the whole payload.
+ */
+export const LAST_ERROR_MAX_CHARS = 500;
+
+/**
+ * The runtime's record of a container's most recent start/run failure
+ * (inspect `.State.Error`, set by podman/docker when e.g. the OCI
+ * runtime rejects the container). A container that never started has
+ * no logs, so this text is the only diagnostic it leaves behind.
+ * Returns `undefined` when the container is missing or the runtime
+ * recorded no error; the text is trimmed and truncated to
+ * `LAST_ERROR_MAX_CHARS`.
+ */
+export async function getContainerLastError(
+  name: string,
+  client: ContainerClient = getClient(),
+): Promise<string | undefined> {
+  const info = await safeInspect(() =>
+    client.getContainer(prefixedName(name)).inspect(),
+  );
+  const raw = info?.State?.Error;
+  if (typeof raw !== "string") return undefined;
+  const trimmed = raw.trim();
+  if (trimmed === "") return undefined;
+  if (trimmed.length <= LAST_ERROR_MAX_CHARS) return trimmed;
+  return `${trimmed.slice(0, LAST_ERROR_MAX_CHARS).trimEnd()}…`;
+}
+
+/**
  * Read the live resource limits applied to a managed container,
  * straight from `podman inspect` (i.e. the actual cgroup state).
  * Returns an empty object if the container is missing or no
