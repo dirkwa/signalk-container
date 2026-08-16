@@ -5,6 +5,9 @@ import type { ContainerClient, ResolvedClient } from "../client.js";
 import { makeMockClient } from "./helpers/mockClient.js";
 
 const TEST_SOCKET = "/run/test/podman.sock";
+// GID the fake socket reports; the HaLOS guide must echo exactly this value
+// in both the group_add entry and the idempotency check.
+const TEST_SOCKET_GID = 993;
 
 /**
  * Wrap a `ContainerClient` (typically from `makeMockClient`) as a
@@ -162,6 +165,12 @@ function probesWith(overrides: SelfDeploymentProbes): SelfDeploymentProbes {
     // drive the netavark-with/without-aardvark paths.
     readNetworkBackendInfo:
       overrides.readNetworkBackendInfo ?? (async () => null),
+    // Default to "no platform marker" so the HaLOS guide never replaces
+    // the generic remediation for tests that don't opt in.
+    detectPlatform: overrides.detectPlatform ?? (async () => null),
+    // Default to "socket GID unreadable" so tests that opt into the HaLOS
+    // guide without a GID exercise the placeholder path.
+    readSocketGid: overrides.readSocketGid ?? (async () => null),
   };
 }
 
@@ -450,6 +459,130 @@ describe("selfDeployment — daemon failure classification", () => {
     );
     assert.equal(result.status, "permission-denied");
     assert.match(result.remediation.join("\n"), /group_add/);
+  });
+
+  describe("HaLOS", () => {
+    const eacces = () =>
+      resolveTo(unreachableDaemon("connect EACCES /var/run/docker.sock"));
+
+    it("permission denied on HaLOS → step-by-step guide whose block derives the GID and is service-scoped", async () => {
+      const result = await selfDeployment(
+        "auto",
+        null,
+        probesWith({
+          isContainerized: () => true,
+          resolveClient: eacces(),
+          detectPlatform: async () => "halos",
+          readSocketGid: async (path) =>
+            path === TEST_SOCKET ? TEST_SOCKET_GID : null,
+        }),
+      );
+      assert.equal(result.status, "permission-denied");
+      assert.equal(result.platform, "halos");
+      const joined = result.remediation.join("\n");
+      assert.match(joined, /HaLOS detected/);
+      assert.match(joined, /Step 1/);
+      assert.match(joined, /Step 2/);
+      assert.match(joined, /Step 3/);
+      assert.match(
+        joined,
+        /\/var\/lib\/container-apps\/signalk-server\/docker-compose\.yml/,
+      );
+      assert.match(joined, /systemctl restart signalk-server/);
+      // The prose names the readable GID for the human.
+      assert.match(joined, new RegExp(`GID ${TEST_SOCKET_GID}`));
+      // The executable block derives the GID itself (stat -c %g) rather than
+      // baking one in, so it is safe to paste verbatim even when the plugin
+      // could not read the GID; it must carry no placeholder that a verbatim
+      // paste would write literally into the compose.
+      assert.match(joined, /G=\$\(stat -c %g "\$SOCK" 2>\/dev\/null\)/);
+      assert.doesNotMatch(joined, /<docker-gid>/);
+      assert.doesNotMatch(joined, /Step 0/);
+      // The edit is guarded three ways: file must exist; there must be
+      // exactly one group_add block AND it must belong to the signalk-server
+      // service (so a sole group_add on another service is refused, never
+      // mis-edited); and the GID must not already be present.
+      assert.match(joined, /Not the standard HaLOS app/);
+      assert.match(joined, /grep -c '\^\[\[:space:\]\]\*group_add/);
+      assert.match(joined, /\$0==" {2}signalk-server:"/);
+      assert.match(joined, /Unexpected compose shape/);
+      // Idempotency check is quoting-agnostic (matches - 993 / "993" / '993').
+      assert.match(joined, /\[\\"']\?\$G\[\\"']\?/);
+      // Generic docker advice must not sit alongside the guide.
+      assert.doesNotMatch(joined, /docker' group/);
+    });
+
+    it("permission denied on HaLOS without a readable socket GID → block still safe, no placeholder", async () => {
+      const result = await selfDeployment(
+        "auto",
+        null,
+        probesWith({
+          isContainerized: () => true,
+          resolveClient: eacces(),
+          detectPlatform: async () => "halos",
+          // no readSocketGid override → the real default runs against the
+          // test socket path (absent) and returns null.
+        }),
+      );
+      assert.equal(result.status, "permission-denied");
+      const joined = result.remediation.join("\n");
+      // The exact GID is unknown, so the prose omits the "(GID N)" phrase and
+      // no placeholder appears anywhere — but the executable block is
+      // unchanged and still derives the GID at run time.
+      assert.doesNotMatch(joined, /\(GID \d+\)/);
+      assert.doesNotMatch(joined, /<docker-gid>/);
+      assert.match(joined, /G=\$\(stat -c %g "\$SOCK" 2>\/dev\/null\)/);
+    });
+
+    it("permission denied on HaLOS but NOT containerized → generic remediation", async () => {
+      // A bare-metal Signal K on a HaLOS box is not the container-app
+      // deployment the compose guide edits; the fix is host-side.
+      const result = await selfDeployment(
+        "auto",
+        null,
+        probesWith({
+          isContainerized: () => false,
+          resolveClient: eacces(),
+          detectPlatform: async () => "halos",
+          readSocketGid: async () => TEST_SOCKET_GID,
+        }),
+      );
+      assert.equal(result.status, "permission-denied");
+      assert.equal(result.platform, "halos");
+      assert.doesNotMatch(result.remediation.join("\n"), /HaLOS detected/);
+      assert.match(result.remediation.join("\n"), /group_add/);
+    });
+
+    it("socket-unreachable on HaLOS → generic remediation, platform still reported", async () => {
+      const result = await selfDeployment(
+        "auto",
+        null,
+        probesWith({
+          isContainerized: () => true,
+          resolveClient: resolveTo(
+            unreachableDaemon(
+              "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+            ),
+          ),
+          detectPlatform: async () => "halos",
+        }),
+      );
+      assert.equal(result.status, "socket-unreachable");
+      assert.equal(result.platform, "halos");
+      assert.doesNotMatch(result.remediation.join("\n"), /HaLOS detected/);
+    });
+
+    it("no platform marker → platform null on every path", async () => {
+      const noRuntime = await selfDeployment("auto", null, probesWith({}));
+      assert.equal(noRuntime.platform, null);
+      const denied = await selfDeployment(
+        "auto",
+        null,
+        probesWith({ isContainerized: () => true, resolveClient: eacces() }),
+      );
+      assert.equal(denied.platform, null);
+      assert.doesNotMatch(denied.remediation.join("\n"), /HaLOS/);
+    });
   });
 
   it("unclassified daemon error → defaults to socket-unreachable, preserves raw text", async () => {

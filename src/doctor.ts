@@ -1,10 +1,11 @@
-import { readFile, readdir } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import { userInfo } from "node:os";
 import { posix } from "node:path";
 import { PassThrough } from "node:stream";
 import type {
   ContainerConfig,
   ContainerRuntimeInfo,
+  HostPlatform,
   RuntimeName,
   RuntimePreference,
   SelfDeploymentResult,
@@ -235,6 +236,19 @@ export interface SelfDeploymentProbes {
   readNetworkBackendInfo?: (
     client: ContainerClient,
   ) => Promise<LibpodNetworkBackendInfo | null>;
+  /**
+   * Recognise the host platform from markers visible to this process
+   * (production: `HALOS_RUNTIME_DIR` exists → `"halos"`). Returns `null`
+   * when no marker matches. Drives platform-specific remediation only.
+   */
+  detectPlatform?: () => Promise<HostPlatform | null>;
+  /**
+   * Numeric group id owning a unix socket, or `null` when it cannot be
+   * read (absent, unsearchable parent, non-POSIX). Used to render the
+   * exact `group_add` value in the permission-denied guides instead of
+   * sending the operator off to `getent group docker`.
+   */
+  readSocketGid?: (socketPath: string) => Promise<number | null>;
 }
 
 /**
@@ -606,8 +620,11 @@ export async function selfDeployment(
     probes.resolveLingerUser ?? defaultResolveLingerUser;
   const probeReadNetworkBackendInfo =
     probes.readNetworkBackendInfo ?? libpodNetworkBackendInfo;
+  const probeDetectPlatform = probes.detectPlatform ?? defaultDetectPlatform;
+  const probeReadSocketGid = probes.readSocketGid ?? defaultReadSocketGid;
 
   const containerized = probeIsContainerized();
+  const platform = await probeDetectPlatform();
   const env = {
     DOCKER_HOST: probeReadEnv("DOCKER_HOST") ?? null,
     CONTAINER_HOST: probeReadEnv("CONTAINER_HOST") ?? null,
@@ -624,6 +641,7 @@ export async function selfDeployment(
   if (!resolved) {
     return {
       isContainerized: containerized,
+      platform,
       binary: { name: null, path: null, version: null },
       daemon: {
         reachable: false,
@@ -709,6 +727,7 @@ export async function selfDeployment(
   // break on the port.
   const baseResult = {
     isContainerized: containerized,
+    platform,
     binary: { name: binaryName, path: null, version: binaryVersion },
     env,
     cgroupControllers,
@@ -719,6 +738,18 @@ export async function selfDeployment(
 
   if (!info.reachable) {
     const status = classifyDaemonFailure(info.errorKind);
+    // HaLOS ships Signal K as a container app whose compose already mounts
+    // the host `/run` (so the docker socket is present) but whose
+    // `group_add` lacks the docker group — the one deployment where a
+    // refused socket has a single, known fix. Render that fix with the
+    // socket's actual GID instead of the generic compose advice.
+    const remediation =
+      status === "permission-denied" && containerized && platform === "halos"
+        ? remediationHalosDockerSocket(
+            socketPath,
+            await probeReadSocketGid(socketPath),
+          )
+        : remediationForDaemonFailure(status, binaryName, env);
     return {
       ...baseResult,
       daemon: {
@@ -729,7 +760,7 @@ export async function selfDeployment(
       },
       selfId: { value: null, source: null },
       status,
-      remediation: remediationForDaemonFailure(status, binaryName, env),
+      remediation,
     };
   }
 
@@ -1196,6 +1227,141 @@ function remediationDockerSocket(dockerHost: string | null): string[] {
     "",
     "Bind-mount the socket into this Signal K container:",
     "  -v /var/run/docker.sock:/var/run/docker.sock",
+  ];
+}
+
+/**
+ * Directory halos-core-containers publishes on every HaLOS host
+ * (`domain.env`, `routing-labels/`). HaLOS's `signalk-server` app
+ * bind-mounts the host `/run` into the Signal K container, so seeing this
+ * directory from inside the container identifies the platform.
+ */
+const HALOS_RUNTIME_DIR = "/run/halos";
+
+/**
+ * Where HaLOS's container-app packaging installs the Signal K compose
+ * file and what its systemd unit is called. Both come from
+ * halos-org/container-packaging-tools (`/var/lib/container-apps/<app>/`,
+ * `<app>.service`) with the app id `signalk-server`.
+ */
+const HALOS_SIGNALK_COMPOSE =
+  "/var/lib/container-apps/signalk-server/docker-compose.yml";
+const HALOS_SIGNALK_SERVICE = "signalk-server";
+
+async function defaultDetectPlatform(): Promise<HostPlatform | null> {
+  try {
+    const s = await stat(HALOS_RUNTIME_DIR);
+    return s.isDirectory() ? "halos" : null;
+  } catch {
+    return null;
+  }
+}
+
+async function defaultReadSocketGid(
+  socketPath: string,
+): Promise<number | null> {
+  try {
+    const s = await stat(socketPath);
+    return s.isSocket() ? s.gid : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The paste block for the HaLOS guide, as a self-contained POSIX-sh
+ * script. It derives the socket's group id at run time (`stat -c %g`)
+ * rather than baking a value in, so it is always safe to paste verbatim —
+ * even when the plugin could not read the gid itself — and never carries a
+ * placeholder that a verbatim paste would write literally. It edits the
+ * `signalk-server` service's `group_add` list only, guarding on:
+ *
+ * - the socket group being readable (else it prints why and stops);
+ * - the compose file existing (else it points at the by-hand note);
+ * - the compose having exactly one `group_add:` block AND that block
+ *   belonging to the `signalk-server` service (so it can never add the
+ *   group to an unrelated service, and never edits the wrong service when
+ *   the sole block is someone else's);
+ * - the gid not already being present in that list, matched regardless of
+ *   YAML quoting (`- 993` / `- "993"` / `- '993'`), so re-runs are no-ops.
+ *
+ * `socketPath` and the service token are the only interpolated values;
+ * both come from plugin-internal constants / the resolved socket path, not
+ * user input reaching this string.
+ */
+function halosFixScript(socketPath: string): string[] {
+  const svc = HALOS_SIGNALK_SERVICE;
+  // Lines of the signalk-server service block (until the next top-level
+  // service key), used to confirm the sole group_add is that service's.
+  const svcBlock = String.raw`awk '$0=="  ${svc}:"{i=1;next} /^  [A-Za-z0-9._-]+:[[:space:]]*$/{i=0} i' "$F"`;
+  return [
+    `  SOCK=${socketPath}`,
+    `  F=${HALOS_SIGNALK_COMPOSE}`,
+    String.raw`  G=$(stat -c %g "$SOCK" 2>/dev/null)`,
+    String.raw`  if [ -z "$G" ]; then echo "Could not read the group of $SOCK — is the socket present?";`,
+    String.raw`  elif [ ! -f "$F" ]; then echo "Not the standard HaLOS app ($F not found) — see the note below";`,
+    String.raw`  elif [ "$(grep -c '^[[:space:]]*group_add:[[:space:]]*$' "$F")" != "1" ] || ! ` +
+      String.raw`${svcBlock} | grep -qE '^[[:space:]]*group_add:[[:space:]]*$'; then ` +
+      String.raw`echo "Unexpected compose shape — add the group by hand (see the note below)";`,
+    String.raw`  elif grep -Eq "^[[:space:]]*-[[:space:]]*[\"']?$G[\"']?([[:space:]]|$|#)" "$F"; then ` +
+      String.raw`echo "Already set (nothing to do)";`,
+    String.raw`  else sudo sed -i "s/^\( *\)group_add:$/&\n\1  - \"$G\"  # docker socket (Signal K Container Manager)/" "$F" ` +
+      String.raw`&& sudo systemctl restart ${svc} && echo "Done — added group $G and restarted ${svc}"; fi`,
+  ];
+}
+
+/**
+ * Step-by-step guide for a HaLOS operator whose Signal K container is
+ * refused by the docker socket. HaLOS has no UI setting for extra
+ * container groups and its unit passes `-f` explicitly (so a compose
+ * override file is not picked up); the workable fix is one edit to the
+ * packaged compose file, which the guide renders as a paste-once block
+ * (`halosFixScript`). The socket's real GID is shown in the prose when the
+ * plugin could read it, but the paste block always derives it itself so it
+ * is safe to run even when it could not.
+ */
+function remediationHalosDockerSocket(
+  socketPath: string,
+  socketGid: number | null,
+): string[] {
+  const owner =
+    socketGid === null
+      ? "but the Signal K container's user is not in the group that owns it,"
+      : `but the Signal K container's user is not in its owning group (GID ${socketGid}),`;
+  return [
+    "HaLOS detected. If you installed Signal K from the HaLOS app store (the",
+    "standard 'signalk-server' container app), HaLOS already mounts the host",
+    `docker socket (${socketPath}),`,
+    owner,
+    "so every request is refused. A one-time edit to that app's compose file",
+    "grants the group. No other change is needed.",
+    "",
+    "Step 1 — open a terminal on the HaLOS box. No install or SSH is needed:",
+    "  in your browser open  https://halos.local/system/terminal",
+    "  (that is Cockpit's built-in Terminal — log in as the pi/admin user).",
+    "  SSH works too if you prefer:  ssh pi@halos.local",
+    "",
+    "Step 2 — copy the whole block below, paste it into the terminal, press",
+    "  Enter. It reads the docker group itself and edits only the signalk-server",
+    "  service, so it is safe to run as-is: on any other shape it changes",
+    "  nothing and tells you to edit by hand:",
+    "",
+    ...halosFixScript(socketPath),
+    "",
+    'Step 3 — when it prints "Done", Signal K restarts (allow about a minute).',
+    "  Reload this page and open Doctor again: it should report 'Runtime ready'.",
+    "",
+    "Notes:",
+    "  - Nothing else about HaLOS changes; the group only lets Signal K talk",
+    "    to docker so plugins can start their own containers.",
+    "  - Updating the app in HaLOS re-installs the compose file and undoes the",
+    "    edit. This Doctor will flag it again — just repeat step 2.",
+    "  - If step 2 said it was not the standard HaLOS app or the compose shape",
+    "    was unexpected, add the group by hand: find the group that owns the",
+    "    docker socket with  stat -c %g " + socketPath + "  , then add a line",
+    '      - "<that number>"',
+    "    under the signalk-server service's 'group_add:' list in the compose",
+    "    file that starts your Signal K container, save, and restart it.",
   ];
 }
 

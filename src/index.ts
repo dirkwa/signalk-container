@@ -2335,9 +2335,7 @@ export default (app: App) => {
           // short because it shows inline in the admin UI.
           const doctor = await selfDeployment(preference);
           const headline = headlineForDoctorStatus(doctor.status);
-          app.setPluginError(
-            `${headline}. Open this plugin's config screen and click Doctor for details and remediation.`,
-          );
+          app.setPluginError(pluginErrorForDoctor(doctor, headline));
           if (doctor.remediation.length > 0) {
             app.error(
               `signalk-container deployment doctor — ${headline}:\n${doctor.remediation.join("\n")}`,
@@ -2374,9 +2372,7 @@ export default (app: App) => {
         );
         if (surfacing === "error") {
           const headline = headlineForDoctorStatus(doctor.status);
-          app.setPluginError(
-            `${headline}. Open this plugin's config screen and click Doctor for details and remediation.`,
-          );
+          app.setPluginError(pluginErrorForDoctor(doctor, headline));
           if (doctor.remediation.length > 0) {
             app.error(
               `signalk-container deployment doctor — ${headline}:\n${doctor.remediation.join("\n")}`,
@@ -3017,6 +3013,23 @@ function headlineForDoctorStatus(
     case "ok":
       return "Runtime ready";
   }
+}
+
+/**
+ * One-line dashboard text for a degraded doctor result. On HaLOS a refused
+ * docker socket has a known three-step fix, so the line says so up front
+ * rather than reading like a generic failure; every other case keeps the
+ * status headline.
+ */
+export function pluginErrorForDoctor(
+  doctor: SelfDeploymentResult,
+  headline: string,
+): string {
+  const lead =
+    doctor.platform === "halos" && doctor.status === "permission-denied"
+      ? "HaLOS: Signal K is not yet allowed to use docker (one-time fix)"
+      : headline;
+  return `${lead}. Open this plugin's config screen and click Doctor for details and remediation.`;
 }
 
 function parseDurationOrDefault(

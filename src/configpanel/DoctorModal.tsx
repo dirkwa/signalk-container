@@ -12,6 +12,7 @@ import { copyTextToClipboard } from "../clipboard";
 import {
   formatDoctorReport,
   headlineForStatus,
+  platformLabel,
   isSelfDeploymentResult,
 } from "../doctorReport";
 
@@ -315,6 +316,9 @@ export default function DoctorModal({ onClose }: DoctorModalProps) {
                 label="Containerized"
                 value={result.isContainerized ? "yes" : "no"}
               />
+              {result.platform && (
+                <Row label="Platform" value={platformLabel(result.platform)} />
+              )}
               <Row
                 label="Runtime"
                 value={

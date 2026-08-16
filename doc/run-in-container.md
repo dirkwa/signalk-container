@@ -152,6 +152,12 @@ systemctl --user enable --now signalk-master
 loginctl enable-linger $USER   # so the user session (and the podman socket) survives logout
 ```
 
+## HaLOS
+
+[HaLOS](https://github.com/halos-org/halos) (Hat Labs OS) installs Signal K as a container app. That app already bind-mounts the host `/run` into the Signal K container — so the docker socket is present — but the container user is not a member of the socket's owning group, and the image runs unprivileged (`privileged: true` does not bypass the socket's unix ACL). The plugin therefore reports `permission-denied` on a stock HaLOS install.
+
+The Doctor recognises HaLOS and, when the socket refuses the connection, replaces the generic advice with a guide tailored to that platform — including the socket's real group id and a copy-paste command. **Open this plugin's config screen, click Doctor, and follow the steps it shows.** Because the packaged app config is owned by HaLOS, a later app update can revert the change; the Doctor detects that and shows the same fix again.
+
 ## Troubleshooting cheat-sheet
 
 | Symptom                                                  | Cause                                                                                                                                                                   | Fix                                                                                                                                                                         |
@@ -160,6 +166,7 @@ loginctl enable-linger $USER   # so the user session (and the podman socket) sur
 | `statfs /home/node/.signalk: no such file or directory`  | Self-id detection failed; host daemon got an in-container path                                                                                                          | Set `SIGNALK_CONTAINER_ID=<your container name>` in the env                                                                                                                 |
 | `permission denied` opening the socket (rootless podman) | Socket reachable but owned by a different host UID                                                                                                                      | Match the SK container user to the socket owner: `--userns=keep-id` (or `--user $(id -u):$(id -g)`) so the in-container UID equals the host UID that owns the podman socket |
 | `permission denied` opening the socket (rootful docker)  | SK container user is not in the host `docker` group                                                                                                                     | Add the **host** docker GID via `group_add` — `getent group docker \| cut -d: -f3`. `privileged` and `network_mode: host` do **not** bypass the socket's unix ACL           |
+| `permission denied` opening the socket on HaLOS          | Stock HaLOS install: socket mounted, but the container user is not in its owning group                                                                                  | Open the plugin's Doctor and follow the HaLOS guide it shows (see [HaLOS](#halos) above)                                                                                    |
 | `could not detect self container id` in Signal K log     | Cascade returned null and no override set                                                                                                                               | Same as the second row — set `SIGNALK_CONTAINER_ID`                                                                                                                         |
 | Sibling containers start but can't reach Signal K        | `Network=host` SK + bridge-network siblings                                                                                                                             | Bind SK to the same user-defined bridge as siblings, or have plugins use `host.containers.internal`                                                                         |
 
