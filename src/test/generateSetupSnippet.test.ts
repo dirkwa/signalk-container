@@ -13,6 +13,7 @@ function fakeResult(
 ): SelfDeploymentResult {
   return {
     isContainerized: false,
+    platform: null,
     binary: { name: null, path: null, version: null },
     daemon: {
       reachable: false,

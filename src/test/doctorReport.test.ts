@@ -21,6 +21,7 @@ function baseResult(
 ): SelfDeploymentResult {
   return {
     isContainerized: false,
+    platform: null,
     binary: { name: "podman", path: null, version: "5.4.2" },
     daemon: {
       reachable: true,
@@ -63,6 +64,31 @@ describe("formatDoctorReport", () => {
     assert.match(out, /status: ok/);
     assert.match(out, /podman 5\.4\.2/);
     assert.match(out, /No action needed/);
+  });
+
+  // The report's `if (r.platform)` guard is the same visibility rule the
+  // Doctor modal applies with `{result.platform && <Row .../>}`, so these
+  // assertions cover the modal's platform-row behavior at a DOM-free
+  // boundary: present → labelled row, null/absent → no row.
+  it("names the platform when one was recognised, omits the line otherwise", () => {
+    assert.match(
+      formatDoctorReport(baseResult({ platform: "halos" })),
+      /^platform: HaLOS$/m,
+    );
+    // Explicit null → no row.
+    assert.doesNotMatch(
+      formatDoctorReport(baseResult({ platform: null })),
+      /^platform:/m,
+    );
+    // Older payload that omits the field entirely → no row, no crash.
+    const older: Record<string, unknown> = { ...baseResult() };
+    delete older.platform;
+    assert.doesNotMatch(
+      formatDoctorReport(
+        older as unknown as Parameters<typeof formatDoctorReport>[0],
+      ),
+      /^platform:/m,
+    );
   });
 
   it("surfaces missing cgroup controllers and the remediation block", () => {
@@ -245,6 +271,26 @@ describe("isSelfDeploymentResult", () => {
     );
     assert.equal(
       isSelfDeploymentResult({ ...baseResult(), isContainerized: "yes" }),
+      false,
+    );
+  });
+
+  it("tolerates a missing platform (older server) and rejects a non-string one", () => {
+    const withoutPlatform: Record<string, unknown> = { ...baseResult() };
+    delete withoutPlatform.platform;
+    assert.equal(isSelfDeploymentResult(withoutPlatform), true);
+    assert.equal(
+      isSelfDeploymentResult({ ...baseResult(), platform: "halos" }),
+      true,
+    );
+    assert.equal(
+      isSelfDeploymentResult({ ...baseResult(), platform: 42 }),
+      false,
+    );
+    // An unrecognised platform token would make platformLabel (exhaustive
+    // over HostPlatform) render `undefined`, so the boundary rejects it.
+    assert.equal(
+      isSelfDeploymentResult({ ...baseResult(), platform: "other" }),
       false,
     );
   });

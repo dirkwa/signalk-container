@@ -1,4 +1,8 @@
-import type { SelfDeploymentResult, SelfDeploymentStatus } from "./types.js";
+import type {
+  HostPlatform,
+  SelfDeploymentResult,
+  SelfDeploymentStatus,
+} from "./types.js";
 
 function isObj(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -19,6 +23,17 @@ export function isSelfDeploymentResult(
   if (typeof value.status !== "string") return false;
   if (typeof value.isContainerized !== "boolean") return false;
   if (!Array.isArray(value.remediation)) return false;
+  // `platform` is absent in payloads from older servers; a present value
+  // must be null or a recognised platform token. Accepting an arbitrary
+  // string would let `platformLabel` (exhaustive over HostPlatform) render
+  // `undefined` in the report and modal.
+  if (
+    "platform" in value &&
+    value.platform !== null &&
+    value.platform !== "halos"
+  ) {
+    return false;
+  }
   if (!isObj(value.binary)) return false;
   if (!isObj(value.daemon) || typeof value.daemon.reachable !== "boolean")
     return false;
@@ -108,6 +123,14 @@ export function headlineForStatus(status: SelfDeploymentStatus): string {
   }
 }
 
+/** Human label for a recognised host platform. */
+export function platformLabel(platform: HostPlatform): string {
+  switch (platform) {
+    case "halos":
+      return "HaLOS";
+  }
+}
+
 function or(value: string | null | undefined, dash = "—"): string {
   return value == null || value === "" ? dash : value;
 }
@@ -129,6 +152,7 @@ export function formatDoctorReport(r: SelfDeploymentResult): string {
   lines.push("");
 
   lines.push(`containerized: ${yesNo(r.isContainerized)}`);
+  if (r.platform) lines.push(`platform: ${platformLabel(r.platform)}`);
   lines.push(
     `runtime: ${or(r.binary.name)} ${or(r.binary.version, "")}`.trimEnd(),
   );

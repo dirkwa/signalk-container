@@ -709,7 +709,7 @@ services:
 
 You'll see "could not detect self container id" in the SignalK log when the cascade has failed; the override resolves it without code changes.
 
-For a full walkthrough of the in-container deployment (socket bind-mount, self-container-id override, reference quadlet, troubleshooting table) see **[doc/run-in-container.md](doc/run-in-container.md)**.
+For a full walkthrough of the in-container deployment (socket bind-mount, self-container-id override, reference quadlet, troubleshooting table) see **[doc/run-in-container.md](doc/run-in-container.md)**. On [HaLOS](https://github.com/halos-org/halos) the Doctor recognises the platform and renders a paste-once fix for the docker-socket permission it ships with — see [doc/run-in-container.md#halos](doc/run-in-container.md#halos).
 
 ## Connecting back to a container service (`signalkAccessiblePorts`)
 

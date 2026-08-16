@@ -1424,9 +1424,27 @@ export type SelfDeploymentStatus =
   | "self-id-unresolved"
   | "cgroup-controllers-incomplete";
 
+/**
+ * Host platforms the doctor recognises from markers visible inside the
+ * Signal K process. Recognition drives platform-specific remediation text
+ * (a step-by-step guide for that platform's packaging) and never affects
+ * `status`.
+ *
+ * - `halos` — HaLOS (Hat Labs OS). Its `signalk-server` container app
+ *   bind-mounts the host `/run` into the Signal K container, so the
+ *   `/run/halos/` directory published by halos-core-containers is visible.
+ */
+export type HostPlatform = "halos";
+
 export interface SelfDeploymentResult {
   /** True when /.dockerenv, /run/.containerenv, or `$container` is set. */
   isContainerized: boolean;
+  /**
+   * Recognised host platform, or `null` when no marker matched. Optional
+   * because payloads from older servers omit it entirely; renderers and the
+   * boundary validator treat absent as `null`.
+   */
+  platform?: HostPlatform | null;
   /** Which runtime binary was discovered, if any. */
   binary: {
     name: RuntimeName | null;
