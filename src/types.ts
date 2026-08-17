@@ -11,6 +11,13 @@ import type {
 } from "./updates/types.js";
 
 export type RuntimeName = "podman" | "docker";
+
+/**
+ * Named CPU priority tiers, highest first. Each maps to a `--cpu-shares`
+ * value in `CPU_PRIORITY_SHARES` (configNormalize.ts); `normal` is no
+ * request at all.
+ */
+export type CpuPriority = "high" | "normal" | "low" | "lowest";
 export type RuntimePreference = "auto" | RuntimeName;
 
 export interface ContainerRuntimeInfo {
@@ -533,7 +540,13 @@ export type HealthcheckOverride =
 export interface ContainerResourceLimits {
   /** Hard CPU cap (CFS quota). e.g. 1.5 = 1.5 cores. */
   cpus?: number | null;
-  /** Soft CPU weight under contention. Default 1024. */
+  /**
+   * Soft CPU weight under contention (`--cpu-shares`). Ranks the
+   * container against its cgroup siblings only; on cgroup v2 the kernel
+   * sees `cpu.weight = 1 + (shares - 2) * 9999 / 262142`, so unset means
+   * weight 100 while an explicit 1024 means 39. Prefer the named tiers
+   * in `CPU_PRIORITY_SHARES` (configNormalize.ts) over raw numbers.
+   */
   cpuShares?: number | null;
   /** Pin to specific cores. e.g. "0,1" or "1-3". */
   cpusetCpus?: string | null;
@@ -1679,6 +1692,21 @@ export interface PluginConfig {
    * set by the plugin.
    */
   containerOverrides?: Record<string, ContainerResourceLimits>;
+  /**
+   * CPU priority tier applied to every managed container underneath
+   * the consumer plugin's own `resources` and the user's
+   * `containerOverrides` (both win field-by-field). Expressed as
+   * `cpuShares` — see `CPU_PRIORITY_SHARES`. Default `normal` (no
+   * request, cpu.weight 100).
+   */
+  containerCpuPriority?: CpuPriority;
+  /**
+   * CPU priority tier applied to every `runJob` container underneath
+   * the caller's `resources`. Default `lowest`, so one-shot helpers
+   * (chart imports, GDAL) yield to the long-running services when
+   * they contend for CPU.
+   */
+  jobCpuPriority?: CpuPriority;
   /**
    * Suppress the rootless-Podman `--userns=keep-id` flag for every
    * managed container. Enable on hosts whose backing filesystem
