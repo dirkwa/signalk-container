@@ -3,13 +3,21 @@ import LogsModal from "./LogsModal";
 import DoctorModal from "./DoctorModal";
 import { headlineForStatus } from "../doctorReport";
 import {
+  CPU_PRIORITIES,
+  CPU_PRIORITY_SHARES,
+  DEFAULT_CONTAINER_CPU_PRIORITY,
+  DEFAULT_JOB_CPU_PRIORITY,
+  cpuPriorityForShares,
+  cpuSharesToWeight,
   keepImageVersionsSelectValue,
   keepImageVersionsFromSelectValue,
+  normalizeCpuPriority,
 } from "../configNormalize";
 import type {
   ContainerInfo,
   ContainerResourceLimits,
   ContainerRuntimeInfo,
+  CpuPriority,
   PluginConfig,
   SelfDeploymentResult,
 } from "../types";
@@ -92,6 +100,9 @@ interface ResourceLimitsEditorProps {
   onApply: (payload: ResourceLimitsPayload) => Promise<ApplyResult>;
   onResetToDefault: () => Promise<ApplyResult>;
   onClose: () => void;
+  /** False when the host has not delegated the `cpu` cgroup controller,
+   *  in which case a CPU priority is accepted but has no effect. */
+  cpuWeightAvailable: boolean;
 }
 
 const S: Record<string, CSSProperties> = {
@@ -473,9 +484,22 @@ function ToggleField({ label, value, onChange, hint }: ToggleFieldProps) {
 /**
  * Describes a single field in the resource-limits editor. The `primary`
  * flag controls whether the field is visible by default; the rest are
- * hidden behind an "Advanced" toggle.
+ * hidden behind an "Advanced" toggle. `widget` swaps the plain input for
+ * a purpose-built control; the payload shape is unchanged.
  */
-const RESOURCE_FIELDS = [
+interface ResourceFieldSpec {
+  key: string;
+  label: string;
+  type: "number" | "text";
+  step?: string;
+  min?: string;
+  max?: string;
+  placeholder: string;
+  primary: boolean;
+  widget?: "cpuPriority";
+}
+
+const RESOURCE_FIELDS: ResourceFieldSpec[] = [
   {
     key: "cpus",
     label: "CPU (cores)",
@@ -510,12 +534,14 @@ const RESOURCE_FIELDS = [
   },
   {
     key: "cpuShares",
-    label: "CPU shares (weight)",
+    label: "CPU priority",
     type: "number",
     step: "1",
     min: "2",
-    placeholder: "default 1024",
-    primary: false,
+    max: "262144",
+    placeholder: "shares",
+    primary: true,
+    widget: "cpuPriority",
   },
   {
     key: "cpusetCpus",
@@ -699,6 +725,14 @@ function buildLimitsPayload(
   return out;
 }
 
+function cpuPriorityOptionLabel(tier: CpuPriority): string {
+  const shares = CPU_PRIORITY_SHARES[tier];
+  const name = tier.charAt(0).toUpperCase() + tier.slice(1);
+  return shares === null
+    ? `${name} (weight 100)`
+    : `${name} (weight \u2248${cpuSharesToWeight(shares)})`;
+}
+
 /**
  * Render a current effective limit as a compact badge string.
  * Returns null if the value is missing/empty.
@@ -719,8 +753,12 @@ function formatLimitBadge(
       return `reserve: ${value}`;
     case "pidsLimit":
       return `${value} PIDs`;
-    case "cpuShares":
-      return `shares: ${value}`;
+    case "cpuShares": {
+      const tier = cpuPriorityForShares(Number(value));
+      return tier
+        ? `priority: ${tier}`
+        : `shares: ${value} (weight ${cpuSharesToWeight(Number(value))})`;
+    }
     case "cpusetCpus":
       return `cpus: ${value}`;
     case "oomScoreAdj":
@@ -741,6 +779,7 @@ function ResourceLimitsEditor({
   onApply,
   onResetToDefault,
   onClose,
+  cpuWeightAvailable,
 }: ResourceLimitsEditorProps) {
   // Seed form state from the given effective limits (what's actually
   // applied to the container). Defaults to the `effective` prop at
@@ -863,9 +902,84 @@ function ResourceLimitsEditor({
     setResetting(false);
   };
 
-  const renderField = (f: (typeof RESOURCE_FIELDS)[number]) => {
+  const renderField = (f: ResourceFieldSpec) => {
     const val = formState[f.key];
     const isUnset = val === null;
+    if (f.widget === "cpuPriority") {
+      // "normal" is the absence of a request, so choosing it submits an
+      // explicit unset (null) — that is what removes a tier or shares
+      // value the plugin default carries. Anything else is a shares
+      // number; the select mirrors it as a tier when it matches one.
+      const shares = val === null || val === "" ? null : Number(val);
+      const tier =
+        shares === null || !Number.isFinite(shares)
+          ? "normal"
+          : cpuPriorityForShares(shares);
+      return (
+        <React.Fragment key={f.key}>
+          <label
+            style={S.limitsEditorLabel}
+            htmlFor={`lim-${containerName}-${f.key}`}
+          >
+            {f.label}
+          </label>
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <select
+              id={`lim-${containerName}-${f.key}`}
+              value={tier ?? "custom"}
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v === "custom") return;
+                const t = v as CpuPriority;
+                const next = CPU_PRIORITY_SHARES[t];
+                updateField(f.key, next === null ? null : String(next));
+              }}
+              style={{ ...S.limitsEditorInput, width: "auto" }}
+            >
+              {CPU_PRIORITIES.map((t) => (
+                <option key={t} value={t}>
+                  {cpuPriorityOptionLabel(t)}
+                </option>
+              ))}
+              {tier === null && (
+                <option value="custom">
+                  Custom ({shares} shares, weight {cpuSharesToWeight(shares)})
+                </option>
+              )}
+            </select>
+            <span style={{ fontSize: 11, color: "#6b7280" }}>or shares</span>
+            <input
+              type="number"
+              aria-label="Custom CPU shares"
+              value={val ?? ""}
+              step={f.step}
+              min={f.min}
+              max={f.max}
+              placeholder={f.placeholder}
+              onChange={(e) =>
+                // An emptied field is "normal", i.e. an explicit unset —
+                // never "leave whatever the default carries".
+                updateField(
+                  f.key,
+                  e.target.value === "" ? null : e.target.value,
+                )
+              }
+              style={{ ...S.limitsEditorInput, width: 90 }}
+            />
+          </div>
+          <span
+            style={{ fontSize: 11, color: "#6b7280" }}
+            title={
+              cpuWeightAvailable
+                ? "Ranks this container against the other managed containers and jobs when they compete for CPU"
+                : "The cpu cgroup controller is not delegated on this host — see the doctor; the value is stored but has no effect"
+            }
+          >
+            {cpuWeightAvailable ? "" : "\u26A0 no effect on this host"}
+          </span>
+        </React.Fragment>
+      );
+    }
     return (
       <React.Fragment key={f.key}>
         <label
@@ -1072,6 +1186,15 @@ export default function PluginConfigurationPanel({
   const [backgroundUpdateChecks, setBackgroundUpdateChecks] = useState(
     cfg.backgroundUpdateChecks !== false,
   );
+  const [containerCpuPriority, setContainerCpuPriority] = useState<string>(
+    normalizeCpuPriority(
+      cfg.containerCpuPriority,
+      DEFAULT_CONTAINER_CPU_PRIORITY,
+    ),
+  );
+  const [jobCpuPriority, setJobCpuPriority] = useState<string>(
+    normalizeCpuPriority(cfg.jobCpuPriority, DEFAULT_JOB_CPU_PRIORITY),
+  );
   // containerOverrides is a Record<string, ContainerResourceLimits> keyed
   // by the UNPREFIXED container name. Spread into `doSave` so the global
   // Save Configuration button persists it alongside the other settings,
@@ -1085,6 +1208,11 @@ export default function PluginConfigurationPanel({
   const [runtimeInfo, setRuntimeInfo] = useState<ContainerRuntimeInfo | null>(
     null,
   );
+  // Mirrors `filterUnsupportedLimits`: an unprobed controller list (docker,
+  // or no runtime yet) is assumed complete.
+  const cpuWeightAvailable =
+    !runtimeInfo?.cgroupControllers ||
+    runtimeInfo.cgroupControllers.includes("cpu");
   // Deployment doctor snapshot — populated when runtimeInfo is null so the
   // "no runtime" error card can render the doctor's tailored remediation
   // (in-container vs bare-metal etc.) instead of a generic hardcoded line.
@@ -1470,6 +1598,14 @@ export default function PluginConfigurationPanel({
       maxConcurrentJobs: cfg.maxConcurrentJobs || 2,
       updateCheckInterval,
       backgroundUpdateChecks,
+      containerCpuPriority: normalizeCpuPriority(
+        containerCpuPriority,
+        DEFAULT_CONTAINER_CPU_PRIORITY,
+      ),
+      jobCpuPriority: normalizeCpuPriority(
+        jobCpuPriority,
+        DEFAULT_JOB_CPU_PRIORITY,
+      ),
       containerOverrides: overridesFromServer,
     });
     setActionStatus("Saved! Plugin will restart.");
@@ -1698,6 +1834,36 @@ export default function PluginConfigurationPanel({
         hint="Disable on metered connections; manual check still works"
       />
 
+      <SelectField
+        label="CPU priority: containers"
+        value={containerCpuPriority}
+        onChange={setContainerCpuPriority}
+        options={CPU_PRIORITIES.map((t) => ({
+          value: t,
+          label: cpuPriorityOptionLabel(t),
+        }))}
+        hint={
+          cpuWeightAvailable
+            ? "Default weight for managed containers when they compete for CPU; a plugin's own cpuShares or a per-container override wins"
+            : "No effect: the cpu cgroup controller is not delegated on this host (see doctor)"
+        }
+      />
+
+      <SelectField
+        label="CPU priority: jobs"
+        value={jobCpuPriority}
+        onChange={setJobCpuPriority}
+        options={CPU_PRIORITIES.map((t) => ({
+          value: t,
+          label: cpuPriorityOptionLabel(t),
+        }))}
+        hint={
+          cpuWeightAvailable
+            ? "One-shot helpers (chart imports, GDAL, cleanup) yield to the services under contention; no slowdown on an idle host"
+            : "No effect: the cpu cgroup controller is not delegated on this host (see doctor)"
+        }
+      />
+
       <div style={S.sectionTitle}>Managed Containers</div>
 
       {containers.length === 0 ? (
@@ -1887,6 +2053,7 @@ export default function PluginConfigurationPanel({
                   onApply={(payload) => applyLimits(un, payload)}
                   onResetToDefault={() => resetLimitsToDefault(un)}
                   onClose={() => toggleLimitsExpand(ct.unprefixedName)}
+                  cpuWeightAvailable={cpuWeightAvailable}
                 />
               )}
             </div>
