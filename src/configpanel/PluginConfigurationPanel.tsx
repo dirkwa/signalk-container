@@ -870,7 +870,7 @@ function ResourceLimitsEditor({
       !window.confirm(
         `Reset ${containerName} to the plugin's default resource limits? ` +
           `This will remove your override and may cause a brief container ` +
-          `recreate (~5s of downtime) if memory limits need to be unset.`,
+          `recreate (~5s of downtime) if memory limits or CPU shares need to be unset.`,
       )
     ) {
       return;

@@ -759,6 +759,20 @@ describe("fieldsRequiringRecreateForUnset (Bug E)", () => {
       assert.deepEqual(result, ["oomScoreAdj"]);
     });
 
+    it("flags a cpuShares/memory unset even when the create-time provenance lacks it", () => {
+      // A tier or cap applied later by a live update never reaches the
+      // create-time label; the runtime never injects these fields, so a
+      // live value nobody's current request carries is a real unset.
+      assert.deepEqual(
+        fieldsRequiringRecreateForUnset({ cpuShares: 5120 }, {}, {}),
+        ["cpuShares"],
+      );
+      assert.deepEqual(
+        fieldsRequiringRecreateForUnset({ memory: "1g" }, {}, {}),
+        ["memory"],
+      );
+    });
+
     it("still flags a genuinely-requested memory unset", () => {
       const result = fieldsRequiringRecreateForUnset(
         { memory: "512m" },

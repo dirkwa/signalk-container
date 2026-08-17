@@ -71,7 +71,10 @@ function assertWeightForShares(
   );
 }
 
-async function bootPlugin(config: Partial<PluginConfig>): Promise<{
+async function bootPlugin(
+  config: Partial<PluginConfig>,
+  errors: string[] = [],
+): Promise<{
   api: ContainerManagerApi;
   runtime: ContainerRuntimeInfo;
   stop: () => Promise<void>;
@@ -80,7 +83,9 @@ async function bootPlugin(config: Partial<PluginConfig>): Promise<{
   const noop = () => {};
   const app = {
     debug: noop,
-    error: noop,
+    error: (...args: unknown[]) => {
+      errors.push(args.map(String).join(" "));
+    },
     setPluginStatus: noop,
     setPluginError: noop,
     getDataDirPath: () => dataDir,
@@ -227,5 +232,99 @@ describe("CPU priority tiers — real runtime", () => {
     const updated = await getLiveResources(runtime, CONTAINER_NAME);
     assert.equal(updated.cpuShares, 5120);
     assert.equal(api.getResources(CONTAINER_NAME).cpuShares, 5120);
+
+    // Back to normal (no request) cannot be done in place — the runtime
+    // ignores `--cpu-shares 0` — so it must recreate, and the fresh
+    // container must come up at the unset weight even though the
+    // create-time provenance label never carried cpuShares.
+    const revert = await api.updateResources(CONTAINER_NAME, {
+      cpuShares: null,
+    });
+    assert.equal(revert.method, "recreated");
+    const reverted = await getLiveResources(runtime, CONTAINER_NAME);
+    assert.equal(reverted.cpuShares, undefined);
+    let revertedWeight: number | null = null;
+    let revertedLogs: string[] = [];
+    for (let i = 0; i < 20 && revertedWeight === null; i++) {
+      revertedLogs = await api.getLogs(CONTAINER_NAME, { tail: 5 });
+      revertedWeight = weightFromLines(revertedLogs);
+      if (revertedWeight === null) await new Promise((r) => setTimeout(r, 250));
+    }
+    assert.equal(
+      revertedWeight,
+      100,
+      `logs after revert: ${JSON.stringify(revertedLogs)}`,
+    );
+  });
+
+  it("tier lowered via config then raised back: warns, and the panel path recreates", async (t) => {
+    if (!api) {
+      t.skip("no container runtime available");
+      return;
+    }
+    if (!cpuDelegated) {
+      t.skip("cpu cgroup controller not delegated");
+      return;
+    }
+    // Container created at normal (label carries no cpuShares), then the
+    // plugin is restarted with the tier at low: the next ensureRunning
+    // live-applies 512.
+    await stopPlugin();
+    const first = await bootPlugin({ containerCpuPriority: "normal" });
+    api = first.api;
+    stopPlugin = first.stop;
+    try {
+      await api.remove(CONTAINER_NAME);
+    } catch {
+      // OK if it didn't exist.
+    }
+    const cfg = {
+      image: IMAGE,
+      tag: TAG,
+      command: REPORT_WEIGHT_AND_WAIT,
+      restart: "no" as const,
+    };
+    await api.ensureRunning(CONTAINER_NAME, cfg);
+    assert.equal(
+      (await getLiveResources(runtime, CONTAINER_NAME)).cpuShares,
+      undefined,
+    );
+    await stopPlugin();
+    const second = await bootPlugin({ containerCpuPriority: "low" });
+    api = second.api;
+    stopPlugin = second.stop;
+    await api.ensureRunning(CONTAINER_NAME, cfg);
+    assert.equal(
+      (await getLiveResources(runtime, CONTAINER_NAME)).cpuShares,
+      512,
+    );
+
+    // Back to normal via config: the restart cannot un-set shares in
+    // place and must say so instead of reporting a live update that
+    // changed nothing.
+    await stopPlugin();
+    const errors: string[] = [];
+    const third = await bootPlugin({ containerCpuPriority: "normal" }, errors);
+    api = third.api;
+    stopPlugin = third.stop;
+    await api.ensureRunning(CONTAINER_NAME, cfg);
+    assert.equal(
+      (await getLiveResources(runtime, CONTAINER_NAME)).cpuShares,
+      512,
+      "shares cannot be live-unset; the container keeps them",
+    );
+    assert.ok(
+      errors.some((e) => /cannot live-unset fields cpuShares/.test(e)),
+      `expected a cannot-live-unset warning, got: ${JSON.stringify(errors)}`,
+    );
+    // ...and the documented remedy — Normal in the panel — recreates.
+    const revert = await api.updateResources(CONTAINER_NAME, {
+      cpuShares: null,
+    });
+    assert.equal(revert.method, "recreated");
+    assert.equal(
+      (await getLiveResources(runtime, CONTAINER_NAME)).cpuShares,
+      undefined,
+    );
   });
 });

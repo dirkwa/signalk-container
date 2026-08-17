@@ -483,7 +483,7 @@ The plugin embeds a React config panel in the Signal K Admin UI (via Module Fede
 
 - Five primary fields visible by default: CPU cores, CPU priority (a tier, or a raw shares value), Memory, Memory+swap, Max processes
 - **Advanced** section (collapsed) for CPU pinning, memory reservation, OOM score adjust
-- **× button** next to each field to explicitly unset (send `null`, removing a plugin-default limit)
+- **× button** next to each field to explicitly unset (send `null`, removing a plugin-default limit); the CPU priority select has none — Normal is the unset
 - **Apply** -- live update where possible, recreate where needed, with a clear result box showing which method was used and any warnings (e.g. "dropped cpusetCpus — not delegated by cgroups")
 - **Revert** -- discard unsaved form edits, re-seed from current effective state
 - **Reset to default** -- clear the user override entirely and restore the consumer plugin's pristine default limits (confirmation dialog warns about possible recreate)
@@ -612,19 +612,19 @@ Note that `override` contains only the fields that differ from the consumer plug
 | `low`    | `512`       | 20                                 | 59                           |                    |
 | `lowest` | `128`       | 5                                  | 21                           | jobs (`runJob`)    |
 
-Two plugin-wide settings pick the default tier for managed containers and for jobs. A consumer plugin's own `resources.cpuShares` beats the tier, and a per-container override (panel or `containerOverrides`) beats both — the tier is simply the bottom layer of the same merge. Set `cpuShares: null` in an override to return a container to `normal`.
+Two plugin-wide settings pick the default tier for managed containers and for jobs. A consumer plugin's own `resources.cpuShares` beats the tier, and a per-container override (panel or `containerOverrides`) beats both — the tier is simply the bottom layer of the same merge. To return one container to `normal`, pick Normal in the panel's limits editor (or `POST …/resources` with `{"cpuShares": null}`): that recreates the container, because neither runtime can un-set shares in place. A `cpuShares: null` written straight into `containerOverrides` is only picked up as far as a live update can go — the next consumer restart logs "cannot live-unset" and the container keeps its old weight until it is recreated.
 
 Two things worth knowing:
 
 - **`normal` means no request, not 1024.** The kernel schedules by cgroup v2 `cpu.weight`; the OCI runtime translates `--cpu-shares` into it, and the translation is the runtime's, not the kernel's: crun (Podman's default) and runc before 1.3.2 use a linear formula under which an explicit `1024` lands at weight 39 — _below_ an untouched container at 100 — while runc 1.3.2 and later use a quadratic one that maps 1024 to 100 (measured above on crun 1.21 and runc 1.4.3). Unset is 100 on every runtime and the tier order holds on every runtime; only the absolute numbers differ. Don't "reset" a container by typing 1024; use `normal` (the panel) or `null` (JSON).
 - **Weights rank cgroup siblings only.** Managed containers and jobs are siblings of each other, so the tiers rank them against one another. Signal K itself usually lives in a different cgroup branch, so ranking it _above_ the plugin containers is a systemd `CPUWeight=` at the right level, not a tier here:
-  - Universal installer (rootless Podman, Signal K as a Quadlet unit in `app.slice`, managed containers in `user.slice`): the installer writes `~/.config/systemd/user/app.slice.d/50-signalk-cpu-priority.conf` with `[Slice] CPUWeight=300`. A hand-rolled rootless setup with Signal K as a user service takes the same drop-in.
+  - Universal installer (rootless Podman, Signal K as a Quadlet unit in `app.slice`, managed containers in `user.slice`): a `~/.config/systemd/user/app.slice.d/50-signalk-cpu-priority.conf` with `[Slice] CPUWeight=300` (the installer writes it from [dirkwa/signalk-universal-installer#264](https://github.com/dirkwa/signalk-universal-installer/pull/264) on). A hand-rolled rootless setup with Signal K as a user service takes the same drop-in.
   - Bare-metal Signal K as a system service with rootful Podman/Docker: `signalk.service` and the `docker-*.scope` / `libpod-*.scope` containers are siblings under `system.slice`, so `systemctl edit signalk.service` → `[Service] CPUWeight=300` does it.
   - Signal K itself in Docker (compose): its container is a sibling of the managed ones under `system.slice`, so the tiers already rank against it; give the Signal K service `cpu_shares: 5120` to put it on top.
 
   The host's own services in `system.slice` are untouched by any of this.
 
-Changing a tier is applied live (`podman update` / `docker update`) to running containers on the next consumer-plugin restart. Moving a container _up_ to `normal` needs a recreate: neither runtime can un-set shares in place.
+Changing a tier _down_ (or between `high`/`low`/`lowest`) is applied live (`podman update` / `docker update`) to running containers on the next consumer-plugin restart. Moving a container _up_ to `normal` needs a recreate: neither runtime can un-set shares in place, so the restart only logs the mismatch — use the panel (Normal → Apply, or Reset to default) to recreate.
 
 If the host has not delegated the `cpu` cgroup controller, the tiers are stored but silently have no effect — the panel says so next to the selects, and the [doctor](#quick-check-apidoctordeployment) reports `cgroup-controllers-incomplete`.
 
