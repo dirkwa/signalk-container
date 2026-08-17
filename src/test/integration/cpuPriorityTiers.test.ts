@@ -19,6 +19,11 @@ import type {
  * just accepted. Skipped when the runtime is missing, and the weight
  * assertions are skipped when the host is not on cgroup v2 with the `cpu`
  * controller delegated (the file is then absent or unreadable).
+ *
+ * The shares → weight translation belongs to the OCI runtime and differs:
+ * crun and runc < 1.3.2 use a linear formula, runc >= 1.3.2 a quadratic
+ * one (measured: 128 shares → 5 on crun 1.21, 21 on runc 1.4.3). A weight
+ * is accepted when it matches either; both preserve the tier order.
  */
 
 async function hasContainerRuntime(): Promise<ContainerRuntimeInfo | null> {
@@ -41,6 +46,29 @@ const REPORT_WEIGHT_AND_WAIT = [
 function weightFromLines(lines: string[]): number | null {
   const n = Number(lines.find((l) => l.trim() !== "")?.trim());
   return Number.isFinite(n) ? n : null;
+}
+
+/** crun / runc < 1.3.2 */
+function linearWeight(shares: number): number {
+  return 1 + Math.floor(((shares - 2) * 9999) / 262142);
+}
+
+/** runc >= 1.3.2 (CHANGELOG 1.3.2, "improved to better fit default v1 and v2 values") */
+function quadraticWeight(shares: number): number {
+  const l = Math.log2(shares);
+  return Math.ceil(10 ** ((l * l + 125 * l) / 612 - 7 / 34));
+}
+
+function assertWeightForShares(
+  actual: number | null,
+  shares: number,
+  what: string,
+) {
+  const expected = [linearWeight(shares), quadraticWeight(shares)];
+  assert.ok(
+    actual !== null && expected.includes(actual),
+    `${what}: cpu.weight ${actual} is neither ${expected[0]} (linear) nor ${expected[1]} (quadratic) for ${shares} shares`,
+  );
 }
 
 async function bootPlugin(config: Partial<PluginConfig>): Promise<{
@@ -131,8 +159,8 @@ describe("CPU priority tiers — real runtime", () => {
       t.skip("container cannot read its cgroup v2 cpu.weight");
       return;
     }
-    // lowest = 128 shares → weight 5
-    assert.equal(tierWeight, 5);
+    // lowest = 128 shares (weight 5 on crun, 21 on runc >= 1.3.2)
+    assertWeightForShares(tierWeight, 128, "job at tier lowest");
 
     const ownLines: string[] = [];
     const ownJob = await api.runJob({
@@ -142,8 +170,10 @@ describe("CPU priority tiers — real runtime", () => {
       onStdoutLine: (line) => ownLines.push(line),
     });
     assert.equal(ownJob.status, "completed", ownJob.error);
-    // high = 5120 shares → weight 196; the caller's own value wins.
-    assert.equal(weightFromLines(ownLines), 196);
+    // The caller's own 5120 shares win over the tier and outrank unset (100).
+    const ownWeight = weightFromLines(ownLines);
+    assertWeightForShares(ownWeight, 5120, "job with own cpuShares");
+    assert.ok(ownWeight! > 100 && tierWeight < 100);
   });
 
   it("applies the container tier and live-updates when overridden", async (t) => {
@@ -172,8 +202,9 @@ describe("CPU priority tiers — real runtime", () => {
     // ...and of what the runtime reports back.
     const live = await getLiveResources(runtime, CONTAINER_NAME);
     assert.equal(live.cpuShares, 512);
-    // ...and the kernel scheduled it: low = 512 shares → weight 20. The
-    // container prints the weight on start; give the log a moment to land.
+    // ...and the kernel scheduled it: low = 512 shares (20 on crun, 59 on
+    // runc >= 1.3.2). The container prints the weight on start; give the
+    // log a moment to land.
     let logs: string[] = [];
     let weight: number | null = null;
     for (let i = 0; i < 20 && weight === null; i++) {
@@ -181,7 +212,12 @@ describe("CPU priority tiers — real runtime", () => {
       weight = weightFromLines(logs);
       if (weight === null) await new Promise((r) => setTimeout(r, 250));
     }
-    assert.equal(weight, 20, `logs: ${JSON.stringify(logs)}`);
+    assertWeightForShares(
+      weight,
+      512,
+      `container at tier low (logs: ${JSON.stringify(logs)})`,
+    );
+    assert.ok(weight! < 100);
 
     // A per-container override to another tier applies live.
     const result = await api.updateResources(CONTAINER_NAME, {

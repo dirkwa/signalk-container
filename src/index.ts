@@ -2188,7 +2188,7 @@ export default (app: App) => {
           default: DEFAULT_CONTAINER_CPU_PRIORITY,
           title: "CPU priority of managed containers",
           description:
-            "Soft CPU weight (cpu.weight) every managed container gets unless the owning plugin or a per-container override sets its own cpuShares. Only matters when containers compete for CPU with each other or with jobs on this host; Normal is no request (weight 100), High ≈196, Low ≈20, Lowest ≈5. Applied live to running containers on the next consumer-plugin restart.",
+            "Soft CPU weight every managed container gets unless the owning plugin or a per-container override sets its own cpuShares. Only matters when containers compete for CPU with each other or with jobs on this host. Normal is no request; High / Low / Lowest are --cpu-shares 5120 / 512 / 128 (the runtime maps shares to cgroup cpu.weight; crun and runc differ in the numbers, not the order). Applied live to running containers on the next consumer-plugin restart.",
         },
         jobCpuPriority: {
           type: "string",
@@ -2210,7 +2210,7 @@ export default (app: App) => {
               cpuShares: {
                 type: ["number", "null"],
                 title:
-                  "Soft CPU weight (--cpu-shares; unset = cpu.weight 100, tiers: 5120 high / 512 low / 128 lowest)",
+                  "Soft CPU weight (--cpu-shares; unset = the runtime default, tiers: 5120 high / 512 low / 128 lowest)",
               },
               cpusetCpus: {
                 type: ["string", "null"],

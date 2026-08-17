@@ -8,7 +8,6 @@ import {
   DEFAULT_CONTAINER_CPU_PRIORITY,
   DEFAULT_JOB_CPU_PRIORITY,
   cpuPriorityForShares,
-  cpuSharesToWeight,
   keepImageVersionsSelectValue,
   keepImageVersionsFromSelectValue,
   normalizeCpuPriority,
@@ -729,8 +728,8 @@ function cpuPriorityOptionLabel(tier: CpuPriority): string {
   const shares = CPU_PRIORITY_SHARES[tier];
   const name = tier.charAt(0).toUpperCase() + tier.slice(1);
   return shares === null
-    ? `${name} (weight 100)`
-    : `${name} (weight \u2248${cpuSharesToWeight(shares)})`;
+    ? `${name} (no request)`
+    : `${name} (${shares} shares)`;
 }
 
 /**
@@ -755,9 +754,7 @@ function formatLimitBadge(
       return `${value} PIDs`;
     case "cpuShares": {
       const tier = cpuPriorityForShares(Number(value));
-      return tier
-        ? `priority: ${tier}`
-        : `shares: ${value} (weight ${cpuSharesToWeight(Number(value))})`;
+      return tier ? `priority: ${tier}` : `shares: ${value}`;
     }
     case "cpusetCpus":
       return `cpus: ${value}`;
@@ -942,9 +939,7 @@ function ResourceLimitsEditor({
                 </option>
               ))}
               {tier === null && (
-                <option value="custom">
-                  Custom ({shares} shares, weight {cpuSharesToWeight(shares)})
-                </option>
+                <option value="custom">Custom ({shares} shares)</option>
               )}
             </select>
             <span style={{ fontSize: 11, color: "#6b7280" }}>or shares</span>

@@ -542,10 +542,11 @@ export interface ContainerResourceLimits {
   cpus?: number | null;
   /**
    * Soft CPU weight under contention (`--cpu-shares`). Ranks the
-   * container against its cgroup siblings only; on cgroup v2 the kernel
-   * sees `cpu.weight = 1 + (shares - 2) * 9999 / 262142`, so unset means
-   * weight 100 while an explicit 1024 means 39. Prefer the named tiers
-   * in `CPU_PRIORITY_SHARES` (configNormalize.ts) over raw numbers.
+   * container against its cgroup siblings only. The OCI runtime maps
+   * shares to cgroup v2 `cpu.weight` and the mapping differs (crun and
+   * runc < 1.3.2: 1024 → 39; runc ≥ 1.3.2: 1024 → 100); unset is 100
+   * everywhere. Prefer the named tiers in `CPU_PRIORITY_SHARES`
+   * (configNormalize.ts) over raw numbers.
    */
   cpuShares?: number | null;
   /** Pin to specific cores. e.g. "0,1" or "1-3". */
@@ -1697,7 +1698,7 @@ export interface PluginConfig {
    * the consumer plugin's own `resources` and the user's
    * `containerOverrides` (both win field-by-field). Expressed as
    * `cpuShares` — see `CPU_PRIORITY_SHARES`. Default `normal` (no
-   * request, cpu.weight 100).
+   * request).
    */
   containerCpuPriority?: CpuPriority;
   /**

@@ -7,43 +7,19 @@ import {
   DEFAULT_JOB_CPU_PRIORITY,
   cpuPriorityForShares,
   cpuPriorityLimits,
-  cpuSharesToWeight,
   normalizeCpuPriority,
 } from "../configNormalize.js";
 import { mergeResourceLimits } from "../resources.js";
 
-describe("cpuSharesToWeight", () => {
-  // Values measured live on podman 5.4.2 / cgroup v2: 256 → 10,
-  // 1024 → 39, 2048 → 79; unset → 100.
-  it("maps unset to the kernel default weight 100", () => {
-    assert.equal(cpuSharesToWeight(undefined), 100);
-    assert.equal(cpuSharesToWeight(null), 100);
-  });
-
-  it("follows runc's shares→weight translation", () => {
-    assert.equal(cpuSharesToWeight(256), 10);
-    assert.equal(cpuSharesToWeight(1024), 39);
-    assert.equal(cpuSharesToWeight(2048), 79);
-  });
-
-  it("clamps to the runtime's accepted shares range", () => {
-    assert.equal(cpuSharesToWeight(1), 1);
-    assert.equal(cpuSharesToWeight(2), 1);
-    assert.equal(cpuSharesToWeight(10_000_000), 10000);
-  });
-});
-
 describe("CPU_PRIORITY_SHARES", () => {
-  it("orders the tiers strictly by resulting weight", () => {
-    const weights = CPU_PRIORITIES.map((t) =>
-      cpuSharesToWeight(CPU_PRIORITY_SHARES[t]),
+  it("orders the tiers strictly by shares, normal being unset", () => {
+    // Both runtime formulas (crun/runc<1.3.2 linear, runc>=1.3.2
+    // quadratic) are monotonic in shares, so shares order = weight order.
+    const shares = CPU_PRIORITIES.map((t) => CPU_PRIORITY_SHARES[t]);
+    assert.deepEqual(shares, [5120, null, 512, 128]);
+    assert.ok(
+      shares[0]! > 1024 && shares[2]! < 1024 && shares[3]! < shares[2]!,
     );
-    for (let i = 1; i < weights.length; i++) {
-      assert.ok(
-        weights[i - 1] > weights[i],
-        `${CPU_PRIORITIES[i - 1]} (${weights[i - 1]}) must outrank ${CPU_PRIORITIES[i]} (${weights[i]})`,
-      );
-    }
   });
 
   it("makes normal the absence of a request", () => {

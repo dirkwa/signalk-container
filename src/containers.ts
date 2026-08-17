@@ -1017,8 +1017,8 @@ export async function getLiveResources(
   }
   const shares = Number(cpuShares);
   // Both runtimes report 0 when no shares were requested. 1024 is a real
-  // request, not a default: on cgroup v2 it maps to cpu.weight 39 where
-  // unset means 100 (see `cpuSharesToWeight`).
+  // request, not a default: on crun it maps to cpu.weight 39 where unset
+  // means 100 (see CPU_PRIORITY_SHARES in configNormalize.ts).
   if (Number.isFinite(shares) && shares > 0) {
     out.cpuShares = shares;
   }

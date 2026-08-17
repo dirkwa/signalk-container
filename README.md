@@ -517,7 +517,7 @@ The form re-seeds from the server's fresh state after every Apply or Reset, so t
 | Field               | Example          | What it does                                                                                                                                                             |
 | ------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `cpus`              | `1.5`            | Hard CPU cap. `1.5` = max 1.5 cores. The most important field for stability.                                                                                             |
-| `cpuShares`         | `512`            | Soft CPU weight under contention (`--cpu-shares`). Unset = cgroup `cpu.weight` 100; the panel offers named tiers. See [CPU priority](#cpu-priority).                     |
+| `cpuShares`         | `512`            | Soft CPU weight under contention (`--cpu-shares`). Unset = the runtime default (`cpu.weight` 100); the panel offers named tiers. See [CPU priority](#cpu-priority).      |
 | `cpusetCpus`        | `"1,2"`          | Pin to specific cores. Useful to keep heavy containers off core 0 where Signal K runs. May force a recreate on hosts where the cpuset cgroup controller isn't delegated. |
 | `memory`            | `"512m"`, `"2g"` | Hard memory cap. Container is OOM-killed if exceeded.                                                                                                                    |
 | `memorySwap`        | `"512m"`         | Memory + swap total. **Set equal to `memory` to disable swap entirely** — recommended on Pi/eMMC where swap is slow.                                                     |
@@ -605,18 +605,18 @@ Note that `override` contains only the fields that differ from the consumer plug
 
 `cpus` is a hard cap; `cpuShares` is a _soft_ weight that only matters when containers actually compete for CPU. On an idle host it changes nothing; when a chart import saturates every core, it decides who gets the CPU. The plugin exposes it as named tiers:
 
-| Tier     | `cpuShares` | cgroup `cpu.weight` | Default for        |
-| -------- | ----------- | ------------------- | ------------------ |
-| `high`   | `5120`      | ≈196                |                    |
-| `normal` | _unset_     | 100                 | managed containers |
-| `low`    | `512`       | ≈20                 |                    |
-| `lowest` | `128`       | ≈5                  | jobs (`runJob`)    |
+| Tier     | `cpuShares` | `cpu.weight` on crun, runc < 1.3.2 | `cpu.weight` on runc ≥ 1.3.2 | Default for        |
+| -------- | ----------- | ---------------------------------- | ---------------------------- | ------------------ |
+| `high`   | `5120`      | 196                                | 363                          |                    |
+| `normal` | _unset_     | 100                                | 100                          | managed containers |
+| `low`    | `512`       | 20                                 | 59                           |                    |
+| `lowest` | `128`       | 5                                  | 21                           | jobs (`runJob`)    |
 
 Two plugin-wide settings pick the default tier for managed containers and for jobs. A consumer plugin's own `resources.cpuShares` beats the tier, and a per-container override (panel or `containerOverrides`) beats both — the tier is simply the bottom layer of the same merge. Set `cpuShares: null` in an override to return a container to `normal`.
 
 Two things worth knowing:
 
-- **`normal` means no request, not 1024.** On cgroup v2 the runtime translates shares as `weight = 1 + (shares − 2) × 9999 / 262142`, so an explicit `1024` lands at weight 39 — _below_ an untouched container at 100. Don't "reset" a container by typing 1024; use `normal` (the panel) or `null` (JSON).
+- **`normal` means no request, not 1024.** The kernel schedules by cgroup v2 `cpu.weight`; the OCI runtime translates `--cpu-shares` into it, and the translation is the runtime's, not the kernel's: crun (Podman's default) and runc before 1.3.2 use a linear formula under which an explicit `1024` lands at weight 39 — _below_ an untouched container at 100 — while runc 1.3.2 and later use a quadratic one that maps 1024 to 100 (measured above on crun 1.21 and runc 1.4.3). Unset is 100 on every runtime and the tier order holds on every runtime; only the absolute numbers differ. Don't "reset" a container by typing 1024; use `normal` (the panel) or `null` (JSON).
 - **Weights rank cgroup siblings only.** Managed containers and jobs are siblings of each other, so the tiers rank them against one another. Signal K itself usually lives in a different cgroup branch, so ranking it _above_ the plugin containers is a systemd `CPUWeight=` at the right level, not a tier here:
   - Universal installer (rootless Podman, Signal K as a Quadlet unit in `app.slice`, managed containers in `user.slice`): the installer writes `~/.config/systemd/user/app.slice.d/50-signalk-cpu-priority.conf` with `[Slice] CPUWeight=300`. A hand-rolled rootless setup with Signal K as a user service takes the same drop-in.
   - Bare-metal Signal K as a system service with rootful Podman/Docker: `signalk.service` and the `docker-*.scope` / `libpod-*.scope` containers are siblings under `system.slice`, so `systemctl edit signalk.service` → `[Service] CPUWeight=300` does it.

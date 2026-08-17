@@ -53,24 +53,22 @@ export function keepImageVersionsFromSelectValue(selectValue: string): number {
 /**
  * CPU priority tiers, expressed as the `--cpu-shares` value each one
  * maps to. Shares are the wire format the runtime takes; the kernel
- * ranks siblings by cgroup v2 `cpu.weight`, and runc translates
- * `weight = 1 + (shares - 2) * 9999 / 262142`. `normal` is deliberately
- * *no request*: an unset container sits at weight 100, whereas an
- * explicit 1024 lands at 39 — "1024 is the default" is a cgroup v1
- * notion that no longer holds.
+ * ranks cgroup siblings by cgroup v2 `cpu.weight`, and the OCI runtime
+ * translates shares into a weight. That translation is the runtime's:
+ * crun and runc before 1.3.2 use a linear formula (1024 → 39), runc
+ * 1.3.2+ a quadratic one (1024 → 100). Unset is weight 100 everywhere,
+ * so `normal` is deliberately *no request* — the only value that means
+ * the same on every runtime — and the tiers are ordered by shares,
+ * which both formulas preserve.
  *
  * Weights only arbitrate among cgroup siblings under contention; hard
  * caps are `cpus`.
  */
 export const CPU_PRIORITY_SHARES: Readonly<Record<CpuPriority, number | null>> =
   {
-    /** ≈ weight 196 */
     high: 5120,
-    /** unset → weight 100 */
     normal: null,
-    /** ≈ weight 20 */
     low: 512,
-    /** ≈ weight 5 */
     lowest: 128,
   };
 
@@ -126,18 +124,4 @@ export function cpuPriorityForShares(
     if (CPU_PRIORITY_SHARES[tier] === shares) return tier;
   }
   return null;
-}
-
-/** Bounds the runtime accepts for `--cpu-shares`. */
-const CPU_SHARES_MIN = 2;
-const CPU_SHARES_MAX = 262144;
-
-/**
- * runc's cgroup v2 translation of `--cpu-shares` into `cpu.weight`
- * (integer division). Unset shares are weight 100.
- */
-export function cpuSharesToWeight(shares: number | null | undefined): number {
-  if (shares === undefined || shares === null) return 100;
-  const s = Math.min(CPU_SHARES_MAX, Math.max(CPU_SHARES_MIN, shares));
-  return 1 + Math.floor(((s - 2) * 9999) / 262142);
 }
