@@ -691,6 +691,17 @@ describe("fieldsRequiringRecreateForUnset (Bug E)", () => {
     assert.ok(result.includes("oomScoreAdj"));
   });
 
+  it("returns ['cpuShares'] when current has shares and target drops them", () => {
+    // `podman update --cpu-shares 0` is a no-op, so dropping the field
+    // must take the recreate path (see FIELDS_THAT_CANNOT_LIVE_UNSET).
+    const result = fieldsRequiringRecreateForUnset(
+      { cpuShares: 512 },
+      {},
+      { cpuShares: 512 },
+    );
+    assert.deepEqual(result, ["cpuShares"]);
+  });
+
   it("does NOT include cpus or pidsLimit (they CAN be live-unset)", () => {
     const result = fieldsRequiringRecreateForUnset(
       { cpus: 1.5, pidsLimit: 200, memory: "512m" },

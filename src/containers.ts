@@ -1016,10 +1016,10 @@ export async function getLiveResources(
     out.cpus = Math.round((nano / 1_000_000_000) * 1000) / 1000;
   }
   const shares = Number(cpuShares);
-  // 0 and 1024 are both "default" — only emit if explicitly set to
-  // something else, since 1024 is the kernel default and we'd add
-  // noise to comparisons.
-  if (Number.isFinite(shares) && shares > 0 && shares !== 1024) {
+  // Both runtimes report 0 when no shares were requested. 1024 is a real
+  // request, not a default: on cgroup v2 it maps to cpu.weight 39 where
+  // unset means 100 (see `cpuSharesToWeight`).
+  if (Number.isFinite(shares) && shares > 0) {
     out.cpuShares = shares;
   }
   if (cpusetCpus && cpusetCpus.trim() !== "") {

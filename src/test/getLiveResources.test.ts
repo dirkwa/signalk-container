@@ -73,12 +73,10 @@ describe("getLiveResources (Bug A/D support)", () => {
     assert.ok(!("cpusetCpus" in result));
   });
 
-  it("treats cpuShares=1024 as default (not emitted)", async () => {
-    // 1024 is the kernel default; emitting it would create false
-    // diffs in ensureRunning's change detection.
+  it("emits cpuShares=1024 (a real request, cpu.weight 39 on cgroup v2)", async () => {
     const client = clientWith({ CpuShares: 1024 });
     const result = await getLiveResources(dummyRuntime, "x", client);
-    assert.ok(!("cpuShares" in result));
+    assert.equal(result.cpuShares, 1024);
   });
 
   it("emits cpuShares when explicitly set to non-default", async () => {
@@ -88,7 +86,7 @@ describe("getLiveResources (Bug A/D support)", () => {
   });
 
   it("treats pidsLimit=2048 as default (not emitted)", async () => {
-    // 2048 is podman's default; same logic as cpuShares=1024.
+    // 2048 is podman's default.
     const client = clientWith({ PidsLimit: 2048 });
     const result = await getLiveResources(dummyRuntime, "x", client);
     assert.ok(!("pidsLimit" in result));

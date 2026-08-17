@@ -93,6 +93,9 @@ const LIVE_UPDATABLE_FIELDS: ReadonlyArray<keyof ContainerResourceLimits> = [
  *   - memory / memorySwap / memoryReservation: cgroup memory.max can
  *     be lowered or raised, but resetting to "max" (unlimited) is
  *     not exposed via `podman update`.
+ *   - cpuShares: `podman update --cpu-shares 0` is a no-op (0 means
+ *     "not specified" on the wire), so cpu.weight cannot be returned
+ *     to the unset default (100) without a recreate.
  *   - oomScoreAdj: set at create time only, never via update.
  *
  * Used by the orchestration layer (index.ts) to detect "user is
@@ -103,7 +106,13 @@ const LIVE_UPDATABLE_FIELDS: ReadonlyArray<keyof ContainerResourceLimits> = [
  */
 const FIELDS_THAT_CANNOT_LIVE_UNSET: ReadonlySet<
   keyof ContainerResourceLimits
-> = new Set(["memory", "memorySwap", "memoryReservation", "oomScoreAdj"]);
+> = new Set([
+  "memory",
+  "memorySwap",
+  "memoryReservation",
+  "cpuShares",
+  "oomScoreAdj",
+]);
 
 /**
  * Fields the container runtime can inject without any user request.
