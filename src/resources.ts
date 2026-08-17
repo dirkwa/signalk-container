@@ -93,6 +93,9 @@ const LIVE_UPDATABLE_FIELDS: ReadonlyArray<keyof ContainerResourceLimits> = [
  *   - memory / memorySwap / memoryReservation: cgroup memory.max can
  *     be lowered or raised, but resetting to "max" (unlimited) is
  *     not exposed via `podman update`.
+ *   - cpuShares: `podman update --cpu-shares 0` is a no-op (0 means
+ *     "not specified" on the wire), so cpu.weight cannot be returned
+ *     to the unset default (100) without a recreate.
  *   - oomScoreAdj: set at create time only, never via update.
  *
  * Used by the orchestration layer (index.ts) to detect "user is
@@ -103,7 +106,13 @@ const LIVE_UPDATABLE_FIELDS: ReadonlyArray<keyof ContainerResourceLimits> = [
  */
 const FIELDS_THAT_CANNOT_LIVE_UNSET: ReadonlySet<
   keyof ContainerResourceLimits
-> = new Set(["memory", "memorySwap", "memoryReservation", "oomScoreAdj"]);
+> = new Set([
+  "memory",
+  "memorySwap",
+  "memoryReservation",
+  "cpuShares",
+  "oomScoreAdj",
+]);
 
 /**
  * Fields the container runtime can inject without any user request.
@@ -132,7 +141,8 @@ const RUNTIME_INJECTED_FIELDS: ReadonlySet<keyof ContainerResourceLimits> =
  *
  * `priorRequested` (optional) is what the consumer plugin / user
  * actually *requested* before this reconcile — the pre-merge intent,
- * not the live cgroup state. When supplied, a field only counts as a
+ * not the live cgroup state. When supplied, a field the runtime is
+ * known to inject (`RUNTIME_INJECTED_FIELDS`) only counts as a
  * recreate-needing-unset if it was present in `priorRequested`. This
  * rules out values the runtime *injected* that the consumer never
  * asked for: rootless Podman clamps a child container's
@@ -143,6 +153,12 @@ const RUNTIME_INJECTED_FIELDS: ReadonlySet<keyof ContainerResourceLimits> =
  * shows a non-zero `oomScoreAdj` in `current` that no plugin ever
  * requested. Without provenance, the diff misreads that artifact as
  * "user wants to unset a limit" and warns on every ensureRunning.
+ *
+ * The guard is deliberately limited to those fields: a live `memory`
+ * or `cpuShares` the runtime never injects is a real request even
+ * when `priorRequested` lacks it — typically applied later by a live
+ * update, which cannot rewrite the create-time provenance label — and
+ * dropping it must still take the recreate path.
  *
  * When `priorRequested` is omitted (no provenance at all — the
  * container predates the requested-resources label and the in-process
@@ -166,8 +182,12 @@ export function fieldsRequiringRecreateForUnset(
       // (see RUNTIME_INJECTED_FIELDS), so it can't be read as an unset.
       continue;
     }
-    if (priorRequested && !isSet(priorRequested[field])) {
-      // The field exists only as a runtime artifact (e.g. an inherited
+    if (
+      priorRequested &&
+      RUNTIME_INJECTED_FIELDS.has(field) &&
+      !isSet(priorRequested[field])
+    ) {
+      // The field exists only as a runtime artifact (an inherited
       // oom_score_adj), never a consumer request — not a real unset.
       continue;
     }

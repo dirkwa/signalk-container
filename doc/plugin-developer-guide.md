@@ -578,7 +578,9 @@ const result = await containers.runJob({
   onStderrLine: (line) => captureDiagnostic(line),
   // Optional cgroup limits applied via --cpus / --memory / --pids-limit etc.
   // Without this, a CPU-bound helper can saturate every core regardless of
-  // any in-process thread cap the caller may have set via env.
+  // any in-process thread cap the caller may have set via env. Jobs also
+  // run at the user's "CPU priority: jobs" tier (default lowest, i.e.
+  // cpuShares 128) unless you set cpuShares here yourself.
   resources: { cpus: 2, memory: "1g" },
   label: "parquet-export",
   // Strongly recommended for any long-running job. Tags the container
@@ -1131,16 +1133,16 @@ The defaults you pick should reflect what your container actually needs at typic
 
 ### What each field maps to
 
-| Field               | Runtime flag           | Use case                                                                                                                   |
-| ------------------- | ---------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `cpus`              | `--cpus`               | Hard CPU cap via CFS quota. e.g. `1.5` = 1.5 cores. **The most important field for stability.**                            |
-| `cpuShares`         | `--cpu-shares`         | Soft weight (default 1024). Only matters under contention. Use to set priority between containers.                         |
-| `cpusetCpus`        | `--cpuset-cpus`        | Pin to specific cores, e.g. `"1,2"`. Useful for "keep mayara off core 0 where Signal K runs".                              |
-| `memory`            | `--memory`             | Hard memory cap. Container is OOM-killed if it exceeds this. **Critical for OS stability.**                                |
-| `memorySwap`        | `--memory-swap`        | Total memory + swap. Set equal to `memory` to disable swap entirely. Recommended for predictability.                       |
-| `memoryReservation` | `--memory-reservation` | Soft floor — kernel reclaims first from containers above this when host is under memory pressure.                          |
-| `pidsLimit`         | `--pids-limit`         | Process/thread cap. Prevents fork bombs and runaway thread leaks.                                                          |
-| `oomScoreAdj`       | `--oom-score-adj`      | OOM score adjustment, -1000..1000. Higher = killed first under host OOM. Set high on "I'd rather lose this than Signal K". |
+| Field               | Runtime flag           | Use case                                                                                                                                                                                        |
+| ------------------- | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cpus`              | `--cpus`               | Hard CPU cap via CFS quota. e.g. `1.5` = 1.5 cores. **The most important field for stability.**                                                                                                 |
+| `cpuShares`         | `--cpu-shares`         | Soft weight, unset = cgroup `cpu.weight` 100 (an explicit 1024 is 39 on crun, 100 on runc ≥ 1.3.2). Only matters under contention. Prefer the plugin's tiers: 5120 high / 512 low / 128 lowest. |
+| `cpusetCpus`        | `--cpuset-cpus`        | Pin to specific cores, e.g. `"1,2"`. Useful for "keep mayara off core 0 where Signal K runs".                                                                                                   |
+| `memory`            | `--memory`             | Hard memory cap. Container is OOM-killed if it exceeds this. **Critical for OS stability.**                                                                                                     |
+| `memorySwap`        | `--memory-swap`        | Total memory + swap. Set equal to `memory` to disable swap entirely. Recommended for predictability.                                                                                            |
+| `memoryReservation` | `--memory-reservation` | Soft floor — kernel reclaims first from containers above this when host is under memory pressure.                                                                                               |
+| `pidsLimit`         | `--pids-limit`         | Process/thread cap. Prevents fork bombs and runaway thread leaks.                                                                                                                               |
+| `oomScoreAdj`       | `--oom-score-adj`      | OOM score adjustment, -1000..1000. Higher = killed first under host OOM. Set high on "I'd rather lose this than Signal K".                                                                      |
 
 ### Picking sensible defaults
 

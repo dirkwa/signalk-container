@@ -179,6 +179,12 @@ Discoverability — `selfDeployment().containerStorage` reports the filesystem b
 
 The diff has an optional `prior?: ContainerConfig` parameter for detecting "unset" drift (an env key previously set is now absent, a `command` previously set is now `undefined`). The wrapper in `src/index.ts` reads it from `lastConfigs` before overwriting.
 
+### Resource-limit precedence and CPU priority tiers
+
+The effective limits of a managed container are `tier ⊕ consumer resources ⊕ user override`, merged field-by-field with `null` = unset. `pluginDefaults` in `src/index.ts` is the single capture point of the bottom two layers (the plugin-wide `containerCpuPriority` tier with the consumer's `resources` on top) — `minimizeOverride`, `updateResources` and "Reset to plugin defaults" all read that map, so a new default-shaped input must be folded in there, not merged separately. Jobs get `jobCpuPriority ⊕ caller resources` in the API `runJob` wrapper.
+
+Tiers are `--cpu-shares` values from `CPU_PRIORITY_SHARES` (`src/configNormalize.ts`, browser-safe so the panel shares the table). `normal` is deliberately no request: unset is `cpu.weight` 100 on every runtime, whereas the shares → weight translation is the OCI runtime's and differs (crun and runc < 1.3.2: 1024 → 39; runc ≥ 1.3.2: 1024 → 100 — measured, see the README table), and `podman update --cpu-shares 0` is a no-op — hence `cpuShares` is in `FIELDS_THAT_CANNOT_LIVE_UNSET`, `getLiveResources` reports 1024 as a real value, and neither the panel nor the tests assume one formula (the integration test accepts either).
+
 ### Recursion guard in ensureRunning
 
 After auto-recreate, `ensureRunning` recursively re-enters itself with `_postRecreate=true`. The underscore prefix marks this as an internal-use-only parameter — do not document it for consumer plugins, do not move it earlier in the signature. The guard breaks the loop if state somehow stays `running` or `stopped` after the `remove`.

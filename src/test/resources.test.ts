@@ -691,6 +691,17 @@ describe("fieldsRequiringRecreateForUnset (Bug E)", () => {
     assert.ok(result.includes("oomScoreAdj"));
   });
 
+  it("returns ['cpuShares'] when current has shares and target drops them", () => {
+    // `podman update --cpu-shares 0` is a no-op, so dropping the field
+    // must take the recreate path (see FIELDS_THAT_CANNOT_LIVE_UNSET).
+    const result = fieldsRequiringRecreateForUnset(
+      { cpuShares: 512 },
+      {},
+      { cpuShares: 512 },
+    );
+    assert.deepEqual(result, ["cpuShares"]);
+  });
+
   it("does NOT include cpus or pidsLimit (they CAN be live-unset)", () => {
     const result = fieldsRequiringRecreateForUnset(
       { cpus: 1.5, pidsLimit: 200, memory: "512m" },
@@ -746,6 +757,20 @@ describe("fieldsRequiringRecreateForUnset (Bug E)", () => {
         { cpus: 1.5, oomScoreAdj: 500 },
       );
       assert.deepEqual(result, ["oomScoreAdj"]);
+    });
+
+    it("flags a cpuShares/memory unset even when the create-time provenance lacks it", () => {
+      // A tier or cap applied later by a live update never reaches the
+      // create-time label; the runtime never injects these fields, so a
+      // live value nobody's current request carries is a real unset.
+      assert.deepEqual(
+        fieldsRequiringRecreateForUnset({ cpuShares: 5120 }, {}, {}),
+        ["cpuShares"],
+      );
+      assert.deepEqual(
+        fieldsRequiringRecreateForUnset({ memory: "1g" }, {}, {}),
+        ["memory"],
+      );
     });
 
     it("still flags a genuinely-requested memory unset", () => {

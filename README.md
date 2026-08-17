@@ -464,6 +464,7 @@ The plugin embeds a React config panel in the Signal K Admin UI (via Module Fede
 - **Keep N prior managed-image versions** -- on the prune schedule above, also remove superseded versions of images belonging to managed containers, keeping this many prior versions in addition to the running one (default `1`; `0` keeps only the running image). Only touches images of containers this plugin manages — never your other images (e.g. a hand-pulled questdb/grafana), the running image, or any image in use by a container. See [Image version cleanup](#image-version-cleanup).
 - **Update check interval** -- how often to check consumer plugins for new container images (1h to 1 week, default 24h)
 - **Background update checks** -- toggle for metered connections; manual checks still work when off
+- **CPU priority: containers / jobs** -- soft CPU weight every managed container (default `normal`) and every one-shot job (default `lowest`) gets when they compete for CPU. See [CPU priority](#cpu-priority).
 - **Disable user-namespace remap (ZFS escape hatch)** -- off by default. Secondary fix for ZFS / id-map-less hosts; prefer the host-side `fuse-overlayfs` storage driver first ([ZFS host notes](#zfs-and-other-idmap-incompatible-filesystems)). Enable only if container creation fails with `crun: writing file /proc/<pid>/gid_map: Invalid argument` and you cannot switch storage drivers. With the flag on, signalk-container stops emitting `--userns=keep-id` for rootless Podman; bind-mount file ownership still lands on the host caller for root-by-default images (questdb, grafana, mayara), but non-root images lose host-caller ownership in exchange for being able to start at all.
 
 ### Managed Containers (one card per running or stopped container)
@@ -480,9 +481,9 @@ The plugin embeds a React config panel in the Signal K Admin UI (via Module Fede
 
 ### Resource Limits Editor (expands inline when you click "Edit Limits" on a running container)
 
-- Four primary fields visible by default: CPU cores, Memory, Memory+swap, Max processes
-- **Advanced** section (collapsed) for CPU shares, CPU pinning, memory reservation, OOM score adjust
-- **× button** next to each field to explicitly unset (send `null`, removing a plugin-default limit)
+- Five primary fields visible by default: CPU cores, CPU priority (a tier, or a raw shares value), Memory, Memory+swap, Max processes
+- **Advanced** section (collapsed) for CPU pinning, memory reservation, OOM score adjust
+- **× button** next to each field to explicitly unset (send `null`, removing a plugin-default limit); the CPU priority select has none — Normal is the unset
 - **Apply** -- live update where possible, recreate where needed, with a clear result box showing which method was used and any warnings (e.g. "dropped cpusetCpus — not delegated by cgroups")
 - **Revert** -- discard unsaved form edits, re-seed from current effective state
 - **Reset to default** -- clear the user override entirely and restore the consumer plugin's pristine default limits (confirmation dialog warns about possible recreate)
@@ -505,7 +506,7 @@ Each consumer plugin (signalk-questdb, signalk-grafana, mayara, etc.) declares d
 1. Open the Signal K admin UI → Plugin Config → **Container Manager**
 2. Find the container you want to tune in the "Managed Containers" list
 3. Click **Edit Limits ▸** on the row
-4. Edit the CPU cores, Memory, Memory+swap, or Max processes fields. Use the × button next to a field to explicitly unset a limit the plugin set. Click **Advanced** to access cpuShares, cpusetCpus, memoryReservation, and oomScoreAdj.
+4. Edit the CPU cores, CPU priority, Memory, Memory+swap, or Max processes fields. Use the × button next to a field to explicitly unset a limit the plugin set. Click **Advanced** to access cpusetCpus, memoryReservation, and oomScoreAdj.
 5. Click **Apply** — live updated where possible (no downtime), recreated where needed. The result box shows which method was used plus any warnings.
 6. To restore the plugin's default: click **Reset to default** (amber button). This clears your override and applies the pristine default to the running container.
 
@@ -516,7 +517,7 @@ The form re-seeds from the server's fresh state after every Apply or Reset, so t
 | Field               | Example          | What it does                                                                                                                                                             |
 | ------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `cpus`              | `1.5`            | Hard CPU cap. `1.5` = max 1.5 cores. The most important field for stability.                                                                                             |
-| `cpuShares`         | `512`            | Soft CPU weight under contention (default 1024). Lower = lower priority.                                                                                                 |
+| `cpuShares`         | `512`            | Soft CPU weight under contention (`--cpu-shares`). Unset = the runtime default (`cpu.weight` 100); the panel offers named tiers. See [CPU priority](#cpu-priority).      |
 | `cpusetCpus`        | `"1,2"`          | Pin to specific cores. Useful to keep heavy containers off core 0 where Signal K runs. May force a recreate on hosts where the cpuset cgroup controller isn't delegated. |
 | `memory`            | `"512m"`, `"2g"` | Hard memory cap. Container is OOM-killed if exceeded.                                                                                                                    |
 | `memorySwap`        | `"512m"`         | Memory + swap total. **Set equal to `memory` to disable swap entirely** — recommended on Pi/eMMC where swap is slow.                                                     |
@@ -599,6 +600,33 @@ curl http://localhost:3000/plugins/signalk-container/api/containers/mayara-serve
 ```
 
 Note that `override` contains only the fields that differ from the consumer plugin's default — this minimization is automatic and lets future plugin default bumps flow through without you having to re-edit your override.
+
+### CPU priority
+
+`cpus` is a hard cap; `cpuShares` is a _soft_ weight that only matters when containers actually compete for CPU. On an idle host it changes nothing; when a chart import saturates every core, it decides who gets the CPU. The plugin exposes it as named tiers:
+
+| Tier     | `cpuShares` | `cpu.weight` on crun, runc < 1.3.2 | `cpu.weight` on runc ≥ 1.3.2 | Default for        |
+| -------- | ----------- | ---------------------------------- | ---------------------------- | ------------------ |
+| `high`   | `5120`      | 196                                | 363                          |                    |
+| `normal` | _unset_     | 100                                | 100                          | managed containers |
+| `low`    | `512`       | 20                                 | 59                           |                    |
+| `lowest` | `128`       | 5                                  | 21                           | jobs (`runJob`)    |
+
+Two plugin-wide settings pick the default tier for managed containers and for jobs. A consumer plugin's own `resources.cpuShares` beats the tier, and a per-container override (panel or `containerOverrides`) beats both — the tier is simply the bottom layer of the same merge. To return one container to `normal`, pick Normal in the panel's limits editor (or `POST …/resources` with `{"cpuShares": null}`): that recreates the container, because neither runtime can un-set shares in place. A `cpuShares: null` written straight into `containerOverrides` is only picked up as far as a live update can go — the next consumer restart logs "cannot live-unset" and the container keeps its old weight until it is recreated.
+
+Two things worth knowing:
+
+- **`normal` means no request, not 1024.** The kernel schedules by cgroup v2 `cpu.weight`; the OCI runtime translates `--cpu-shares` into it, and the translation is the runtime's, not the kernel's: crun (Podman's default) and runc before 1.3.2 use a linear formula under which an explicit `1024` lands at weight 39 — _below_ an untouched container at 100 — while runc 1.3.2 and later use a quadratic one that maps 1024 to 100 (measured above on crun 1.21 and runc 1.4.3). Unset is 100 on every runtime and the tier order holds on every runtime; only the absolute numbers differ. Don't "reset" a container by typing 1024; use `normal` (the panel) or `null` (JSON).
+- **Weights rank cgroup siblings only.** Managed containers and jobs are siblings of each other, so the tiers rank them against one another. Signal K itself usually lives in a different cgroup branch, so ranking it _above_ the plugin containers is a systemd `CPUWeight=` at the right level, not a tier here:
+  - Universal installer (rootless Podman, Signal K as a Quadlet unit in `app.slice`, managed containers in `user.slice`): the installer writes `~/.config/systemd/user/app.slice.d/50-signalk-cpu-priority.conf` with `[Slice] CPUWeight=300`. A hand-rolled rootless setup with Signal K as a user service takes the same drop-in.
+  - Bare-metal Signal K as a system service with rootful Podman/Docker: `signalk.service` and the `docker-*.scope` / `libpod-*.scope` containers are siblings under `system.slice`, so `systemctl edit signalk.service` → `[Service] CPUWeight=300` does it.
+  - Signal K itself in Docker (compose): its container is a sibling of the managed ones under `system.slice`, so the tiers already rank against it; give the Signal K service `cpu_shares: 5120` to put it on top.
+
+  The host's own services in `system.slice` are untouched by any of this.
+
+Changing a tier _down_ (or between `high`/`low`/`lowest`) is applied live (`podman update` / `docker update`) to running containers on the next consumer-plugin restart. Moving a container _up_ to `normal` needs a recreate: neither runtime can un-set shares in place, so the restart only logs the mismatch — use the panel (Normal → Apply, or Reset to default) to recreate.
+
+If the host has not delegated the `cpu` cgroup controller, the tiers are stored but silently have no effect — the panel says so next to the selects, and the [doctor](#quick-check-apidoctordeployment) reports `cgroup-controllers-incomplete`.
 
 ### Picking the right values
 
@@ -912,6 +940,8 @@ All mounted at `/plugins/signalk-container/api/`:
 | Keep N prior managed-image versions | `1`      | On the prune schedule, also remove superseded versions of managed-container images, keeping this many prior versions besides the running one (`0` = running only). Never touches unregistered images, the running image, or in-use images. See [Image version cleanup](#image-version-cleanup). |
 | Max concurrent jobs                 | `2`      | Limit parallel one-shot job executions                                                                                                                                                                                                                                                          |
 | Update check interval               | `24h`    | How often to check for container image updates (e.g. `24h`, `12h`, `1h`). Min 1h.                                                                                                                                                                                                               |
+| CPU priority: containers            | `normal` | Soft CPU weight tier for every managed container unless the owning plugin or a per-container override sets `cpuShares`. See [CPU priority](#cpu-priority).                                                                                                                                      |
+| CPU priority: jobs                  | `lowest` | Soft CPU weight tier for one-shot job containers unless the caller sets `cpuShares`. See [CPU priority](#cpu-priority).                                                                                                                                                                         |
 | Background update checks            | `true`   | Periodically check for updates in the background. Disable on metered connections — manual checks via the UI button still work.                                                                                                                                                                  |
 | Disable user-namespace remap        | `false`  | Suppress rootless-Podman `--userns=keep-id` on filesystems that cannot be id-mapped (ZFS, some encrypted FS). Secondary escape hatch only — the recommended primary fix is host-side `fuse-overlayfs` storage (see [ZFS host notes](#zfs-and-other-idmap-incompatible-filesystems)).            |
 | Container overrides                 | `{}`     | Per-container resource limits (CPU, memory, PIDs). Field-level merged on top of consumer plugin defaults. See dev guide.                                                                                                                                                                        |

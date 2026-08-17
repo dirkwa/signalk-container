@@ -4,6 +4,8 @@
  * node-only imports so it can be bundled into the configpanel.
  */
 
+import type { ContainerResourceLimits, CpuPriority } from "./types.js";
+
 /**
  * Prior managed-image versions the reaper keeps by default, in addition
  * to the running one. Shared between the config schema's `default`, the
@@ -46,4 +48,80 @@ export function keepImageVersionsFromSelectValue(selectValue: string): number {
   // default rather than silently selecting the most aggressive policy.
   if (selectValue.trim() === "") return DEFAULT_KEEP_IMAGE_VERSIONS;
   return normalizeKeepImageVersions(Number(selectValue));
+}
+
+/**
+ * CPU priority tiers, expressed as the `--cpu-shares` value each one
+ * maps to. Shares are the wire format the runtime takes; the kernel
+ * ranks cgroup siblings by cgroup v2 `cpu.weight`, and the OCI runtime
+ * translates shares into a weight. That translation is the runtime's:
+ * crun and runc before 1.3.2 use a linear formula (1024 → 39), runc
+ * 1.3.2+ a quadratic one (1024 → 100). Unset is weight 100 everywhere,
+ * so `normal` is deliberately *no request* — the only value that means
+ * the same on every runtime — and the tiers are ordered by shares,
+ * which both formulas preserve.
+ *
+ * Weights only arbitrate among cgroup siblings under contention; hard
+ * caps are `cpus`.
+ */
+export const CPU_PRIORITY_SHARES: Readonly<Record<CpuPriority, number | null>> =
+  {
+    high: 5120,
+    normal: null,
+    low: 512,
+    lowest: 128,
+  };
+
+/** Tier keys in descending priority order, for select widgets. */
+export const CPU_PRIORITIES: readonly CpuPriority[] = [
+  "high",
+  "normal",
+  "low",
+  "lowest",
+];
+
+export const DEFAULT_CONTAINER_CPU_PRIORITY: CpuPriority = "normal";
+/**
+ * One-shot helpers (chart imports, GDAL, wipe jobs) are the workloads
+ * that saturate every core on a small host; they yield to the
+ * long-running services by default.
+ */
+export const DEFAULT_JOB_CPU_PRIORITY: CpuPriority = "lowest";
+
+/**
+ * Coerce a stored config value to a tier name. Anything that is not
+ * a known tier (hand-edited config, older panel) falls back to the
+ * given default so a typo can never select a priority nobody asked for.
+ */
+export function normalizeCpuPriority(
+  value: unknown,
+  fallback: CpuPriority,
+): CpuPriority {
+  return typeof value === "string" &&
+    (CPU_PRIORITIES as readonly string[]).includes(value)
+    ? (value as CpuPriority)
+    : fallback;
+}
+
+/**
+ * The resource-limits fragment a tier contributes. `normal` contributes
+ * nothing, so it never shows up as a limit and cannot mask a
+ * consumer's or user's own `cpuShares`.
+ */
+export function cpuPriorityLimits(
+  tier: CpuPriority,
+): Pick<ContainerResourceLimits, "cpuShares"> {
+  const shares = CPU_PRIORITY_SHARES[tier];
+  return shares === null ? {} : { cpuShares: shares };
+}
+
+/** Reverse lookup for display: the tier a shares value stands for, if any. */
+export function cpuPriorityForShares(
+  shares: number | null | undefined,
+): CpuPriority | null {
+  if (shares === undefined || shares === null) return "normal";
+  for (const tier of CPU_PRIORITIES) {
+    if (CPU_PRIORITY_SHARES[tier] === shares) return tier;
+  }
+  return null;
 }

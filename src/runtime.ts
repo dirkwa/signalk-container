@@ -287,18 +287,42 @@ function rootlessFromInfo(info: DaemonInfo): boolean | null {
  * Only meaningful for podman: rootless podman commonly has delegation
  * for `cpu memory pids` but not `cpuset`. Docker runs with full
  * delegation, so we return `null` there (treat all as available).
+ *
+ * Which file answers depends on where the containers land. Inside a
+ * container the root file is the container's own cgroup (cgroupns), so
+ * it lists exactly what was delegated. On a bare-metal host it lists
+ * every kernel controller, while rootless podman creates its containers
+ * under the caller's user manager (`user@<uid>.service`) and can only
+ * use what systemd delegated to that unit — `Delegate=pids memory` on
+ * systemd < 252, no `cpu`. Asking crun for a controller that is not
+ * there fails container creation outright ("the requested cgroup
+ * controller `cpu` is not available"), so for rootless podman the user
+ * manager's file is read first and the root file is the fallback.
  */
-async function probeCgroupControllers(
+export async function probeCgroupControllers(
   runtime: RuntimeName,
+  rootless: boolean | null,
+  read: (path: string) => Promise<string> = (p) => readFile(p, "utf8"),
+  uid: number | undefined = process.getuid?.(),
 ): Promise<string[] | null> {
   if (runtime !== "podman") return null;
-  try {
-    const raw = await readFile("/sys/fs/cgroup/cgroup.controllers", "utf8");
-    const controllers = raw.trim().split(/\s+/).filter(Boolean);
-    return controllers.length > 0 ? controllers : null;
-  } catch {
-    return null;
+  const candidates: string[] = [];
+  if (rootless && uid !== undefined) {
+    candidates.push(
+      `/sys/fs/cgroup/user.slice/user-${uid}.slice/user@${uid}.service/cgroup.controllers`,
+    );
   }
+  candidates.push("/sys/fs/cgroup/cgroup.controllers");
+  for (const path of candidates) {
+    try {
+      const raw = await read(path);
+      const controllers = raw.trim().split(/\s+/).filter(Boolean);
+      if (controllers.length > 0) return controllers;
+    } catch {
+      // try the next candidate
+    }
+  }
+  return null;
 }
 
 /**
@@ -336,12 +360,13 @@ export async function detectRuntime(
     ? (infoResult.value as DaemonInfo)
     : {};
 
+  const isRootless = rootlessFromInfo(info);
   return {
     runtime,
     version: version.Version ?? "unknown",
     isPodmanDockerShim: false,
-    cgroupControllers: await probeCgroupControllers(runtime),
-    isRootless: rootlessFromInfo(info),
+    cgroupControllers: await probeCgroupControllers(runtime, isRootless),
+    isRootless,
     hostUser: probeHostUser(),
     socketPath,
     isContainerized: isContainerized(),

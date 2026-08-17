@@ -11,6 +11,7 @@ import {
   ContainerResourceLimits,
   ContainerRuntimeInfo,
   ContainerState,
+  CpuPriority,
   DoctorApi,
   EnsureRunningOptions,
   HistoryEntry,
@@ -98,7 +99,12 @@ import { registerUpdateRoutes } from "./updates/routes.js";
 import { DIGEST_RE, resolveImage } from "./manifest/resolver.js";
 import { ManifestStore } from "./manifest/store.js";
 import {
+  CPU_PRIORITIES,
+  DEFAULT_CONTAINER_CPU_PRIORITY,
+  DEFAULT_JOB_CPU_PRIORITY,
   DEFAULT_KEEP_IMAGE_VERSIONS,
+  cpuPriorityLimits,
+  normalizeCpuPriority,
   normalizeKeepImageVersions,
 } from "./configNormalize.js";
 import { PruneScheduler, FilePruneStateStore } from "./pruneScheduler.js";
@@ -409,6 +415,11 @@ export default (app: App) => {
   // the new one.
   const perCallOnContainerLogUnsub = new Map<string, () => void>();
   let currentOverrides: Record<string, ContainerResourceLimits> = {};
+  // Plugin-wide CPU priority tiers from config; the container tier sits
+  // underneath each consumer's `resources`, the job tier underneath each
+  // `runJob` caller's `resources`.
+  let containerCpuPriority: CpuPriority = DEFAULT_CONTAINER_CPU_PRIORITY;
+  let jobCpuPriority: CpuPriority = DEFAULT_JOB_CPU_PRIORITY;
   // Cached result of resolveSignalkDataSource() — resolved once on first
   // ensureRunning() call that uses signalkDataMount, then reused.
   // `pendingDataSource` collapses concurrent resolutions onto one inspect.
@@ -1025,22 +1036,23 @@ export default (app: App) => {
         }
       }
 
-      // Capture the plugin's pristine default resource limits BEFORE
-      // merging with the user override. This is the only place in the
+      // Capture the plugin's default resource limits BEFORE merging with
+      // the user override: the plugin-wide CPU priority tier with the
+      // consumer's own `resources` on top. This is the only place in the
       // system that sees the "default" as a separate input; lastConfigs
       // stores the post-merge result. We need the default for:
       //   - "Reset to plugin defaults" action in the UI
-      //   - (future) detecting when an override happens to match the
-      //     default and offering to clear it
-      pluginDefaults.set(name, { ...(config.resources ?? {}) });
+      //   - minimizing stored overrides to fields that really differ
+      const pluginDefault = mergeResourceLimits(
+        cpuPriorityLimits(containerCpuPriority),
+        config.resources,
+      );
+      pluginDefaults.set(name, pluginDefault);
 
       // Merge user override on top of the plugin's default resources.
       // The user override (from signalk-container's own plugin config)
       // wins field-by-field; null in the override removes a limit.
-      const merged = mergeResourceLimits(
-        config.resources,
-        currentOverrides[name],
-      );
+      const merged = mergeResourceLimits(pluginDefault, currentOverrides[name]);
       // Drop fields whose backing cgroup controller is unavailable on
       // this host (Bug B). Log them once so the user knows their
       // override is being ignored. Without this filter, an override
@@ -1597,6 +1609,7 @@ export default (app: App) => {
       const runWipeJob = async (image: string, dir: string) => {
         const result = await runJob(runtime, {
           image,
+          resources: cpuPriorityLimits(jobCpuPriority),
           // Override the image's ENTRYPOINT: the wipe reuses the managed
           // container's own image (e.g. questdb, whose entrypoint launches the
           // DB), so the shell command must run directly, not as args to that
@@ -1645,6 +1658,10 @@ export default (app: App) => {
       return runJob(runtimeInfo, {
         ...config,
         env: defaultTimezoneEnv(config.env, resolveHostTimezone()),
+        resources: mergeResourceLimits(
+          cpuPriorityLimits(jobCpuPriority),
+          config.resources,
+        ),
       });
     },
 
@@ -2165,6 +2182,22 @@ export default (app: App) => {
           description:
             "Publish SignalK notifications (notifications.container.*) when a managed container is unhealthy, a device the host rejected, a required volume source is missing, or the container-runtime deployment is degraded. Severity is warn (or alert for a missing required volume) — visual only, no audible alarm. Requires a SignalK server that exposes the managed-notification API (>= 2.30.0); no effect on older servers. Turn off if you don't want these on the notification bus.",
         },
+        containerCpuPriority: {
+          type: "string",
+          enum: [...CPU_PRIORITIES],
+          default: DEFAULT_CONTAINER_CPU_PRIORITY,
+          title: "CPU priority of managed containers",
+          description:
+            "Soft CPU weight every managed container gets unless the owning plugin or a per-container override sets its own cpuShares. Only matters when containers compete for CPU with each other or with jobs on this host. Normal is no request; High / Low / Lowest are --cpu-shares 5120 / 512 / 128 (the runtime maps shares to cgroup cpu.weight; crun and runc differ in the numbers, not the order). A lower tier is applied live to running containers on the next consumer-plugin restart; going back to Normal needs a recreate (panel: Normal → Apply).",
+        },
+        jobCpuPriority: {
+          type: "string",
+          enum: [...CPU_PRIORITIES],
+          default: DEFAULT_JOB_CPU_PRIORITY,
+          title: "CPU priority of jobs",
+          description:
+            "Soft CPU weight for one-shot helper containers (chart imports, GDAL, cleanup) unless the caller sets its own cpuShares. Lowest keeps a chart import from starving the managed services when they contend for CPU; it does not slow the job on an idle host.",
+        },
         containerOverrides: {
           type: "object" as const,
           title: "Per-container resource overrides",
@@ -2176,7 +2209,8 @@ export default (app: App) => {
               cpus: { type: ["number", "null"], title: "Hard CPU cap (cores)" },
               cpuShares: {
                 type: ["number", "null"],
-                title: "Soft CPU weight (default 1024)",
+                title:
+                  "Soft CPU weight (--cpu-shares; unset = the runtime default, tiers: 5120 high / 512 low / 128 lowest)",
               },
               cpusetCpus: {
                 type: ["string", "null"],
@@ -2235,6 +2269,14 @@ export default (app: App) => {
       // to stop+start this plugin, so the new overrides take effect
       // on the next ensureRunning() call from each consumer.
       currentOverrides = config.containerOverrides ?? {};
+      containerCpuPriority = normalizeCpuPriority(
+        config.containerCpuPriority,
+        DEFAULT_CONTAINER_CPU_PRIORITY,
+      );
+      jobCpuPriority = normalizeCpuPriority(
+        config.jobCpuPriority,
+        DEFAULT_JOB_CPU_PRIORITY,
+      );
       // Resolve the container-name namespace from the environment before
       // any container is created or reaped. Unset → the default `sk`
       // namespace (production parity); the devcontainer sets
@@ -2478,6 +2520,8 @@ export default (app: App) => {
       effectiveResources.clear();
       pluginDefaults.clear();
       currentOverrides = {};
+      containerCpuPriority = DEFAULT_CONTAINER_CPU_PRIORITY;
+      jobCpuPriority = DEFAULT_JOB_CPU_PRIORITY;
       currentConfig = null;
       // Restore the userns-remap default so a future start() that
       // omits the flag (older saved config) does not inherit the
