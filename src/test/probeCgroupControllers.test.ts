@@ -46,6 +46,15 @@ describe("probeCgroupControllers", () => {
     ]);
   });
 
+  it("rootless podman with an empty user manager file falls back to the root file", async () => {
+    const read = reader({ [ROOT]: "cpu memory pids", [USER_MANAGER]: "\n" });
+    assert.deepEqual(await probeCgroupControllers("podman", true, read, 1000), [
+      "cpu",
+      "memory",
+      "pids",
+    ]);
+  });
+
   it("rootful podman reads the root file", async () => {
     const read = reader({
       [ROOT]: "cpuset cpu io memory pids",

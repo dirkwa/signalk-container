@@ -733,6 +733,30 @@ function cpuPriorityOptionLabel(tier: CpuPriority): string {
 }
 
 /**
+ * The number fields declare `min`/`max`, but the editor is not a `<form>`,
+ * so the browser never enforces them. Check at Apply time (the system
+ * boundary for panel input): out of range → a message naming the field,
+ * else null. Not checked per keystroke, which would clamp "1" while
+ * someone types "128".
+ */
+function outOfRangeFields(formState: ResourceLimitsFormState): string | null {
+  for (const f of RESOURCE_FIELDS) {
+    if (f.type !== "number") continue;
+    const v = formState[f.key];
+    if (v === null || v === undefined || v === "") continue;
+    const n = Number(v);
+    if (!Number.isFinite(n)) return `${f.label}: "${v}" is not a number`;
+    if (f.step === "1" && !Number.isInteger(n))
+      return `${f.label}: ${v} must be a whole number`;
+    if (f.min !== undefined && n < Number(f.min))
+      return `${f.label}: ${v} is below the minimum ${f.min}`;
+    if (f.max !== undefined && n > Number(f.max))
+      return `${f.label}: ${v} is above the maximum ${f.max}`;
+  }
+  return null;
+}
+
+/**
  * Render a current effective limit as a compact badge string.
  * Returns null if the value is missing/empty.
  */
@@ -837,6 +861,11 @@ function ResourceLimitsEditor({
   };
 
   const doApply = async () => {
+    const invalid = outOfRangeFields(formState);
+    if (invalid) {
+      setResult({ error: invalid });
+      return;
+    }
     setApplying(true);
     setResult(null);
     try {
@@ -962,16 +991,16 @@ function ResourceLimitsEditor({
               style={{ ...S.limitsEditorInput, width: 90 }}
             />
           </div>
-          <span
-            style={{ fontSize: 11, color: "#6b7280" }}
-            title={
-              cpuWeightAvailable
-                ? "Ranks this container against the other managed containers and jobs when they compete for CPU"
-                : "The cpu cgroup controller is not delegated on this host — see the doctor; the value is stored but has no effect"
-            }
-          >
-            {cpuWeightAvailable ? "" : "\u26A0 no effect on this host"}
-          </span>
+          {cpuWeightAvailable ? (
+            <span />
+          ) : (
+            <span
+              style={{ fontSize: 11, color: "#6b7280" }}
+              title="The cpu cgroup controller is not delegated on this host — see the doctor; the value is stored but has no effect"
+            >
+              {"\u26A0 no effect on this host"}
+            </span>
+          )}
         </React.Fragment>
       );
     }
