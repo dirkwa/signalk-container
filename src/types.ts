@@ -975,7 +975,8 @@ export interface ResourceClamp {
  * only a silent drift loop in the logs.
  */
 export interface ContainerWedged {
-  /** Managed (unprefixed) container name, e.g. `"signalk-questdb"`. */
+  /** Managed name as passed to `ensureRunning` (before the `sk-` namespace
+   * prefix), e.g. `"questdb"`. */
   name: string;
   /** What prompted the recreate, e.g. `"networkMode"`, `"env"`, a digest
    * change, or `"nofile N → M"`. */
