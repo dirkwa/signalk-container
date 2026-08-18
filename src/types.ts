@@ -947,6 +947,33 @@ export interface ResourceClamp {
   reason: string;
 }
 
+/**
+ * Event delivered to `EnsureRunningOptions.onContainerWedged` when config
+ * drift needs a recreate but the runtime cannot stop or remove the live
+ * container ("operation not permitted"), so the recreate is deferred.
+ *
+ * The usual cause under rootless Podman is an orphaned user namespace: the
+ * container's userns belongs to a previous "pause" session while the
+ * current one owns a different userns, so Podman cannot signal into it.
+ * The container is stuck (often `Stopping`/unhealthy) and nothing
+ * signalk-container can do from the API recovers it — it needs
+ * `podman system migrate`, or killing the container's conmon/child and
+ * `podman rm -f`. Data is safe: managed containers keep state in host bind
+ * mounts, so a later force-remove + recreate loses nothing.
+ *
+ * Fired once per wedge (not on every reconcile) so a consumer can surface
+ * it via `setPluginError` with the remedy instead of the operator seeing
+ * only a silent drift loop in the logs.
+ */
+export interface ContainerWedged {
+  /** Managed (unprefixed) container name, e.g. `"signalk-questdb"`. */
+  name: string;
+  /** The drift that needed the recreate, e.g. `"networkMode"`. */
+  drift: string;
+  /** Human-readable explanation with remediation; safe for `setPluginError`. */
+  reason: string;
+}
+
 export interface HealthCheckOptions {
   healthCheck?: () => Promise<boolean>;
   onUnhealthy?: (name: string, error: string) => void;
@@ -1011,6 +1038,17 @@ export interface EnsureRunningOptions extends HealthCheckOptions {
    * sync or async, fire-and-forget, errors caught and logged.
    */
   onResourceClamped?: (event: ResourceClamp) => void | Promise<void>;
+
+  /**
+   * Called when a drift-driven recreate is deferred because the runtime
+   * cannot stop or remove the live container ("operation not permitted",
+   * typically an orphaned rootless user namespace after a Podman service
+   * restart). Fired once per wedge, not on every reconcile. The container
+   * cannot be recovered from the API — the event's `reason` names the
+   * remedy — so a consumer should surface it via `setPluginError`. Same
+   * fire-and-forget handler contract as `onUlimitClamped`.
+   */
+  onContainerWedged?: (event: ContainerWedged) => void | Promise<void>;
 
   /**
    * Called once per device entry that hit a passthrough event during

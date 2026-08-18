@@ -16,6 +16,7 @@ import {
   ManagedImageRef,
   NofileLimits,
   PruneResult,
+  ContainerWedged,
   ResourceClamp,
   UlimitClamp,
   VolumeIssue,
@@ -405,6 +406,25 @@ export function safeInvokeUlimitClamped(
 export function safeInvokeResourceClamped(
   handler: ((event: ResourceClamp) => void | Promise<void>) | undefined,
   event: ResourceClamp,
+  reportError: (err: unknown) => void,
+): void {
+  if (!handler) return;
+  try {
+    void Promise.resolve(handler(event)).catch(reportError);
+  } catch (err) {
+    reportError(err);
+  }
+}
+
+/**
+ * Invoke an `onContainerWedged` callback safely. A container wedged
+ * unkillable is an operator-recoverable condition, not a lifecycle error:
+ * isolate a throwing/rejecting handler so it can never re-enter the
+ * reconcile path.
+ */
+export function safeInvokeContainerWedged(
+  handler: ((event: ContainerWedged) => void | Promise<void>) | undefined,
+  event: ContainerWedged,
   reportError: (err: unknown) => void,
 ): void {
   if (!handler) return;
@@ -2150,6 +2170,17 @@ export function _clearNofileRegrantAttemptsForTesting(): void {
   nofileRegrantAttempts.clear();
 }
 
+// Names announced as wedged (drift recreate deferred because the container
+// is unkillable — orphaned rootless userns). Fired once per wedge so the
+// operator gets one actionable error instead of a per-reconcile drift loop;
+// self-clears the moment the container is recovered (a later reconcile finds
+// it removable and recreates it, or it's gone), see clearWedgedAnnouncement.
+// In-memory by design — a fresh Signal K process re-announces once.
+const announcedWedged = new Set<string>();
+export function _clearAnnouncedWedgedForTesting(): void {
+  announcedWedged.clear();
+}
+
 /**
  * Translate `ContainerConfig.ulimits` into the dockerode
  * `HostConfig.Ulimits` array (`{ Name, Soft, Hard }`). A bare number sets
@@ -2574,7 +2605,13 @@ export async function ensureRunning(
       }
     }
     const { drifted } = diffContainerConfig(config, live, runtime, prior);
-    if (drifted.length === 0) return false;
+    if (drifted.length === 0) {
+      // No drift to apply: if this container was previously announced as
+      // wedged, it has recovered on its own (e.g. the operator ran
+      // `<runtime> system migrate`), so re-arm the one-shot advisory.
+      announcedWedged.delete(name);
+      return false;
+    }
     debug(
       `Container ${fullName} config drift detected (${drifted.join(", ")}); recreating`,
     );
@@ -2601,6 +2638,38 @@ export async function ensureRunning(
             `(${driftDesc}) — it is still running; keeping it and deferring ` +
             `the recreate. ${err.message}`,
         );
+        // Announce the wedge once. This is not the ordinary "still shutting
+        // down, try next reconcile" case — a container the runtime refuses
+        // to stop or remove with a permission error is almost always an
+        // orphaned rootless user namespace (a Podman service restart left
+        // the container in a previous pause session), which no API call
+        // recovers. Without a one-shot advisory the operator sees only a
+        // silent per-reconcile drift loop.
+        if (!announcedWedged.has(name)) {
+          announcedWedged.add(name);
+          safeInvokeContainerWedged(
+            options?.onContainerWedged,
+            {
+              name,
+              drift: driftDesc,
+              reason:
+                `Container ${fullName} is wedged: the ${runtime.runtime} runtime ` +
+                `cannot stop or remove it (operation not permitted), so the ` +
+                `${driftDesc} change cannot be applied. This is usually an orphaned ` +
+                `rootless user namespace after a ${runtime.runtime} service restart. ` +
+                `Recover with '${runtime.runtime} system migrate' (or kill the ` +
+                `container's conmon and child processes, then '${runtime.runtime} ` +
+                `rm -f ${fullName}'), then restart the plugin. Recorded data is safe ` +
+                `— it lives in a host bind mount.`,
+            },
+            (cbErr) =>
+              debug(
+                `ensureRunning(${name}): onContainerWedged handler threw: ${
+                  cbErr instanceof Error ? cbErr.message : String(cbErr)
+                }`,
+              ),
+          );
+        }
         return false;
       }
       throw err;
@@ -2616,6 +2685,9 @@ export async function ensureRunning(
       true,
       _pull,
     );
+    // Recreate succeeded — the wedge (if any) is cleared, so re-arm the
+    // one-shot advisory for a future one.
+    announcedWedged.delete(name);
     return true;
   };
 
