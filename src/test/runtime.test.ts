@@ -2,6 +2,7 @@ import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import {
   detectRuntime,
+  hostCpusFromInfo,
   probeHostUser,
   userMappingFlags,
   setDisableUserns,
@@ -297,5 +298,20 @@ describe("isContainerized", () => {
     // a fixed value.
     delete process.env.container;
     assert.equal(typeof isContainerized(), "boolean");
+  });
+});
+
+describe("hostCpusFromInfo", () => {
+  it("reads NCPU from the daemon's /info", () => {
+    assert.equal(hostCpusFromInfo({ NCPU: 1 }), 1);
+    assert.equal(hostCpusFromInfo({ NCPU: 8 }), 8);
+  });
+
+  it("returns null when NCPU is absent or not a positive number", () => {
+    assert.equal(hostCpusFromInfo({}), null);
+    assert.equal(hostCpusFromInfo({ NCPU: 0 }), null);
+    assert.equal(hostCpusFromInfo({ NCPU: -2 }), null);
+    assert.equal(hostCpusFromInfo({ NCPU: Number.NaN }), null);
+    assert.equal(hostCpusFromInfo({ NCPU: "4" as unknown as number }), null);
   });
 });

@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  clampCpusToHost,
   fieldsRequiringRecreateForUnset,
   filterUnsupportedLimits,
   mergeResourceLimits,
@@ -453,6 +454,70 @@ describe("resourceLimitsEqual", () => {
       resourceLimitsEqual({ cpus: 1.5, memory: null }, { cpus: 1.5 }),
       true,
     );
+  });
+});
+
+describe("clampCpusToHost", () => {
+  // Docker validates NanoCpus against the daemon's CPU count at create and
+  // update ("range of CPUs is from 0.01 to 1.00, as there are only 1 CPUs
+  // available"). signalk-questdb#147: the plugin's 1.5-core default failed
+  // outright on a 1-vCPU Docker host the first time the container had to
+  // be recreated.
+  const oneCpuDocker: ContainerRuntimeInfo = {
+    runtime: "docker",
+    version: "27.0.0",
+    isPodmanDockerShim: false,
+    hostCpus: 1,
+  };
+
+  it("caps cpus above the daemon's count and reports the clamp", () => {
+    const { accepted, clamped } = clampCpusToHost(
+      { cpus: 1.5, memory: "768m" },
+      oneCpuDocker,
+    );
+    assert.deepEqual(accepted, { cpus: 1, memory: "768m" });
+    assert.ok(clamped);
+    assert.equal(clamped.resource, "cpus");
+    assert.equal(clamped.requested, 1.5);
+    assert.equal(clamped.granted, 1);
+    assert.match(clamped.reason, /1\.5/);
+    assert.match(clamped.reason, /capped to 1\b/);
+  });
+
+  it("leaves cpus at or below the daemon's count untouched", () => {
+    for (const cpus of [0.5, 1]) {
+      const { accepted, clamped } = clampCpusToHost({ cpus }, oneCpuDocker);
+      assert.equal(accepted.cpus, cpus);
+      assert.equal(clamped, null);
+    }
+    const four: ContainerRuntimeInfo = { ...oneCpuDocker, hostCpus: 4 };
+    const { accepted, clamped } = clampCpusToHost({ cpus: 1.5 }, four);
+    assert.equal(accepted.cpus, 1.5);
+    assert.equal(clamped, null);
+  });
+
+  it("does nothing when the daemon did not report a CPU count", () => {
+    for (const hostCpus of [undefined, null, 0]) {
+      const rt: ContainerRuntimeInfo = { ...oneCpuDocker, hostCpus };
+      const { accepted, clamped } = clampCpusToHost({ cpus: 1.5 }, rt);
+      assert.equal(accepted.cpus, 1.5);
+      assert.equal(clamped, null);
+    }
+  });
+
+  it("does nothing when no cpus limit is requested", () => {
+    for (const limits of [{}, { memory: "1g" }, { cpus: null }]) {
+      const { accepted, clamped } = clampCpusToHost(limits, oneCpuDocker);
+      assert.deepEqual(accepted, limits);
+      assert.equal(clamped, null);
+    }
+  });
+
+  it("is idempotent — the clamped result passes through unchanged", () => {
+    const first = clampCpusToHost({ cpus: 1.5 }, oneCpuDocker).accepted;
+    const second = clampCpusToHost(first, oneCpuDocker);
+    assert.deepEqual(second.accepted, first);
+    assert.equal(second.clamped, null);
   });
 });
 

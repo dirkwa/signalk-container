@@ -247,6 +247,14 @@ interface DaemonInfo {
    */
   Rootless?: boolean;
   SecurityOptions?: string[];
+  /**
+   * CPU count as the daemon sees it. Both docker and podman's compat
+   * `/info` report it. Read so `resources.ts` can cap `cpus` requests
+   * Docker would otherwise reject at create time (issue: a 1.5-core default
+   * on a 1-vCPU Docker host fails with "range of CPUs is from 0.01 to
+   * 1.00").
+   */
+  NCPU?: number;
 }
 
 /**
@@ -266,6 +274,18 @@ interface DaemonInfo {
  * `null` stays advisory ("not probed") — treated as not-rootless by the
  * userns matrix, the safe default for docker.
  */
+/**
+ * Daemon CPU count from `/info`, or `null` when absent or not a positive
+ * finite number (a daemon that omits it, or a stubbed `info()` in tests).
+ * `null` means "unknown" downstream: no clamping, same as before this
+ * field existed.
+ */
+export function hostCpusFromInfo(info: DaemonInfo): number | null {
+  const n = info.NCPU;
+  if (typeof n === "number" && Number.isFinite(n) && n > 0) return n;
+  return null;
+}
+
 function rootlessFromInfo(info: DaemonInfo): boolean | null {
   if (typeof info.Rootless === "boolean") return info.Rootless;
   if (Array.isArray(info.SecurityOptions)) {
@@ -366,6 +386,7 @@ export async function detectRuntime(
     version: version.Version ?? "unknown",
     isPodmanDockerShim: false,
     cgroupControllers: await probeCgroupControllers(runtime, isRootless),
+    hostCpus: hostCpusFromInfo(info),
     isRootless,
     hostUser: probeHostUser(),
     socketPath,

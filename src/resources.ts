@@ -1,4 +1,8 @@
-import type { ContainerResourceLimits, ContainerRuntimeInfo } from "./types.js";
+import type {
+  ContainerResourceLimits,
+  ContainerRuntimeInfo,
+  ResourceClamp,
+} from "./types.js";
 import {
   getClient,
   safe,
@@ -341,6 +345,48 @@ export interface FilterResult {
    * override is being silently ignored.
    */
   dropped: Array<{ field: keyof ContainerResourceLimits; reason: string }>;
+}
+
+/**
+ * Cap `cpus` at the daemon's CPU count. Docker validates `NanoCpus` against
+ * the host at container create AND update ("range of CPUs is from 0.01 to
+ * N.00, as there are only N CPUs available", HTTP 400), so a plugin default
+ * such as `cpus: 1.5` fails outright on a 1-vCPU Docker host — and only the
+ * first time the container has to be (re)created, which is when it is
+ * hardest to see coming. Podman does not validate, but a cap above the core
+ * count grants nothing either. Runs after `filterUnsupportedLimits` on the
+ * same object that is created, labelled and compared against the live
+ * container, so the clamp is stable across reconciles (no live-update
+ * ping-pong between 1.5 requested and 1.0 observed).
+ *
+ * `runtime.hostCpus` unknown → limits returned as-is, `clamped: null`.
+ */
+export function clampCpusToHost(
+  limits: ContainerResourceLimits,
+  runtime: ContainerRuntimeInfo,
+): { accepted: ContainerResourceLimits; clamped: ResourceClamp | null } {
+  const host = runtime.hostCpus;
+  const cpus = limits.cpus;
+  if (
+    host === undefined ||
+    host === null ||
+    !(host > 0) ||
+    typeof cpus !== "number" ||
+    !(cpus > host)
+  ) {
+    return { accepted: limits, clamped: null };
+  }
+  return {
+    accepted: { ...limits, cpus: host },
+    clamped: {
+      resource: "cpus",
+      requested: cpus,
+      granted: host,
+      reason:
+        `cpus ${cpus} exceeds the ${host} CPU${host === 1 ? "" : "s"} the ` +
+        `${runtime.runtime} daemon reports; capped to ${host}`,
+    },
+  };
 }
 
 /**
