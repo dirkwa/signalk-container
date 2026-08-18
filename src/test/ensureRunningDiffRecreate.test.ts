@@ -196,7 +196,7 @@ describe("ensureRunning — config drift triggers automatic recreate", () => {
   // A container with a host bind mount, so the data-safety note applies.
   const requestedWithBind: ContainerConfig = {
     ...requested,
-    volumes: { "/var/lib/questdb": "/home/dirk/.signalk/questdb" },
+    volumes: { "/var/lib/questdb": "/var/lib/questdb-data" },
   };
 
   it("announces the wedge via onContainerWedged, once, with the rootless-podman remedy", async () => {
