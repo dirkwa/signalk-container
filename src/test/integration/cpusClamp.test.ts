@@ -30,7 +30,26 @@ import type {
 const IMAGE = "docker.io/library/alpine";
 const TAG = "3.19";
 const CONTAINER_NAME = "cpus-clamp-test";
-const TRAP_AND_WAIT = ["sh", "-c", "trap exit TERM; sleep 60 & wait"];
+// Long enough to outlive the whole test; exits promptly on SIGTERM.
+const KEEPALIVE_SECONDS = 60;
+const TRAP_AND_WAIT = [
+  "sh",
+  "-c",
+  `trap exit TERM; sleep ${KEEPALIVE_SECONDS} & wait`,
+];
+// How far above the daemon's CPU count the two requests reach. Any positive
+// overage triggers the clamp; two distinct values make it visible that
+// updateResources clamped its own request rather than kept the first one.
+const CREATE_OVERAGE = 2;
+const UPDATE_OVERAGE = 3;
+// A pending advisory handler must not delay ensureRunning; the reconcile of
+// an already-running container completes well within this.
+const PENDING_HANDLER_DEADLINE_MS = 10_000;
+
+async function hasContainerRuntime(): Promise<ContainerRuntimeInfo | null> {
+  if (process.platform === "win32") return null;
+  return detectRuntime("auto");
+}
 
 async function bootPlugin(errors: string[]): Promise<{
   api: ContainerManagerApi;
@@ -82,8 +101,7 @@ describe("cpus clamp — real runtime", () => {
   const errors: string[] = [];
 
   before(async () => {
-    if (process.platform === "win32") return;
-    if (!(await detectRuntime("auto"))) return;
+    if (!(await hasContainerRuntime())) return;
     const booted = await bootPlugin(errors);
     api = booted.api;
     runtime = booted.runtime;
@@ -124,7 +142,7 @@ describe("cpus clamp — real runtime", () => {
       // OK if it didn't exist.
     }
 
-    const requested = host + 2;
+    const requested = host + CREATE_OVERAGE;
     const clamps: ResourceClamp[] = [];
     const config = {
       image: IMAGE,
@@ -175,15 +193,43 @@ describe("cpus clamp — real runtime", () => {
       onResourceClamped: () => new Promise<void>(() => {}),
     });
     assert.ok(
-      Date.now() - started < 10_000,
+      Date.now() - started < PENDING_HANDLER_DEADLINE_MS,
       "a pending onResourceClamped handler must not delay ensureRunning",
+    );
+    assert.equal(await inspectId(), idBefore, "still the same container");
+
+    // A throwing or rejecting handler is reported, not propagated:
+    // ensureRunning still succeeds and the container is untouched.
+    errors.length = 0;
+    await api.ensureRunning(CONTAINER_NAME, config, {
+      onResourceClamped: () => {
+        throw new Error("sync handler failure");
+      },
+    });
+    await api.ensureRunning(CONTAINER_NAME, config, {
+      onResourceClamped: () =>
+        Promise.reject(new Error("async handler failure")),
+    });
+    // The rejection is reported on a later tick; give it one.
+    await new Promise((r) => setTimeout(r, 50));
+    assert.ok(
+      errors.some((e) =>
+        /onResourceClamped handler threw: sync handler failure/.test(e),
+      ),
+      `sync throw must be reported, got ${JSON.stringify(errors)}`,
+    );
+    assert.ok(
+      errors.some((e) =>
+        /onResourceClamped handler threw: async handler failure/.test(e),
+      ),
+      `rejection must be reported, got ${JSON.stringify(errors)}`,
     );
     assert.equal(await inspectId(), idBefore, "still the same container");
 
     // updateResources goes through the same cap: the request is lowered,
     // the caller is told, and the live value stays at the daemon's count.
     const result = await api.updateResources(CONTAINER_NAME, {
-      cpus: host + 3,
+      cpus: host + UPDATE_OVERAGE,
     });
     assert.ok(
       (result.warnings ?? []).some((w) => /capped to/.test(w)),
