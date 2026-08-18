@@ -1,9 +1,16 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { ensureRunning } from "../containers.js";
+import {
+  ensureRunning,
+  _clearAnnouncedWedgedForTesting,
+} from "../containers.js";
 import { requestedResourcesLabel } from "../namespace.js";
 import { _setCurrentHostIdsForTesting } from "../runtime.js";
-import type { ContainerConfig, ContainerRuntimeInfo } from "../types.js";
+import type {
+  ContainerConfig,
+  ContainerRuntimeInfo,
+  ContainerWedged,
+} from "../types.js";
 import { makeMockClient } from "./helpers/mockClient.js";
 
 type Json = Record<string, unknown>;
@@ -168,6 +175,132 @@ describe("ensureRunning — config drift triggers automatic recreate", () => {
     assert.ok(
       debugLines.some((l) => l.includes("keeping it and")),
       `expected the keep-and-defer debug line, got: ${debugLines.join(" | ")}`,
+    );
+  });
+
+  it("announces the wedge via onContainerWedged, once, with a recovery hint", async () => {
+    _clearAnnouncedWedgedForTesting();
+    const makeWedgedClient = () =>
+      makeMockClient({
+        containers: {
+          "sk-questdb": {
+            inspect: () =>
+              Promise.resolve(
+                buildLiveInspect({
+                  state: { status: "stopping", running: false, pid: 12345 },
+                  image: "questdb/questdb:9.0.0",
+                  env: ["FOO=1"],
+                }),
+              ),
+            remove: () => Promise.reject(new Error("operation not permitted")),
+          },
+        },
+        images: { "questdb/questdb:9.0.0": { Id: "sha256:abc" } },
+      });
+
+    const wedged: ContainerWedged[] = [];
+    const opts = {
+      onContainerWedged: (e: ContainerWedged) => {
+        wedged.push(e);
+      },
+    };
+
+    // Two reconciles of the same wedged container.
+    await ensureRunning(
+      docker,
+      "questdb",
+      requested,
+      () => {},
+      opts,
+      makeWedgedClient(),
+    );
+    await ensureRunning(
+      docker,
+      "questdb",
+      requested,
+      () => {},
+      opts,
+      makeWedgedClient(),
+    );
+
+    assert.equal(wedged.length, 1, "the wedge must be announced exactly once");
+    assert.equal(wedged[0].name, "questdb");
+    assert.match(wedged[0].drift, /env/);
+    assert.match(wedged[0].reason, /operation not permitted/);
+    assert.match(wedged[0].reason, /system migrate/);
+    assert.match(wedged[0].reason, /data is safe|bind mount/i);
+  });
+
+  it("re-arms the wedge advisory once the container recovers (no drift)", async () => {
+    _clearAnnouncedWedgedForTesting();
+    const wedgedClient = makeMockClient({
+      containers: {
+        "sk-questdb": {
+          inspect: () =>
+            Promise.resolve(
+              buildLiveInspect({
+                state: { status: "stopping", running: false, pid: 12345 },
+                image: "questdb/questdb:9.0.0",
+                env: ["FOO=1"],
+              }),
+            ),
+          remove: () => Promise.reject(new Error("operation not permitted")),
+        },
+      },
+      images: { "questdb/questdb:9.0.0": { Id: "sha256:abc" } },
+    });
+    // A healthy container matching the request → diffContainerConfig finds
+    // no drift, which clears the announcement.
+    const recoveredClient = makeMockClient({
+      containers: {
+        "sk-questdb": {
+          inspect: buildLiveInspect({
+            image: "questdb/questdb:9.0.0",
+            env: ["FOO=1"],
+            extraHosts: ["host.containers.internal:host-gateway"],
+          }),
+        },
+      },
+      images: { "questdb/questdb:9.0.0": { Id: "sha256:abc" } },
+    });
+
+    const wedged: ContainerWedged[] = [];
+    const opts = {
+      onContainerWedged: (e: ContainerWedged) => {
+        wedged.push(e);
+      },
+    };
+
+    await ensureRunning(
+      docker,
+      "questdb",
+      requested,
+      () => {},
+      opts,
+      wedgedClient,
+    );
+    await ensureRunning(
+      docker,
+      "questdb",
+      requested,
+      () => {},
+      opts,
+      recoveredClient,
+    );
+    // Wedged again after recovery → announced a second time.
+    await ensureRunning(
+      docker,
+      "questdb",
+      requested,
+      () => {},
+      opts,
+      wedgedClient,
+    );
+
+    assert.equal(
+      wedged.length,
+      2,
+      "recovery must re-arm the advisory so a later wedge is announced again",
     );
   });
 
