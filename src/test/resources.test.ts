@@ -458,11 +458,9 @@ describe("resourceLimitsEqual", () => {
 });
 
 describe("clampCpusToHost", () => {
-  // Docker validates NanoCpus against the daemon's CPU count at create and
+  // Docker rejects a CPU cap above the daemon's CPU count at create and
   // update ("range of CPUs is from 0.01 to 1.00, as there are only 1 CPUs
-  // available"). signalk-questdb#147: the plugin's 1.5-core default failed
-  // outright on a 1-vCPU Docker host the first time the container had to
-  // be recreated.
+  // available"), so an over-request must be lowered, not passed through.
   const oneCpuDocker: ContainerRuntimeInfo = {
     runtime: "docker",
     version: "27.0.0",
