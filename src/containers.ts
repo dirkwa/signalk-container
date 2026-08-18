@@ -2643,22 +2643,34 @@ export async function ensureRunning(
         // Announce the wedge once. This is not the ordinary "still shutting
         // down, try next reconcile" case — the runtime refused to stop or
         // remove a still-running container. `kind === "permission"` covers
-        // two distinct causes, so tailor the remedy from the raw message:
-        //   - "operation not permitted" / EPERM: the runtime cannot signal
-        //     into the container. Under rootless Podman this is almost always
-        //     an orphaned user namespace (a Podman service restart left the
-        //     container in a previous pause session); `podman system migrate`
-        //     recovers it.
-        //   - "permission denied" / EACCES: the API socket or a mount the
-        //     removal touches is not writable by this user — a host-side
-        //     permission problem, not a userns wedge.
+        // "operation not permitted" (EPERM) and "permission denied" (EACCES),
+        // and the orphaned-user-namespace diagnosis is specific to rootless
+        // Podman — on Docker or rootful Podman an EPERM on remove is not a
+        // pause-session wedge and `podman system migrate` would not apply. So
+        // give the userns remedy only for a rootless-Podman EPERM; otherwise a
+        // generic permission remedy that echoes the runtime's own message.
         // Either way it needs operator action no API call can perform, so
         // announce once instead of looping the drift log silently.
         if (!announcedWedged.has(name)) {
           announcedWedged.add(name);
           const raw = err.message.toLowerCase();
           const isUsernsWedge =
-            raw.includes("operation not permitted") || raw.includes("eperm");
+            runtime.runtime === "podman" &&
+            runtime.isRootless === true &&
+            (raw.includes("operation not permitted") || raw.includes("eperm"));
+          // Data-safety reassurance only when it is actually true: a force-
+          // remove + recreate keeps host bind mounts (and named volumes), but
+          // NOT the container's writable layer. Add the note only when this
+          // container has at least one host-path mount (source starts with
+          // "/"), which the managed database containers that wedge in practice
+          // always do.
+          const hasBindMount = Object.values(config.volumes ?? {}).some((v) => {
+            const source = typeof v === "string" ? v : v.source;
+            return source.startsWith("/");
+          });
+          const dataNote = hasBindMount
+            ? ` Recorded data is safe — it lives in a host bind mount, which removing and recreating the container does not touch.`
+            : ``;
           const reason = isUsernsWedge
             ? `Container ${fullName} is wedged: the ${runtime.runtime} runtime ` +
               `cannot stop or remove it (operation not permitted), so the ` +
@@ -2666,14 +2678,12 @@ export async function ensureRunning(
               `rootless user namespace after a ${runtime.runtime} service restart. ` +
               `Recover with '${runtime.runtime} system migrate' (or kill the ` +
               `container's conmon and child processes, then '${runtime.runtime} ` +
-              `rm -f ${fullName}'), then restart the plugin. Recorded data is safe ` +
-              `— it lives in a host bind mount.`
+              `rm -f ${fullName}'), then restart the plugin.${dataNote}`
             : `Container ${fullName} could not be stopped or removed to apply the ` +
               `${driftDesc} change (${err.message}). A mount the removal touches — ` +
               `or the ${runtime.runtime} API socket — is not writable by this user. ` +
               `Fix the permissions, then remove the container ` +
-              `('${runtime.runtime} rm -f ${fullName}') and restart the plugin. ` +
-              `Recorded data is safe — it lives in a host bind mount.`;
+              `('${runtime.runtime} rm -f ${fullName}') and restart the plugin.${dataNote}`;
           safeInvokeContainerWedged(
             options?.onContainerWedged,
             { name, drift: driftDesc, reason },

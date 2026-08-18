@@ -2,6 +2,7 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import {
   ensureRunning,
+  safeInvokeContainerWedged,
   _clearAnnouncedWedgedForTesting,
 } from "../containers.js";
 import { requestedResourcesLabel } from "../namespace.js";
@@ -19,6 +20,16 @@ const docker: ContainerRuntimeInfo = {
   runtime: "docker",
   version: "27.0.0",
   isPodmanDockerShim: false,
+};
+
+// Rootless podman: the only runtime where an "operation not permitted" on
+// remove means an orphaned user namespace, so the only one that gets the
+// `podman system migrate` remedy.
+const rootlessPodman: ContainerRuntimeInfo = {
+  runtime: "podman",
+  version: "5.4.2",
+  isPodmanDockerShim: false,
+  isRootless: true,
 };
 
 // Pin the host UID/GID resolver so user-mapping flags are deterministic
@@ -178,7 +189,13 @@ describe("ensureRunning — config drift triggers automatic recreate", () => {
     );
   });
 
-  it("announces the wedge via onContainerWedged, once, with a recovery hint", async () => {
+  // A container with a host bind mount, so the data-safety note applies.
+  const requestedWithBind: ContainerConfig = {
+    ...requested,
+    volumes: { "/var/lib/questdb": "/home/dirk/.signalk/questdb" },
+  };
+
+  it("announces the wedge via onContainerWedged, once, with the rootless-podman remedy", async () => {
     _clearAnnouncedWedgedForTesting();
     const makeWedgedClient = () =>
       makeMockClient({
@@ -207,17 +224,17 @@ describe("ensureRunning — config drift triggers automatic recreate", () => {
 
     // Two reconciles of the same wedged container.
     await ensureRunning(
-      docker,
+      rootlessPodman,
       "questdb",
-      requested,
+      requestedWithBind,
       () => {},
       opts,
       makeWedgedClient(),
     );
     await ensureRunning(
-      docker,
+      rootlessPodman,
       "questdb",
-      requested,
+      requestedWithBind,
       () => {},
       opts,
       makeWedgedClient(),
@@ -228,15 +245,63 @@ describe("ensureRunning — config drift triggers automatic recreate", () => {
     assert.match(wedged[0].drift, /env/);
     assert.match(wedged[0].reason, /operation not permitted/);
     assert.match(wedged[0].reason, /system migrate/);
-    assert.match(wedged[0].reason, /data is safe|bind mount/i);
+    // Bind mount present → the data-safety note is included.
+    assert.match(wedged[0].reason, /host bind mount/i);
+  });
+
+  it("does NOT suggest the userns remedy for an EPERM on docker or rootful podman", async () => {
+    // "operation not permitted" only means an orphaned userns under rootless
+    // podman; on docker the same text is some other permission problem.
+    _clearAnnouncedWedgedForTesting();
+    const client = makeMockClient({
+      containers: {
+        "sk-questdb": {
+          inspect: () =>
+            Promise.resolve(
+              buildLiveInspect({
+                state: { status: "running", running: true, pid: 12345 },
+                image: "questdb/questdb:9.0.0",
+                env: ["FOO=1"],
+              }),
+            ),
+          remove: () => Promise.reject(new Error("operation not permitted")),
+        },
+      },
+      images: { "questdb/questdb:9.0.0": { Id: "sha256:abc" } },
+    });
+    const wedged: ContainerWedged[] = [];
+    // requested has no volumes → no data-safety note either.
+    await ensureRunning(
+      docker,
+      "questdb",
+      requested,
+      () => {},
+      {
+        onContainerWedged: (e: ContainerWedged) => {
+          wedged.push(e);
+        },
+      },
+      client,
+    );
+    assert.equal(wedged.length, 1);
+    assert.match(wedged[0].reason, /operation not permitted/);
+    assert.doesNotMatch(
+      wedged[0].reason,
+      /system migrate|user namespace/,
+      "docker EPERM must not suggest the rootless-podman remedy",
+    );
+    assert.doesNotMatch(
+      wedged[0].reason,
+      /bind mount/i,
+      "no bind mount in the request → no data-safety note",
+    );
   });
 
   it("re-arms after the operator externally removes the wedged container (missing → recreate)", async () => {
-    // The advisory tells the operator to `<runtime> rm -f <name>`. After that
-    // the next reconcile finds the container MISSING and creates a fresh one —
-    // a path that is neither the no-drift nor the in-process-recreate clear.
-    // The name must still be re-armed so a future wedge on the reused name is
-    // announced again (regression guard: it was previously stranded forever).
+    // After an external `<runtime> rm -f <name>`, the next reconcile finds
+    // the container MISSING and creates a fresh one — distinct from the
+    // no-drift and in-process-recreate clear paths. The name must be re-armed
+    // there too so a future wedge on the reused name is announced again.
     _clearAnnouncedWedgedForTesting();
     const wedgedClient = makeMockClient({
       containers: {
@@ -883,5 +948,45 @@ describe("ensureRunning — buildCreateOptions ownership", () => {
     assert.deepEqual(payload.Labels, {
       [requestedResourcesLabel()]: "{}",
     });
+  });
+});
+
+describe("safeInvokeContainerWedged — handler isolation", () => {
+  const event: ContainerWedged = { name: "x", drift: "env", reason: "r" };
+
+  it("routes a synchronous throw to reportError and does not propagate", () => {
+    const errs: unknown[] = [];
+    assert.doesNotThrow(() =>
+      safeInvokeContainerWedged(
+        () => {
+          throw new Error("sync boom");
+        },
+        event,
+        (e) => errs.push(e),
+      ),
+    );
+    assert.equal(errs.length, 1);
+    assert.match(String(errs[0]), /sync boom/);
+  });
+
+  it("routes a rejected promise to reportError without unhandled rejection", async () => {
+    const errs: unknown[] = [];
+    safeInvokeContainerWedged(
+      () => Promise.reject(new Error("async boom")),
+      event,
+      (e) => errs.push(e),
+    );
+    // The rejection is reported on a later microtask.
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(errs.length, 1);
+    assert.match(String(errs[0]), /async boom/);
+  });
+
+  it("is a no-op when no handler is provided", () => {
+    assert.doesNotThrow(() =>
+      safeInvokeContainerWedged(undefined, event, () => {
+        throw new Error("reportError must not run");
+      }),
+    );
   });
 });

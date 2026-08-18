@@ -954,16 +954,19 @@ export interface ResourceClamp {
  *
  * Two causes, both needing operator action no API call can perform; the
  * `reason` string is tailored to the one that occurred:
- *   - "operation not permitted" (EPERM) — the runtime cannot signal into
- *     the container. Under rootless Podman this is almost always an
- *     orphaned user namespace (the container's userns belongs to a previous
- *     "pause" session after a Podman service restart); `podman system
- *     migrate` recovers it.
- *   - "permission denied" (EACCES) — the API socket or a mount the removal
- *     touches is not writable by this user; a host-side permission problem.
+ *   - "operation not permitted" (EPERM) on **rootless Podman** — almost
+ *     always an orphaned user namespace (the container's userns belongs to
+ *     a previous "pause" session after a Podman service restart); `podman
+ *     system migrate` recovers it. On Docker or rootful Podman the same text
+ *     is treated as a generic permission problem, not a userns wedge.
+ *   - "permission denied" (EACCES), or EPERM on a non-rootless-Podman
+ *     runtime — the API socket or a mount the removal touches is not
+ *     writable by this user; a host-side permission problem.
  *
- * Data is safe either way: managed containers keep state in host bind
- * mounts, so a later force-remove + recreate loses nothing.
+ * When the container has a host bind mount, `reason` also notes that a
+ * force-remove + recreate does not touch that data. (Only bind mounts and
+ * named volumes survive a recreate — the writable layer does not — so the
+ * note is added only when a bind mount is actually configured.)
  *
  * Fired once per wedge (not on every reconcile) so a consumer can surface
  * it via `setPluginError` with the remedy instead of the operator seeing
