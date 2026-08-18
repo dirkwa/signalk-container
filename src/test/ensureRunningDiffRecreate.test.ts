@@ -231,6 +231,122 @@ describe("ensureRunning — config drift triggers automatic recreate", () => {
     assert.match(wedged[0].reason, /data is safe|bind mount/i);
   });
 
+  it("re-arms after the operator externally removes the wedged container (missing → recreate)", async () => {
+    // The advisory tells the operator to `<runtime> rm -f <name>`. After that
+    // the next reconcile finds the container MISSING and creates a fresh one —
+    // a path that is neither the no-drift nor the in-process-recreate clear.
+    // The name must still be re-armed so a future wedge on the reused name is
+    // announced again (regression guard: it was previously stranded forever).
+    _clearAnnouncedWedgedForTesting();
+    const wedgedClient = makeMockClient({
+      containers: {
+        "sk-questdb": {
+          inspect: () =>
+            Promise.resolve(
+              buildLiveInspect({
+                state: { status: "stopping", running: false, pid: 12345 },
+                image: "questdb/questdb:9.0.0",
+                env: ["FOO=1"],
+              }),
+            ),
+          remove: () => Promise.reject(new Error("operation not permitted")),
+        },
+      },
+      images: { "questdb/questdb:9.0.0": { Id: "sha256:abc" } },
+    });
+    // Operator removed it externally: now missing → the create branch runs.
+    const missingClient = makeMockClient({
+      containers: {
+        "sk-questdb": {
+          inspect: () => Promise.reject(notFound("no such object")),
+        },
+      },
+      images: { "questdb/questdb:9.0.0": { Id: "sha256:abc" } },
+    });
+
+    const wedged: ContainerWedged[] = [];
+    const opts = {
+      onContainerWedged: (e: ContainerWedged) => {
+        wedged.push(e);
+      },
+    };
+
+    await ensureRunning(
+      docker,
+      "questdb",
+      requested,
+      () => {},
+      opts,
+      wedgedClient,
+    );
+    await ensureRunning(
+      docker,
+      "questdb",
+      requested,
+      () => {},
+      opts,
+      missingClient,
+    );
+    // Wedges again after the fresh container was created.
+    await ensureRunning(
+      docker,
+      "questdb",
+      requested,
+      () => {},
+      opts,
+      wedgedClient,
+    );
+
+    assert.equal(
+      wedged.length,
+      2,
+      "a container going missing must re-arm the advisory (external rm -f recovery)",
+    );
+  });
+
+  it("uses socket/mount wording (not the userns remedy) for a permission-denied removal", async () => {
+    // `kind === "permission"` also matches EACCES / "permission denied"
+    // (socket or mount perms), which is NOT an orphaned userns — the advisory
+    // must not tell the operator to run `system migrate` in that case.
+    _clearAnnouncedWedgedForTesting();
+    const client = makeMockClient({
+      containers: {
+        "sk-questdb": {
+          inspect: () =>
+            Promise.resolve(
+              buildLiveInspect({
+                state: { status: "running", running: true, pid: 12345 },
+                image: "questdb/questdb:9.0.0",
+                env: ["FOO=1"],
+              }),
+            ),
+          remove: () => Promise.reject(new Error("permission denied")),
+        },
+      },
+      images: { "questdb/questdb:9.0.0": { Id: "sha256:abc" } },
+    });
+    const wedged: ContainerWedged[] = [];
+    await ensureRunning(
+      docker,
+      "questdb",
+      requested,
+      () => {},
+      {
+        onContainerWedged: (e: ContainerWedged) => {
+          wedged.push(e);
+        },
+      },
+      client,
+    );
+    assert.equal(wedged.length, 1);
+    assert.match(wedged[0].reason, /permission denied/);
+    assert.doesNotMatch(
+      wedged[0].reason,
+      /system migrate|user namespace/,
+      "socket/mount permission errors must not suggest the userns remedy",
+    );
+  });
+
   it("re-arms the wedge advisory once the container recovers (no drift)", async () => {
     _clearAnnouncedWedgedForTesting();
     const wedgedClient = makeMockClient({
@@ -301,6 +417,98 @@ describe("ensureRunning — config drift triggers automatic recreate", () => {
       wedged.length,
       2,
       "recovery must re-arm the advisory so a later wedge is announced again",
+    );
+  });
+
+  it("re-arms after a successful recreate clears the wedge (still-drifting recovery)", async () => {
+    // The real recovery path on the reporter's box: wedged, then the
+    // operator frees the container so remove now succeeds while drift is
+    // STILL present. The recreate succeeds → the success branch clears the
+    // announcement (not the no-drift branch), so a later wedge re-announces.
+    _clearAnnouncedWedgedForTesting();
+
+    const wedgedClient = makeMockClient({
+      containers: {
+        "sk-questdb": {
+          inspect: () =>
+            Promise.resolve(
+              buildLiveInspect({
+                state: { status: "stopping", running: false, pid: 12345 },
+                image: "questdb/questdb:9.0.0",
+                env: ["FOO=1"],
+              }),
+            ),
+          remove: () => Promise.reject(new Error("operation not permitted")),
+        },
+      },
+      images: { "questdb/questdb:9.0.0": { Id: "sha256:abc" } },
+    });
+
+    // Drift is still present (env FOO=1 vs requested FOO=2) but remove now
+    // succeeds, so the recursive ensureRunning recreates in the missing
+    // branch.
+    const recreateCalls = new Map<string, unknown[]>();
+    const recoverAndRecreateClient = makeMockClient({
+      containers: {
+        "sk-questdb": {
+          inspect: () => {
+            if ((recreateCalls.get("remove") ?? []).length > 0) {
+              return Promise.reject(notFound("no such object"));
+            }
+            return Promise.resolve(
+              buildLiveInspect({
+                state: { status: "running", running: true, pid: 12345 },
+                image: "questdb/questdb:9.0.0",
+                env: ["FOO=1"],
+              }),
+            );
+          },
+        },
+      },
+      images: { "questdb/questdb:9.0.0": { Id: "sha256:abc" } },
+      calls: recreateCalls,
+    });
+
+    const wedged: ContainerWedged[] = [];
+    const opts = {
+      onContainerWedged: (e: ContainerWedged) => {
+        wedged.push(e);
+      },
+    };
+
+    await ensureRunning(
+      docker,
+      "questdb",
+      requested,
+      () => {},
+      opts,
+      wedgedClient,
+    );
+    await ensureRunning(
+      docker,
+      "questdb",
+      requested,
+      () => {},
+      opts,
+      recoverAndRecreateClient,
+    );
+    await ensureRunning(
+      docker,
+      "questdb",
+      requested,
+      () => {},
+      opts,
+      wedgedClient,
+    );
+
+    assert.ok(
+      (recreateCalls.get("createContainer") ?? []).length > 0,
+      "the recovery reconcile must actually recreate the container",
+    );
+    assert.equal(
+      wedged.length,
+      2,
+      "a successful recreate must re-arm the advisory for a later wedge",
     );
   });
 
