@@ -948,9 +948,11 @@ export interface ResourceClamp {
 }
 
 /**
- * Event delivered to `EnsureRunningOptions.onContainerWedged` when config
- * drift needs a recreate but the runtime cannot stop or remove the live
- * container (a permission error), so the recreate is deferred.
+ * Event delivered to `EnsureRunningOptions.onContainerWedged` when a recreate
+ * is needed — for config drift, floating-tag digest drift, or a nofile
+ * regrant — but the runtime cannot stop or remove the live container (a
+ * permission error), so the recreate is deferred. `drift` names whichever
+ * change prompted it.
  *
  * Two causes, both needing operator action no API call can perform; the
  * `reason` string is tailored to the one that occurred:
@@ -975,7 +977,8 @@ export interface ResourceClamp {
 export interface ContainerWedged {
   /** Managed (unprefixed) container name, e.g. `"signalk-questdb"`. */
   name: string;
-  /** The drift that needed the recreate, e.g. `"networkMode"`. */
+  /** What prompted the recreate, e.g. `"networkMode"`, `"env"`, a digest
+   * change, or `"nofile N → M"`. */
   drift: string;
   /** Human-readable explanation with remediation; safe for `setPluginError`. */
   reason: string;
