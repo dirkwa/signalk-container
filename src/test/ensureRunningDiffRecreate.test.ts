@@ -32,6 +32,10 @@ const rootlessPodman: ContainerRuntimeInfo = {
   isRootless: true,
 };
 
+// A live PID on the wedged/running fixtures — getContainerState ORs it on
+// to report "running" even when Status is "stopping".
+const LIVE_PID = 12345;
+
 // Pin the host UID/GID resolver so user-mapping flags are deterministic
 // regardless of who runs `npm test`. `buildLiveInspect` defaults to
 // `user: "1000:1000"` to match.
@@ -55,7 +59,7 @@ function buildLiveInspect(parts: {
   extraHosts?: string[] | null;
   user?: string;
 }): Json {
-  const st = parts.state ?? { status: "running", running: true, pid: 12345 };
+  const st = parts.state ?? { status: "running", running: true, pid: LIVE_PID };
   return {
     State: { Status: st.status, Running: st.running, Pid: st.pid },
     Config: {
@@ -153,7 +157,7 @@ describe("ensureRunning — config drift triggers automatic recreate", () => {
           inspect: () =>
             Promise.resolve(
               buildLiveInspect({
-                state: { status: "stopping", running: false, pid: 12345 },
+                state: { status: "stopping", running: false, pid: LIVE_PID },
                 image: "questdb/questdb:9.0.0",
                 env: ["FOO=1"],
               }),
@@ -204,7 +208,7 @@ describe("ensureRunning — config drift triggers automatic recreate", () => {
             inspect: () =>
               Promise.resolve(
                 buildLiveInspect({
-                  state: { status: "stopping", running: false, pid: 12345 },
+                  state: { status: "stopping", running: false, pid: LIVE_PID },
                   image: "questdb/questdb:9.0.0",
                   env: ["FOO=1"],
                 }),
@@ -259,7 +263,7 @@ describe("ensureRunning — config drift triggers automatic recreate", () => {
           inspect: () =>
             Promise.resolve(
               buildLiveInspect({
-                state: { status: "running", running: true, pid: 12345 },
+                state: { status: "running", running: true, pid: LIVE_PID },
                 image: "questdb/questdb:9.0.0",
                 env: ["FOO=1"],
               }),
@@ -309,7 +313,7 @@ describe("ensureRunning — config drift triggers automatic recreate", () => {
           inspect: () =>
             Promise.resolve(
               buildLiveInspect({
-                state: { status: "stopping", running: false, pid: 12345 },
+                state: { status: "stopping", running: false, pid: LIVE_PID },
                 image: "questdb/questdb:9.0.0",
                 env: ["FOO=1"],
               }),
@@ -380,7 +384,7 @@ describe("ensureRunning — config drift triggers automatic recreate", () => {
           inspect: () =>
             Promise.resolve(
               buildLiveInspect({
-                state: { status: "running", running: true, pid: 12345 },
+                state: { status: "running", running: true, pid: LIVE_PID },
                 image: "questdb/questdb:9.0.0",
                 env: ["FOO=1"],
               }),
@@ -420,7 +424,7 @@ describe("ensureRunning — config drift triggers automatic recreate", () => {
           inspect: () =>
             Promise.resolve(
               buildLiveInspect({
-                state: { status: "stopping", running: false, pid: 12345 },
+                state: { status: "stopping", running: false, pid: LIVE_PID },
                 image: "questdb/questdb:9.0.0",
                 env: ["FOO=1"],
               }),
@@ -498,7 +502,7 @@ describe("ensureRunning — config drift triggers automatic recreate", () => {
           inspect: () =>
             Promise.resolve(
               buildLiveInspect({
-                state: { status: "stopping", running: false, pid: 12345 },
+                state: { status: "stopping", running: false, pid: LIVE_PID },
                 image: "questdb/questdb:9.0.0",
                 env: ["FOO=1"],
               }),
@@ -522,7 +526,7 @@ describe("ensureRunning — config drift triggers automatic recreate", () => {
             }
             return Promise.resolve(
               buildLiveInspect({
-                state: { status: "running", running: true, pid: 12345 },
+                state: { status: "running", running: true, pid: LIVE_PID },
                 image: "questdb/questdb:9.0.0",
                 env: ["FOO=1"],
               }),
@@ -976,8 +980,10 @@ describe("safeInvokeContainerWedged — handler isolation", () => {
       event,
       (e) => errs.push(e),
     );
-    // The rejection is reported on a later microtask.
-    await new Promise((r) => setTimeout(r, 20));
+    // The rejection is reported on the promise's own microtask; a couple of
+    // microtask turns is enough — no wall-clock wait.
+    await Promise.resolve();
+    await Promise.resolve();
     assert.equal(errs.length, 1);
     assert.match(String(errs[0]), /async boom/);
   });
