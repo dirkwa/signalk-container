@@ -2666,7 +2666,10 @@ export async function ensureRunning(
           // always do.
           const hasBindMount = Object.values(config.volumes ?? {}).some((v) => {
             const source = typeof v === "string" ? v : v.source;
-            return source.startsWith("/");
+            // A host path (absolute or explicitly relative) is a bind mount; a
+            // bare name is a named volume. Both survive a recreate, but only a
+            // bind mount is what the managed database containers use.
+            return source.startsWith("/") || source.startsWith(".");
           });
           const dataNote = hasBindMount
             ? ` Recorded data is safe — it lives in a host bind mount, which removing and recreating the container does not touch.`
