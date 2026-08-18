@@ -91,6 +91,7 @@ import {
   startContainer,
   stopContainer,
   tailContainerLogs,
+  safeInvokeResourceClamped,
 } from "./containers.js";
 import { createLogStreamBroker, LogStreamBroker } from "./log-stream-broker.js";
 import { runJob, cleanupOrphanedJobs } from "./jobs.js";
@@ -1079,17 +1080,15 @@ export default (app: App) => {
       );
       if (cpuClamp) {
         app.debug(`ensureRunning(${name}): ${cpuClamp.reason}`);
-        if (options?.onResourceClamped) {
-          try {
-            await options.onResourceClamped(cpuClamp);
-          } catch (err) {
-            app.error(
-              `ensureRunning(${name}): onResourceClamped handler threw: ${
-                err instanceof Error ? err.message : String(err)
-              }`,
-            );
-          }
-        }
+        // Fire-and-forget, like onUlimitClamped: a slow or never-settling
+        // handler must not hold up reconciliation.
+        safeInvokeResourceClamped(options?.onResourceClamped, cpuClamp, (err) =>
+          app.error(
+            `ensureRunning(${name}): onResourceClamped handler threw: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          ),
+        );
       }
       const effectiveConfigPreFilter: ContainerConfig = {
         ...config,

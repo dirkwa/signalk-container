@@ -16,6 +16,7 @@ import {
   ManagedImageRef,
   NofileLimits,
   PruneResult,
+  ResourceClamp,
   UlimitClamp,
   VolumeIssue,
   VolumeSpec,
@@ -385,6 +386,23 @@ export function safeInvokeContainerLog(
 export function safeInvokeUlimitClamped(
   handler: ((event: UlimitClamp) => void | Promise<void>) | undefined,
   event: UlimitClamp,
+  reportError: (err: unknown) => void,
+): void {
+  if (!handler) return;
+  try {
+    void Promise.resolve(handler(event)).catch(reportError);
+  } catch (err) {
+    reportError(err);
+  }
+}
+
+/**
+ * Invoke an `onResourceClamped` callback safely. Same shape and rationale
+ * as `safeInvokeVolumeIssue` — see that helper's doc.
+ */
+export function safeInvokeResourceClamped(
+  handler: ((event: ResourceClamp) => void | Promise<void>) | undefined,
+  event: ResourceClamp,
   reportError: (err: unknown) => void,
 ): void {
   if (!handler) return;
