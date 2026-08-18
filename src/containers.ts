@@ -397,8 +397,10 @@ export function safeInvokeUlimitClamped(
 }
 
 /**
- * Invoke an `onResourceClamped` callback safely. Same shape and rationale
- * as `safeInvokeVolumeIssue` — see that helper's doc.
+ * Resource-clamp handlers are advisory: a throwing, rejecting or
+ * never-settling handler must not interrupt or delay container
+ * reconciliation, so it is invoked fire-and-forget with both failure
+ * shapes routed to `reportError`.
  */
 export function safeInvokeResourceClamped(
   handler: ((event: ResourceClamp) => void | Promise<void>) | undefined,
