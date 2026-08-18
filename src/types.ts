@@ -950,15 +950,19 @@ export interface ResourceClamp {
 /**
  * Event delivered to `EnsureRunningOptions.onContainerWedged` when config
  * drift needs a recreate but the runtime cannot stop or remove the live
- * container ("operation not permitted"), so the recreate is deferred.
+ * container (a permission error), so the recreate is deferred.
  *
- * The usual cause under rootless Podman is an orphaned user namespace: the
- * container's userns belongs to a previous "pause" session while the
- * current one owns a different userns, so Podman cannot signal into it.
- * The container is stuck (often `Stopping`/unhealthy) and nothing
- * signalk-container can do from the API recovers it — it needs
- * `podman system migrate`, or killing the container's conmon/child and
- * `podman rm -f`. Data is safe: managed containers keep state in host bind
+ * Two causes, both needing operator action no API call can perform; the
+ * `reason` string is tailored to the one that occurred:
+ *   - "operation not permitted" (EPERM) — the runtime cannot signal into
+ *     the container. Under rootless Podman this is almost always an
+ *     orphaned user namespace (the container's userns belongs to a previous
+ *     "pause" session after a Podman service restart); `podman system
+ *     migrate` recovers it.
+ *   - "permission denied" (EACCES) — the API socket or a mount the removal
+ *     touches is not writable by this user; a host-side permission problem.
+ *
+ * Data is safe either way: managed containers keep state in host bind
  * mounts, so a later force-remove + recreate loses nothing.
  *
  * Fired once per wedge (not on every reconcile) so a consumer can surface

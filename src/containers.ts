@@ -2173,9 +2173,11 @@ export function _clearNofileRegrantAttemptsForTesting(): void {
 // Names announced as wedged (drift recreate deferred because the container
 // is unkillable — orphaned rootless userns). Fired once per wedge so the
 // operator gets one actionable error instead of a per-reconcile drift loop;
-// self-clears the moment the container is recovered (a later reconcile finds
-// it removable and recreates it, or it's gone), see clearWedgedAnnouncement.
-// In-memory by design — a fresh Signal K process re-announces once.
+// self-clears when the container is recovered: a reconcile that finds no
+// drift, a successful in-process recreate, or the container going missing
+// (e.g. the operator ran `<runtime> rm -f`) each delete the name (see the
+// three `announcedWedged.delete` sites). In-memory by design — a fresh
+// Signal K process re-announces once.
 const announcedWedged = new Set<string>();
 export function _clearAnnouncedWedgedForTesting(): void {
   announcedWedged.clear();
@@ -2639,29 +2641,42 @@ export async function ensureRunning(
             `the recreate. ${err.message}`,
         );
         // Announce the wedge once. This is not the ordinary "still shutting
-        // down, try next reconcile" case — a container the runtime refuses
-        // to stop or remove with a permission error is almost always an
-        // orphaned rootless user namespace (a Podman service restart left
-        // the container in a previous pause session), which no API call
-        // recovers. Without a one-shot advisory the operator sees only a
-        // silent per-reconcile drift loop.
+        // down, try next reconcile" case — the runtime refused to stop or
+        // remove a still-running container. `kind === "permission"` covers
+        // two distinct causes, so tailor the remedy from the raw message:
+        //   - "operation not permitted" / EPERM: the runtime cannot signal
+        //     into the container. Under rootless Podman this is almost always
+        //     an orphaned user namespace (a Podman service restart left the
+        //     container in a previous pause session); `podman system migrate`
+        //     recovers it.
+        //   - "permission denied" / EACCES: the API socket or a mount the
+        //     removal touches is not writable by this user — a host-side
+        //     permission problem, not a userns wedge.
+        // Either way it needs operator action no API call can perform, so
+        // announce once instead of looping the drift log silently.
         if (!announcedWedged.has(name)) {
           announcedWedged.add(name);
+          const raw = err.message.toLowerCase();
+          const isUsernsWedge =
+            raw.includes("operation not permitted") || raw.includes("eperm");
+          const reason = isUsernsWedge
+            ? `Container ${fullName} is wedged: the ${runtime.runtime} runtime ` +
+              `cannot stop or remove it (operation not permitted), so the ` +
+              `${driftDesc} change cannot be applied. This is usually an orphaned ` +
+              `rootless user namespace after a ${runtime.runtime} service restart. ` +
+              `Recover with '${runtime.runtime} system migrate' (or kill the ` +
+              `container's conmon and child processes, then '${runtime.runtime} ` +
+              `rm -f ${fullName}'), then restart the plugin. Recorded data is safe ` +
+              `— it lives in a host bind mount.`
+            : `Container ${fullName} could not be stopped or removed to apply the ` +
+              `${driftDesc} change (${err.message}). A mount the removal touches — ` +
+              `or the ${runtime.runtime} API socket — is not writable by this user. ` +
+              `Fix the permissions, then remove the container ` +
+              `('${runtime.runtime} rm -f ${fullName}') and restart the plugin. ` +
+              `Recorded data is safe — it lives in a host bind mount.`;
           safeInvokeContainerWedged(
             options?.onContainerWedged,
-            {
-              name,
-              drift: driftDesc,
-              reason:
-                `Container ${fullName} is wedged: the ${runtime.runtime} runtime ` +
-                `cannot stop or remove it (operation not permitted), so the ` +
-                `${driftDesc} change cannot be applied. This is usually an orphaned ` +
-                `rootless user namespace after a ${runtime.runtime} service restart. ` +
-                `Recover with '${runtime.runtime} system migrate' (or kill the ` +
-                `container's conmon and child processes, then '${runtime.runtime} ` +
-                `rm -f ${fullName}'), then restart the plugin. Recorded data is safe ` +
-                `— it lives in a host bind mount.`,
-            },
+            { name, drift: driftDesc, reason },
             (cbErr) =>
               debug(
                 `ensureRunning(${name}): onContainerWedged handler threw: ${
@@ -2888,6 +2903,13 @@ export async function ensureRunning(
     }
 
     case "missing": {
+      // A missing container cannot be wedged. If a prior wedge was announced
+      // for this name and the operator recovered it the way the advisory
+      // recommends (`<runtime> rm -f <name>`), the container is now gone and
+      // about to be recreated fresh — re-arm so a future wedge on the reused
+      // name is announced again. (The in-process recreate and no-drift paths
+      // clear it too; this covers the externally-removed path.)
+      announcedWedged.delete(name);
       const hasImage = await imageExists(runtime, imageRef, client);
       if (!hasImage) {
         debug(`Pulling ${imageRef}...`);
