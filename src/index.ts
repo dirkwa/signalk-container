@@ -29,6 +29,7 @@ import {
   VolumeIssue,
 } from "./types.js";
 import {
+  clampCpusToHost,
   fieldsRequiringRecreateForUnset,
   filterUnsupportedLimits,
   mergeResourceLimits,
@@ -1058,7 +1059,7 @@ export default (app: App) => {
       // override is being ignored. Without this filter, an override
       // with `cpusetCpus` on rootless podman would cause `podman run`
       // to fail with a cryptic OCI error.
-      const { accepted: filteredMerged, dropped } = filterUnsupportedLimits(
+      const { accepted: controllerFiltered, dropped } = filterUnsupportedLimits(
         merged,
         runtimeInfo,
       );
@@ -1066,6 +1067,29 @@ export default (app: App) => {
         app.debug(
           `ensureRunning(${name}): dropped resources.${d.field}: ${d.reason}`,
         );
+      }
+      // Cap `cpus` at the daemon's CPU count. Done here, on the object that
+      // is created, labelled and later compared against the live container,
+      // so the request and the observed value agree on every reconcile.
+      // Docker rejects an over-request at create/update time (a 1.5-core
+      // plugin default on a 1-vCPU Docker host fails outright).
+      const { accepted: filteredMerged, clamped: cpuClamp } = clampCpusToHost(
+        controllerFiltered,
+        runtimeInfo,
+      );
+      if (cpuClamp) {
+        app.debug(`ensureRunning(${name}): ${cpuClamp.reason}`);
+        if (options?.onResourceClamped) {
+          try {
+            await options.onResourceClamped(cpuClamp);
+          } catch (err) {
+            app.error(
+              `ensureRunning(${name}): onResourceClamped handler threw: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }
+        }
       }
       const effectiveConfigPreFilter: ContainerConfig = {
         ...config,
@@ -1754,7 +1778,7 @@ export default (app: App) => {
       // capabilities. Dropping a field here is silent at the
       // resources.ts layer; we surface it once via app.debug so the
       // user knows their override is being ignored. (Bug B fix.)
-      const { accepted: filteredLimits, dropped } = filterUnsupportedLimits(
+      const { accepted: controllerFiltered, dropped } = filterUnsupportedLimits(
         mergedTarget,
         runtimeInfo,
       );
@@ -1762,6 +1786,16 @@ export default (app: App) => {
         const w = `dropped resources.${d.field}: ${d.reason}`;
         warnings.push(w);
         app.debug(`updateResources(${name}): ${w}`);
+      }
+      // Same CPU cap as the ensureRunning path — `docker update` validates
+      // NanoCpus against the host just like create does.
+      const { accepted: filteredLimits, clamped: cpuClamp } = clampCpusToHost(
+        controllerFiltered,
+        runtimeInfo,
+      );
+      if (cpuClamp) {
+        warnings.push(cpuClamp.reason);
+        app.debug(`updateResources(${name}): ${cpuClamp.reason}`);
       }
 
       // Read the LIVE state from podman, not the in-memory cache.

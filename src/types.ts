@@ -45,6 +45,17 @@ export interface ContainerRuntimeInfo {
    */
   cgroupControllers?: string[] | null;
   /**
+   * CPU count as the daemon reports it (`NCPU` from `/info`). This is the
+   * daemon's own view — the podman-machine VM or a remote Docker host, not
+   * necessarily the machine signalk-server runs on — which is the number
+   * that matters: Docker rejects a container create/update whose `cpus`
+   * exceeds it (`range of CPUs is from 0.01 to N.00`). `undefined`/`null`
+   * means "not reported" — no clamping is done.
+   *
+   * Used by `resources.ts` to cap `ContainerResourceLimits.cpus`.
+   */
+  hostCpus?: number | null;
+  /**
    * Whether the runtime is operating in rootless mode.  Probed once
    * at detection time via `podman info --format
    * '{{.Host.Security.Rootless}}'` for Podman; assumed `false` for
@@ -916,6 +927,26 @@ export interface UlimitClamp {
   reason: string;
 }
 
+/**
+ * Event delivered to `EnsureRunningOptions.onResourceClamped` when a
+ * requested resource limit was lowered to what the daemon can grant.
+ * Currently only `cpus`: a request above the daemon's CPU count is capped
+ * to that count, because Docker refuses to create or update a container
+ * whose `cpus` exceeds it (podman accepts the value, but a cap above the
+ * core count is meaningless there too). The container runs with `granted`
+ * — this is an advisory, not a failure.
+ */
+export interface ResourceClamp {
+  /** The `ContainerResourceLimits` field that was clamped, e.g. `"cpus"`. */
+  resource: "cpus";
+  /** The value the consumer (or a user override) requested. */
+  requested: number;
+  /** The value the container was actually given. */
+  granted: number;
+  /** Human-readable explanation; safe to surface in `setPluginStatus`. */
+  reason: string;
+}
+
 export interface HealthCheckOptions {
   healthCheck?: () => Promise<boolean>;
   onUnhealthy?: (name: string, error: string) => void;
@@ -970,6 +1001,16 @@ export interface EnsureRunningOptions extends HealthCheckOptions {
    * lifecycle path otherwise.
    */
   onUlimitClamped?: (event: UlimitClamp) => void | Promise<void>;
+
+  /**
+   * Called once per resource limit that signalk-container had to lower to
+   * what the daemon can grant during this `ensureRunning` call (currently
+   * only `cpus`, capped to the daemon's CPU count). The container runs
+   * with the `granted` value, so this is an advisory the plugin can
+   * surface the same way as `onUlimitClamped`. Same handler contract:
+   * sync or async, fire-and-forget, errors caught and logged.
+   */
+  onResourceClamped?: (event: ResourceClamp) => void | Promise<void>;
 
   /**
    * Called once per device entry that hit a passthrough event during
