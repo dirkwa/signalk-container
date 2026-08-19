@@ -491,6 +491,147 @@ describe("UpdateService — cache seeding on register", () => {
     const r = service.getLastResult("test-plugin");
     assert.deepEqual(r, seeded);
   });
+
+  it("drops a cached verdict that describes a different running tag", () => {
+    // The container was updated while the cache still held the pre-update
+    // comparison. Restoring it renders "1.0.0 available" on a container
+    // already running 1.0.0, and it survives every restart until a real
+    // check happens to land.
+    const cache = new MemoryUpdateCache();
+    cache.save({
+      "test-plugin": {
+        pluginId: "test-plugin",
+        containerName: "test-plugin",
+        runningTag: "0.6.10",
+        tagKind: "semver",
+        currentVersion: "0.6.10",
+        latestVersion: "1.0.0",
+        updateAvailable: true,
+        reason: "newer-version",
+        checkedAt: "2026-04-01T00:00:00.000Z",
+        lastSuccessfulCheckAt: "2026-04-01T00:00:00.000Z",
+        fromCache: false,
+      },
+    });
+    const { service } = makeService({ cache });
+    service.register(basicReg({ currentTag: () => "1.0.0" }));
+    assert.equal(service.getLastResult("test-plugin"), null);
+  });
+
+  it("evicts the stale entry so an offline check cannot resurface it", async () => {
+    // handleOffline() and buildUnknownResult() read cachedResults directly,
+    // so skipping the seed alone would let the same wrong verdict return via
+    // the first offline or container-not-running check.
+    const cache = new MemoryUpdateCache();
+    cache.save({
+      "test-plugin": {
+        pluginId: "test-plugin",
+        containerName: "test-plugin",
+        runningTag: "0.6.10",
+        tagKind: "semver",
+        currentVersion: "0.6.10",
+        latestVersion: "1.0.0",
+        updateAvailable: true,
+        reason: "newer-version",
+        checkedAt: "2026-04-01T00:00:00.000Z",
+        lastSuccessfulCheckAt: "2026-04-01T00:00:00.000Z",
+        fromCache: false,
+      },
+    });
+    const { service } = makeService({
+      cache,
+      containers: {
+        getRuntime: () => ({ runtime: "podman", version: "5.4.2" }) as never,
+        getState: async () => "stopped" as ContainerState,
+        pullImage: async () => {},
+        getImageDigest: async () => null,
+      },
+    });
+    service.register(basicReg({ currentTag: () => "1.0.0" }));
+    const r = await service.checkOne("test-plugin");
+    assert.equal(r.updateAvailable, false);
+    assert.equal(r.latestVersion, null, "must not carry the evicted verdict");
+  });
+
+  it("keeps the cached verdict when the running tag still matches", () => {
+    // The offshore case the cache exists for: reboot with no uplink on the
+    // same version must still show the last known-good result.
+    const cache = new MemoryUpdateCache();
+    const seeded: UpdateCheckResult = {
+      pluginId: "test-plugin",
+      containerName: "test-plugin",
+      runningTag: "1.0.0",
+      tagKind: "semver",
+      currentVersion: "1.0.0",
+      latestVersion: "1.2.0",
+      updateAvailable: true,
+      reason: "newer-version",
+      checkedAt: "2026-04-01T00:00:00.000Z",
+      lastSuccessfulCheckAt: "2026-04-01T00:00:00.000Z",
+      fromCache: false,
+    };
+    cache.save({ "test-plugin": seeded });
+    const { service } = makeService({ cache });
+    service.register(basicReg({ currentTag: () => "1.0.0" }));
+    assert.deepEqual(service.getLastResult("test-plugin"), seeded);
+  });
+});
+
+const MAX_INITIAL_DELAY_MS = 5 * 60 * 1000;
+const MIN_RECURRING_DELAY_MS = 20 * 60 * 60 * 1000;
+
+describe("UpdateService — first check scheduling", () => {
+  it("schedules the first check on a short delay, not a full interval", () => {
+    // Registration happens while the container is still starting, so the
+    // container-state gate usually reports not-running on the first attempt.
+    // Retrying only after a full interval leaves a restored cache entry on
+    // screen for up to a day.
+    const { service, clock } = makeService({ backgroundChecks: true });
+    service.register(basicReg({ checkInterval: "24h" }));
+    const first = clock.timers.find((t) => !t.fired);
+    assert.ok(first, "expected a scheduled first check");
+    assert.ok(
+      first.delayMs < MAX_INITIAL_DELAY_MS,
+      `first check should be minutes away, got ${first.delayMs}ms`,
+    );
+  });
+
+  it("returns to the configured interval after the first check", async () => {
+    const { service, clock } = makeService({ backgroundChecks: true });
+    service.register(basicReg({ checkInterval: "24h" }));
+    clock.fireNext();
+    // The reschedule runs in the check's .finally(), so let it settle.
+    await new Promise((r) => setImmediate(r));
+    const next = clock.timers.find((t) => !t.fired);
+    assert.ok(next, "expected a rescheduled check");
+    // 24h minus at most 10% jitter.
+    assert.ok(
+      next.delayMs > MIN_RECURRING_DELAY_MS,
+      `recurring check should keep the configured interval, got ${next.delayMs}ms`,
+    );
+  });
+  it("keeps retrying on the short delay while the container is not running", async () => {
+    // A first boot that pulls the image can outlast the initial delay; falling
+    // back to the 24h interval there would leave the panel wrong for a day.
+    const { service, clock } = makeService({
+      backgroundChecks: true,
+      containers: {
+        getRuntime: () => ({ runtime: "podman", version: "5.4.2" }) as never,
+        getState: async () => "starting" as ContainerState,
+        pullImage: async () => {},
+        getImageDigest: async () => null,
+      },
+    });
+    service.register(basicReg({ checkInterval: "24h" }));
+    clock.fireNext();
+    await new Promise((r) => setImmediate(r));
+    const next = clock.timers.find((t) => !t.fired);
+    assert.ok(next, "expected a rescheduled check");
+    assert.ok(
+      next.delayMs < MAX_INITIAL_DELAY_MS,
+      `should retry soon while not running, got ${next.delayMs}ms`,
+    );
+  });
 });
 
 describe("UpdateService — notification on transition", () => {

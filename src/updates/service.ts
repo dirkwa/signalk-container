@@ -51,6 +51,20 @@ export interface UpdateServiceOptions {
 
 const DEFAULT_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24h
 const MIN_INTERVAL_MS = 60 * 60 * 1000; // 1h
+// The first check after registration runs on its own short delay rather than a
+// full interval. Registration happens during container startup, so the
+// container-state gate below usually reports not-yet-running on the very first
+// attempt; waiting a whole interval to retry leaves a restored cache entry on
+// screen for up to a day. Not floored by MIN_INTERVAL_MS — that floor exists to
+// keep the *recurring* poll off the registry, and this fires once per
+// registration.
+const FIRST_CHECK_DELAY_MS = 45 * 1000;
+// An "unknown" result means the check never ran — no runtime yet, or the
+// container is not running. On a first boot that pulls the image over a slow
+// link this can outlast the delay above, and falling straight back to the
+// recurring interval would leave the panel wrong for up to a day. Retry on the
+// short delay a bounded number of times before settling into the normal poll.
+const MAX_STARTUP_RETRIES = 10;
 const DEFAULT_STRIKE_LIMIT = 5;
 
 interface RegistrationState {
@@ -61,6 +75,8 @@ interface RegistrationState {
   inFlight: Promise<UpdateCheckResult> | null;
   /** Consecutive REAL errors (offline doesn't count). */
   consecutiveErrors: number;
+  /** Short-delay retries used while the first check keeps returning "unknown". */
+  startupRetries: number;
   /** Last result, used for transition detection. */
   lastResult: UpdateCheckResult | null;
 }
@@ -109,8 +125,29 @@ export class UpdateService implements UpdateServiceApi {
     );
 
     // Seed lastResult from persisted cache so the first UI poll after
-    // a server restart returns the cached value, not "unknown".
-    const cached = this.cachedResults[reg.pluginId] ?? null;
+    // a server restart returns the cached value, not "unknown" — but only
+    // when that verdict still describes the container that is actually
+    // running. A cached "0.6.10 -> 1.0.0 available" restored onto a container
+    // now running 1.0.0 renders as "update available" for a version already
+    // installed, and survives every restart until a real check happens to
+    // land. Comparing against the live tag keeps the offshore case (reboot on
+    // the same version, no uplink) while dropping a verdict that has been
+    // overtaken by an update.
+    const persisted = this.cachedResults[reg.pluginId] ?? null;
+    const liveTag = safeCallTag(reg);
+    const stale = persisted !== null && persisted.runningTag !== liveTag;
+    if (stale) {
+      // Evict rather than just skip the seed: handleOffline() and
+      // buildUnknownResult() read cachedResults directly, so a merely
+      // unseeded entry would resurface through them on the first offline or
+      // container-not-running check — the same wrong verdict by another path.
+      this.opts.app.debug(
+        `[updates] dropping cached result for ${reg.pluginId}: it describes ${persisted.runningTag}, running ${liveTag}`,
+      );
+      delete this.cachedResults[reg.pluginId];
+      this.opts.cache.save(this.cachedResults);
+    }
+    const cached = stale ? null : persisted;
 
     const state: RegistrationState = {
       reg,
@@ -118,6 +155,7 @@ export class UpdateService implements UpdateServiceApi {
       timer: null,
       inFlight: null,
       consecutiveErrors: 0,
+      startupRetries: 0,
       lastResult: cached,
     };
     this.registrations.set(reg.pluginId, state);
@@ -127,7 +165,8 @@ export class UpdateService implements UpdateServiceApi {
     );
 
     if (this.backgroundChecks) {
-      this.scheduleNext(state);
+      // First check soon, then on the normal interval.
+      this.scheduleNext(state, true);
     }
   }
 
@@ -186,11 +225,13 @@ export class UpdateService implements UpdateServiceApi {
 
   // ---------- internals ----------
 
-  private scheduleNext(state: RegistrationState): void {
+  private scheduleNext(state: RegistrationState, first = false): void {
     if (this.stopped || !this.backgroundChecks) return;
     // ±10% jitter so multiple plugins don't all hit the API simultaneously.
     const jitter = state.intervalMs * 0.1 * (Math.random() * 2 - 1);
-    const delay = Math.max(MIN_INTERVAL_MS, state.intervalMs + jitter);
+    const delay = first
+      ? FIRST_CHECK_DELAY_MS
+      : Math.max(MIN_INTERVAL_MS, state.intervalMs + jitter);
     state.timer = this.opts.clock.setTimer(() => {
       this.runCheck(state)
         .catch((err) => {
@@ -200,9 +241,14 @@ export class UpdateService implements UpdateServiceApi {
           );
         })
         .finally(() => {
-          if (this.registrations.has(state.reg.pluginId)) {
-            this.scheduleNext(state);
-          }
+          if (!this.registrations.has(state.reg.pluginId)) return;
+          // "unknown" means the check never ran. Keep the short cadence until
+          // the container is actually up, then fall back to the interval.
+          const retry =
+            state.lastResult?.reason === "unknown" &&
+            state.startupRetries < MAX_STARTUP_RETRIES;
+          state.startupRetries = retry ? state.startupRetries + 1 : 0;
+          this.scheduleNext(state, retry);
         });
     }, delay);
   }
