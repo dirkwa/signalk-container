@@ -77,6 +77,8 @@ interface RegistrationState {
   consecutiveErrors: number;
   /** Short-delay retries used while the first check keeps returning "unknown". */
   startupRetries: number;
+  /** Set once a check has actually run; the short cadence is startup-only. */
+  startupDone: boolean;
   /** Last result, used for transition detection. */
   lastResult: UpdateCheckResult | null;
 }
@@ -161,6 +163,7 @@ export class UpdateService implements UpdateServiceApi {
       inFlight: null,
       consecutiveErrors: 0,
       startupRetries: 0,
+      startupDone: false,
       lastResult: cached,
     };
     this.registrations.set(reg.pluginId, state);
@@ -253,12 +256,19 @@ export class UpdateService implements UpdateServiceApi {
           // timer on the state it finds in the map. A replaced state
           // rescheduling here leaks a timer nothing can cancel.
           if (!this.isCurrent(state)) return;
-          // "unknown" means the check never ran. Keep the short cadence until
-          // the container is actually up, then fall back to the interval.
+          // "unknown" means the check never ran. Keep the short cadence while
+          // the container is still coming up, then fall back to the interval.
           const unknown = state.lastResult?.reason === "unknown";
-          const retry = unknown && state.startupRetries < MAX_STARTUP_RETRIES;
-          // Reset only once a check actually ran; resetting on an exhausted
-          // "unknown" would re-arm the short cadence forever.
+          // Startup-only: once any check has actually run, a later "unknown"
+          // is an ordinary stopped container (the user disabled the plugin,
+          // say) and must not re-arm the 45s cadence months into a voyage.
+          if (!unknown) state.startupDone = true;
+          const retry =
+            unknown &&
+            !state.startupDone &&
+            state.startupRetries < MAX_STARTUP_RETRIES;
+          // Count every startup "unknown", so an exhausted budget stays
+          // exhausted instead of resetting and re-arming the short cadence.
           state.startupRetries = unknown ? state.startupRetries + 1 : 0;
           this.scheduleNext(state, { first: retry });
         });
