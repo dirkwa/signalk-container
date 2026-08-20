@@ -819,6 +819,44 @@ describe("UpdateService — first check scheduling", () => {
       `should retry soon while not running, got ${next.delayMs}ms`,
     );
   });
+  it("a successful first check ends the short cadence for good", async () => {
+    // The short retry is startup-only. Once a check has actually run, a later
+    // "unknown" is an ordinary stopped container — the user disabling the
+    // plugin, say — and must not re-arm the 45s cadence months later.
+    let state: ContainerState = "running";
+    const { service, clock } = makeService({
+      backgroundChecks: true,
+      containers: {
+        getRuntime: () => dummyRuntime,
+        getState: async () => state,
+        pullImage: async () => {},
+        getImageDigest: async () => null,
+      },
+    });
+    service.register(basicReg({ checkInterval: "24h" }));
+
+    // First check succeeds.
+    clock.fireNext();
+    await new Promise((r) => setImmediate(r));
+    const afterFirst = clock.timers.find((t) => !t.fired);
+    assert.ok(afterFirst);
+    assert.ok(
+      afterFirst.delayMs > MIN_RECURRING_DELAY_MS,
+      `a successful check should use the interval, got ${afterFirst.delayMs}ms`,
+    );
+
+    // Container is stopped later; the recurring check now returns "unknown".
+    state = "stopped";
+    clock.fireNext();
+    await new Promise((r) => setImmediate(r));
+    const afterUnknown = clock.timers.find((t) => !t.fired);
+    assert.ok(afterUnknown);
+    assert.ok(
+      afterUnknown.delayMs > MIN_RECURRING_DELAY_MS,
+      `a later unknown must keep the interval, got ${afterUnknown.delayMs}ms`,
+    );
+  });
+
   it("stops retrying on the short delay once the startup budget is spent", async () => {
     // Resetting the counter the moment retries run out would re-arm the short
     // cadence forever: a disabled plugin would poll every 45s indefinitely.
