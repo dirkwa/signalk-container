@@ -252,7 +252,7 @@ export class UpdateService implements UpdateServiceApi {
           // completion replaces the state, and unregister() only clears the
           // timer on the state it finds in the map. A replaced state
           // rescheduling here leaks a timer nothing can cancel.
-          if (this.registrations.get(state.reg.pluginId) !== state) return;
+          if (!this.isCurrent(state)) return;
           // "unknown" means the check never ran. Keep the short cadence until
           // the container is actually up, then fall back to the interval.
           const unknown = state.lastResult?.reason === "unknown";
@@ -432,6 +432,17 @@ export class UpdateService implements UpdateServiceApi {
   }
 
   /**
+   * Whether this state is still the live registration. A re-register between
+   * a check starting and finishing replaces the state object; anything the
+   * abandoned check then writes — cachedResults, notifications, an
+   * auto-unregister — lands on the replacement's behalf and can undo work the
+   * new registration just did.
+   */
+  private isCurrent(state: RegistrationState): boolean {
+    return this.registrations.get(state.reg.pluginId) === state;
+  }
+
+  /**
    * Cached result for this registration, but only when it describes the tag
    * that is running now. An in-session update (Apply update, no re-register)
    * moves runningTag while the cached comparison still refers to the version
@@ -496,7 +507,9 @@ export class UpdateService implements UpdateServiceApi {
       `[updates] check failed for ${state.reg.pluginId} (strike ${state.consecutiveErrors}/${this.strikeLimit}): ${error}`,
     );
 
-    if (state.consecutiveErrors >= this.strikeLimit) {
+    // Strikes belong to the state that accrued them: a superseded check must
+    // not unregister the replacement that took its place.
+    if (state.consecutiveErrors >= this.strikeLimit && this.isCurrent(state)) {
       this.opts.app.error(
         `[updates] auto-unregistering ${state.reg.pluginId} after ${this.strikeLimit} consecutive errors`,
       );
@@ -555,6 +568,10 @@ export class UpdateService implements UpdateServiceApi {
     state.consecutiveErrors = 0;
     const previous = state.lastResult;
     state.lastResult = result;
+    // A superseded state must not write the shared cache: its verdict
+    // describes the container the replacement has already moved on from, and
+    // persisting it here would undo the eviction register() just performed.
+    if (!this.isCurrent(state)) return;
     this.cachedResults[state.reg.pluginId] = result;
     this.opts.cache.save(this.cachedResults);
 
