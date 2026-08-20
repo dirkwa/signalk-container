@@ -170,8 +170,7 @@ export class UpdateService implements UpdateServiceApi {
     );
 
     if (this.backgroundChecks) {
-      // First check soon, then on the normal interval.
-      this.scheduleNext(state, true);
+      this.scheduleNext(state, { first: true });
     }
   }
 
@@ -230,11 +229,14 @@ export class UpdateService implements UpdateServiceApi {
 
   // ---------- internals ----------
 
-  private scheduleNext(state: RegistrationState, first = false): void {
+  private scheduleNext(
+    state: RegistrationState,
+    opts: { first?: boolean } = {},
+  ): void {
     if (this.stopped || !this.backgroundChecks) return;
     // ±10% jitter so multiple plugins don't all hit the API simultaneously.
     const jitter = state.intervalMs * 0.1 * (Math.random() * 2 - 1);
-    const delay = first
+    const delay = opts.first
       ? FIRST_CHECK_DELAY_MS
       : Math.max(MIN_INTERVAL_MS, state.intervalMs + jitter);
     state.timer = this.opts.clock.setTimer(() => {
@@ -246,14 +248,19 @@ export class UpdateService implements UpdateServiceApi {
           );
         })
         .finally(() => {
-          if (!this.registrations.has(state.reg.pluginId)) return;
+          // Identity, not just presence: a re-register between scheduling and
+          // completion replaces the state, and unregister() only clears the
+          // timer on the state it finds in the map. A replaced state
+          // rescheduling here leaks a timer nothing can cancel.
+          if (this.registrations.get(state.reg.pluginId) !== state) return;
           // "unknown" means the check never ran. Keep the short cadence until
           // the container is actually up, then fall back to the interval.
-          const retry =
-            state.lastResult?.reason === "unknown" &&
-            state.startupRetries < MAX_STARTUP_RETRIES;
-          state.startupRetries = retry ? state.startupRetries + 1 : 0;
-          this.scheduleNext(state, retry);
+          const unknown = state.lastResult?.reason === "unknown";
+          const retry = unknown && state.startupRetries < MAX_STARTUP_RETRIES;
+          // Reset only once a check actually ran; resetting on an exhausted
+          // "unknown" would re-arm the short cadence forever.
+          state.startupRetries = unknown ? state.startupRetries + 1 : 0;
+          this.scheduleNext(state, { first: retry });
         });
     }, delay);
   }
@@ -424,6 +431,21 @@ export class UpdateService implements UpdateServiceApi {
     return result;
   }
 
+  /**
+   * Cached result for this registration, but only when it describes the tag
+   * that is running now. An in-session update (Apply update, no re-register)
+   * moves runningTag while the cached comparison still refers to the version
+   * it replaced; reusing it there reports versions — and an updateAvailable —
+   * for an image that is no longer installed.
+   */
+  private cachedFor(
+    state: RegistrationState,
+    runningTag: string,
+  ): UpdateCheckResult | undefined {
+    const cached = this.cachedResults[state.reg.pluginId];
+    return cached && cached.runningTag === runningTag ? cached : undefined;
+  }
+
   private handleOffline(
     state: RegistrationState,
     runningTag: string,
@@ -431,13 +453,8 @@ export class UpdateService implements UpdateServiceApi {
     checkedAt: string,
   ): UpdateCheckResult {
     this.opts.app.debug(`[updates] offline for ${state.reg.pluginId}`);
-    const cached = this.cachedResults[state.reg.pluginId];
-    // Only reuse a verdict computed for the tag that is running now. An
-    // in-session update (Apply update, no re-register) moves runningTag while
-    // the cached comparison still refers to the version it replaced —
-    // carrying its updateAvailable forward would advertise an update for a
-    // version already installed.
-    if (cached && cached.runningTag === runningTag) {
+    const cached = this.cachedFor(state, runningTag);
+    if (cached) {
       const result: UpdateCheckResult = {
         ...cached,
         runningTag,
@@ -486,7 +503,7 @@ export class UpdateService implements UpdateServiceApi {
       this.unregister(state.reg.pluginId);
     }
 
-    const cached = this.cachedResults[state.reg.pluginId];
+    const cached = this.cachedFor(state, runningTag);
     const result: UpdateCheckResult = {
       pluginId: state.reg.pluginId,
       containerName: state.reg.containerName,
@@ -512,7 +529,7 @@ export class UpdateService implements UpdateServiceApi {
     checkedAt: string,
     extra: { reason: "unknown"; error?: string },
   ): UpdateCheckResult {
-    const cached = this.cachedResults[state.reg.pluginId];
+    const cached = this.cachedFor(state, runningTag);
     const result: UpdateCheckResult = {
       pluginId: state.reg.pluginId,
       containerName: state.reg.containerName,

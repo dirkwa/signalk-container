@@ -541,7 +541,7 @@ describe("UpdateService — cache seeding on register", () => {
     const { service } = makeService({
       cache,
       containers: {
-        getRuntime: () => ({ runtime: "podman", version: "5.4.2" }) as never,
+        getRuntime: () => dummyRuntime,
         getState: async () => "stopped" as ContainerState,
         pullImage: async () => {},
         getImageDigest: async () => null,
@@ -634,7 +634,7 @@ describe("UpdateService — offline reuse", () => {
       cache,
       // Registered on the old tag, so the entry survives register().
       containers: {
-        getRuntime: () => ({ runtime: "podman", version: "5.4.2" }) as never,
+        getRuntime: () => dummyRuntime,
         getState: async () => "running" as ContainerState,
         pullImage: async () => {},
         getImageDigest: async () => null,
@@ -696,7 +696,7 @@ describe("UpdateService — first check scheduling", () => {
     const { service, clock } = makeService({
       backgroundChecks: true,
       containers: {
-        getRuntime: () => ({ runtime: "podman", version: "5.4.2" }) as never,
+        getRuntime: () => dummyRuntime,
         getState: async () => "starting" as ContainerState,
         pullImage: async () => {},
         getImageDigest: async () => null,
@@ -710,6 +710,30 @@ describe("UpdateService — first check scheduling", () => {
     assert.ok(
       next.delayMs < MAX_INITIAL_DELAY_MS,
       `should retry soon while not running, got ${next.delayMs}ms`,
+    );
+  });
+  it("stops retrying on the short delay once the startup budget is spent", async () => {
+    // Resetting the counter the moment retries run out would re-arm the short
+    // cadence forever: a disabled plugin would poll every 45s indefinitely.
+    const { service, clock } = makeService({
+      backgroundChecks: true,
+      containers: {
+        getRuntime: () => dummyRuntime,
+        getState: async () => "stopped" as ContainerState,
+        pullImage: async () => {},
+        getImageDigest: async () => null,
+      },
+    });
+    service.register(basicReg({ checkInterval: "24h" }));
+    for (let i = 0; i < 12; i++) {
+      clock.fireNext();
+      await new Promise((r) => setImmediate(r));
+    }
+    const next = clock.timers.find((t) => !t.fired);
+    assert.ok(next, "expected a rescheduled check");
+    assert.ok(
+      next.delayMs > MIN_RECURRING_DELAY_MS,
+      `budget spent, should be back on the interval, got ${next.delayMs}ms`,
     );
   });
 });
