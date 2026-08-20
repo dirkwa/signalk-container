@@ -660,6 +660,113 @@ describe("UpdateService — offline reuse", () => {
   });
 });
 
+describe("UpdateService — superseded state", () => {
+  it("an in-flight check from a replaced state cannot rewrite the cache", async () => {
+    // Re-register (e.g. the plugin restarted after an update) replaces the
+    // state and evicts the stale entry. A check that started before that must
+    // not persist its now-obsolete verdict on top of the clean cache.
+    const cache = new MemoryUpdateCache();
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const { service } = makeService({
+      cache,
+      containers: {
+        getRuntime: () => dummyRuntime,
+        getState: async () => "running" as ContainerState,
+        pullImage: async () => {},
+        getImageDigest: async () => null,
+      },
+    });
+    service.register(
+      basicReg({
+        currentTag: () => "0.6.10",
+        versionSource: {
+          fetch: async () => {
+            await gate;
+            return { kind: "version", latest: "1.0.0" };
+          },
+        },
+      }),
+    );
+    const inFlight = service.checkOne("test-plugin");
+    // The container is updated and the plugin re-registers on the new tag.
+    service.unregister("test-plugin");
+    service.register(basicReg({ currentTag: () => "1.0.0" }));
+    release?.();
+    await inFlight;
+
+    assert.equal(
+      cache.load()["test-plugin"],
+      undefined,
+      "superseded check must not repopulate the cache",
+    );
+  });
+});
+
+describe("UpdateService — in-session tag change", () => {
+  const staleEntry = {
+    pluginId: "test-plugin",
+    containerName: "test-plugin",
+    runningTag: "0.6.10",
+    tagKind: "semver" as const,
+    currentVersion: "0.6.10",
+    latestVersion: "1.0.0",
+    updateAvailable: true,
+    reason: "newer-version" as const,
+    checkedAt: "2026-04-01T00:00:00.000Z",
+    lastSuccessfulCheckAt: "2026-04-01T00:00:00.000Z",
+    fromCache: false,
+  };
+
+  function serviceOn(
+    getState: () => Promise<ContainerState>,
+    fetch: () => Promise<never>,
+  ) {
+    const cache = new MemoryUpdateCache();
+    cache.save({ "test-plugin": staleEntry });
+    const { service } = makeService({
+      cache,
+      containers: {
+        getRuntime: () => dummyRuntime,
+        getState,
+        pullImage: async () => {},
+        getImageDigest: async () => null,
+      },
+    });
+    let tag = "0.6.10";
+    service.register(
+      basicReg({ currentTag: () => tag, versionSource: { fetch } }),
+    );
+    tag = "1.0.0"; // updated in-session, no re-register
+    return service;
+  }
+
+  it("a real error does not report versions for the replaced image", async () => {
+    const service = serviceOn(
+      async () => "running" as ContainerState,
+      () => Promise.reject(new Error("GitHub API 500")),
+    );
+    const r = await service.checkOne("test-plugin");
+    assert.equal(r.reason, "error");
+    assert.equal(r.fromCache, false);
+    assert.equal(r.currentVersion, null);
+    assert.equal(r.latestVersion, null);
+  });
+
+  it("an unknown result does not report versions for the replaced image", async () => {
+    const service = serviceOn(
+      async () => "stopped" as ContainerState,
+      () => Promise.reject(new Error("unused")),
+    );
+    const r = await service.checkOne("test-plugin");
+    assert.equal(r.reason, "unknown");
+    assert.equal(r.fromCache, false);
+    assert.equal(r.latestVersion, null);
+  });
+});
+
 describe("UpdateService — first check scheduling", () => {
   it("schedules the first check on a short delay, not a full interval", () => {
     // Registration happens while the container is still starting, so the
