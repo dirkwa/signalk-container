@@ -134,8 +134,13 @@ export class UpdateService implements UpdateServiceApi {
     // the same version, no uplink) while dropping a verdict that has been
     // overtaken by an update.
     const persisted = this.cachedResults[reg.pluginId] ?? null;
+    // safeCallTag() yields "" when currentTag() throws or has nothing to
+    // report yet. That is "unknown", not "different" — evicting on it would
+    // discard a good entry over a transient callback failure, which is the
+    // opposite of what the cache is for.
     const liveTag = safeCallTag(reg);
-    const stale = persisted !== null && persisted.runningTag !== liveTag;
+    const stale =
+      persisted !== null && liveTag !== "" && persisted.runningTag !== liveTag;
     if (stale) {
       // Evict rather than just skip the seed: handleOffline() and
       // buildUnknownResult() read cachedResults directly, so a merely
@@ -427,10 +432,15 @@ export class UpdateService implements UpdateServiceApi {
   ): UpdateCheckResult {
     this.opts.app.debug(`[updates] offline for ${state.reg.pluginId}`);
     const cached = this.cachedResults[state.reg.pluginId];
-    if (cached) {
+    // Only reuse a verdict computed for the tag that is running now. An
+    // in-session update (Apply update, no re-register) moves runningTag while
+    // the cached comparison still refers to the version it replaced —
+    // carrying its updateAvailable forward would advertise an update for a
+    // version already installed.
+    if (cached && cached.runningTag === runningTag) {
       const result: UpdateCheckResult = {
         ...cached,
-        runningTag, // current pin may differ from cached
+        runningTag,
         tagKind,
         checkedAt,
         reason: "offline",

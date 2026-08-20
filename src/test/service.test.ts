@@ -553,6 +553,36 @@ describe("UpdateService — cache seeding on register", () => {
     assert.equal(r.latestVersion, null, "must not carry the evicted verdict");
   });
 
+  it("keeps the cached verdict when currentTag() cannot report a tag", () => {
+    // safeCallTag() returns "" when the callback throws. That is "unknown",
+    // not "different" — evicting on it would discard a good entry over a
+    // transient failure.
+    const cache = new MemoryUpdateCache();
+    const seeded: UpdateCheckResult = {
+      pluginId: "test-plugin",
+      containerName: "test-plugin",
+      runningTag: "1.0.0",
+      tagKind: "semver",
+      currentVersion: "1.0.0",
+      latestVersion: "1.2.0",
+      updateAvailable: true,
+      reason: "newer-version",
+      checkedAt: "2026-04-01T00:00:00.000Z",
+      lastSuccessfulCheckAt: "2026-04-01T00:00:00.000Z",
+      fromCache: false,
+    };
+    cache.save({ "test-plugin": seeded });
+    const { service } = makeService({ cache });
+    service.register(
+      basicReg({
+        currentTag: () => {
+          throw new Error("settings not loaded yet");
+        },
+      }),
+    );
+    assert.deepEqual(service.getLastResult("test-plugin"), seeded);
+  });
+
   it("keeps the cached verdict when the running tag still matches", () => {
     // The offshore case the cache exists for: reboot with no uplink on the
     // same version must still show the last known-good result.
@@ -579,6 +609,56 @@ describe("UpdateService — cache seeding on register", () => {
 
 const MAX_INITIAL_DELAY_MS = 5 * 60 * 1000;
 const MIN_RECURRING_DELAY_MS = 20 * 60 * 60 * 1000;
+
+describe("UpdateService — offline reuse", () => {
+  it("does not carry a stale verdict forward when the running tag moved", async () => {
+    // An in-session update (Apply update, no re-register) moves runningTag
+    // while the cached comparison still describes the version it replaced.
+    const cache = new MemoryUpdateCache();
+    cache.save({
+      "test-plugin": {
+        pluginId: "test-plugin",
+        containerName: "test-plugin",
+        runningTag: "0.6.10",
+        tagKind: "semver",
+        currentVersion: "0.6.10",
+        latestVersion: "1.0.0",
+        updateAvailable: true,
+        reason: "newer-version",
+        checkedAt: "2026-04-01T00:00:00.000Z",
+        lastSuccessfulCheckAt: "2026-04-01T00:00:00.000Z",
+        fromCache: false,
+      },
+    });
+    const { service } = makeService({
+      cache,
+      // Registered on the old tag, so the entry survives register().
+      containers: {
+        getRuntime: () => ({ runtime: "podman", version: "5.4.2" }) as never,
+        getState: async () => "running" as ContainerState,
+        pullImage: async () => {},
+        getImageDigest: async () => null,
+      },
+    });
+    let tag = "0.6.10";
+    service.register(
+      basicReg({
+        currentTag: () => tag,
+        versionSource: {
+          fetch: () => Promise.reject(new Error("getaddrinfo ENOTFOUND")),
+        },
+      }),
+    );
+    // The container is updated in-session; no re-register happens.
+    tag = "1.0.0";
+    const r = await service.checkOne("test-plugin");
+    assert.equal(
+      r.updateAvailable,
+      false,
+      "must not advertise an update for the version now running",
+    );
+  });
+});
 
 describe("UpdateService — first check scheduling", () => {
   it("schedules the first check on a short delay, not a full interval", () => {
