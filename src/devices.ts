@@ -11,6 +11,7 @@
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import * as path from "node:path";
+import type { HostDeviceProbeResult } from "./types.js";
 import type { ContainerRuntimeInfo } from "./types.js";
 
 /**
@@ -556,25 +557,6 @@ function stripTrailingSlashes(p: string): string {
   return p.slice(0, end);
 }
 
-/** What a host-device probe found. */
-export interface HostDeviceProbeResult {
-  /** The path exists on the host and holds at least one device node. */
-  exists: boolean;
-  /**
-   * Device node names found directly under `path`, sorted. Empty when `path`
-   * is itself a node rather than a directory, or when nothing was found.
-   */
-  nodes: string[];
-  /**
-   * Host group NAMES owning those nodes, sorted and de-duplicated, falling
-   * back to the numeric gid when a group has no name.
-   *
-   * These are what `ContainerConfig.groupAdd` wants: group ownership is the
-   * gate on a device node, and the gid differs per distro and per install, so
-   * a hardcoded number silently loses access on someone else's machine.
-   */
-  groups: string[];
-}
 
 /** Parse an `/etc/group` body into gid -> name. */
 export function parseGroupNames(contents: string): Map<number, string> {
@@ -655,38 +637,73 @@ export async function probeHostDevice(
   const known = new Set(names.values());
 
   // Under rootless podman every gid read inside the probe comes back as the
-  // overflow id, so the numbers carry no information. Fall back to udev's
-  // naming convention for the nodes we found, keeping only names the host
-  // actually defines — a name the host does not have would make groupAdd
-  // warn and skip.
+  // overflow id, so the numbers carry no information.
   const usable = remote.gids.filter((gid) => gid !== OVERFLOW_GID);
-  const groups =
-    usable.length > 0
-      ? gidsToGroups(usable, names)
-      : [
-          ...new Set(
-            remote.nodes
-              .map(conventionalDrmGroup)
-              .filter((name): name is string => name !== null && known.has(name)),
-          ),
-        ].sort();
+  if (usable.length > 0) {
+    return {
+      exists: remote.nodes.length > 0,
+      nodes: [...remote.nodes].sort(),
+      groups: gidsToGroups(usable, names),
+    };
+  }
+
+  // No usable gid. Fall back to udev's naming convention, which is only
+  // defined for DRM nodes — `card*` and `renderD*` are reliably `video` and
+  // `render` on every distro. Keep only names the host actually defines; one
+  // it does not have would make groupAdd warn and skip.
+  const conventional = [
+    ...new Set(
+      remote.nodes
+        .map(conventionalDrmGroup)
+        .filter((name): name is string => name !== null && known.has(name)),
+    ),
+  ].sort();
+
+  // For anything else — /dev/snd, /dev/input — there is no convention to fall
+  // back on, and answering `exists: true` with no groups would have the caller
+  // pass the device through with no group to open it, failing silently at
+  // runtime. "Unknown" is the honest answer.
+  if (conventional.length === 0) return null;
 
   return {
     exists: remote.nodes.length > 0,
     nodes: [...remote.nodes].sort(),
-    groups,
+    groups: conventional,
   };
 }
 
 /** Read a device directory on this process's own filesystem. */
 async function readDeviceDir(
-  path: string,
+  devicePath: string,
   options: {
     readDir: (p: string) => Promise<string[]>;
     statPath: (p: string) => Promise<{ isCharacterDevice: boolean; gid: number }>;
     readFile: (p: string) => Promise<string>;
   },
 ): Promise<HostDeviceProbeResult | null> {
+  // A single node (`/dev/dri/card0`) is as valid a thing to ask about as a
+  // directory; readdir on one fails with ENOTDIR, which is not "absent".
+  try {
+    const st = await options.statPath(devicePath);
+    if (st.isCharacterDevice) {
+      const name = devicePath.slice(devicePath.lastIndexOf("/") + 1);
+      let groupFile = "";
+      try {
+        groupFile = await options.readFile("/etc/group");
+      } catch {
+        // Unreadable: numeric gid below.
+      }
+      return {
+        exists: true,
+        nodes: [name],
+        groups: gidsToGroups([st.gid], parseGroupNames(groupFile)),
+      };
+    }
+  } catch {
+    // Not there, or not statable: fall through to the directory attempt.
+  }
+
+  const path = devicePath;
   let entries: string[];
   try {
     entries = await options.readDir(path);
