@@ -981,12 +981,14 @@ Three results, and the difference matters:
 
 Treat `null` as "assume no device, but do not report it as absent".
 
-**Runtime differences.** Docker and rootless podman both resolve GPU nodes to
-the same group names, by different routes — rootless podman cannot read the
-host's numeric gids, so the probe confirms names against the host's own
-`/etc/group` instead. For devices with no naming convention (`/dev/snd`,
-`/dev/input`) rootless podman returns `null` rather than guess, since a device
-passed through without the group that opens it fails silently at runtime.
+**Runtime differences.** Docker reads the host's numeric gids and maps them to
+names. Rootless podman cannot — its user namespace does not map them — so the
+probe falls back to the DRM naming convention (`card*` → `video`,
+`renderD*` → `render`) and keeps the name only when the host's `/etc/group`
+defines it. GPU nodes therefore resolve identically on both. Anything without
+that convention (`/dev/snd`, `/dev/input`) returns `null` on rootless podman
+rather than a guess, since a device passed through without the group that
+opens it fails silently at runtime.
 
 ### Container namespace (multiple Signal K servers on one host)
 

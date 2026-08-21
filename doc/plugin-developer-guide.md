@@ -329,7 +329,7 @@ real gids and what the probe does instead.
 
 ### Optional and required volumes
 
-By default, `volumes` entries with a missing host path are auto-created as empty directories by the runtime — fine for plugin state dirs. When a volume represents a _user-managed_ or _deployment-required_ resource, use the `VolumeSpec` object form with an `ifMissing` policy:
+By default, `volumes` entries with a missing host path are auto-created as empty directories by the runtime — fine for plugin state dirs. When a volume represents a _user-managed_ or _deployment-required_ resource, use the `VolumeSpec` object form with an `ifMissing` policy (it also carries `readOnly`, see [Read-only volumes](#read-only-volumes)):
 
 - `"create"` (default, same as a bare string): runtime creates the host dir. Right for plugin state.
 - `"skip"`: signalk-container drops the volume when the host path is missing; the container starts without the mount. Right for optional USB drives, NFS mounts, baseline scans.
