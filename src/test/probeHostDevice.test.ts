@@ -161,6 +161,50 @@ describe("probeHostDevice (containerized)", () => {
     assert.deepEqual(wrongSource?.groups, ["44"]);
   });
 
+  // Rootless podman maps only the user's subgid range, so a host gid outside
+  // it (44 = video) is reported as the overflow id from every route into the
+  // namespace — probe container, --userns=host, keep-id, even podman unshare.
+  // The numbers carry no information there; the names must come from udev
+  // convention, confirmed against the host's own group file.
+  it("falls back to udev naming when gids are userns-remapped", async () => {
+    const result = await probeHostDevice("/dev/dri", {
+      containerized: true,
+      ...invisible,
+      runInContainer: () =>
+        Promise.resolve({
+          nodes: ["card0", "renderD128"],
+          gids: [65534, 65534],
+          groupFile: GROUP_FILE,
+        }),
+    });
+    assert.deepEqual(result?.groups, ["render", "video"]);
+  });
+
+  it("drops a conventional name the host does not actually define", async () => {
+    const result = await probeHostDevice("/dev/dri", {
+      containerized: true,
+      ...invisible,
+      runInContainer: () =>
+        Promise.resolve({
+          nodes: ["card0", "renderD128"],
+          gids: [65534, 65534],
+          // Host with no `render` group at all.
+          groupFile: "video:x:44:\n",
+        }),
+    });
+    assert.deepEqual(result?.groups, ["video"]);
+  });
+
+  it("prefers real gids when they are not remapped (docker)", async () => {
+    const result = await probeHostDevice("/dev/dri", {
+      containerized: true,
+      ...invisible,
+      runInContainer: () =>
+        Promise.resolve({ nodes: ["card0"], gids: [44], groupFile: GROUP_FILE }),
+    });
+    assert.deepEqual(result?.groups, ["video"]);
+  });
+
   it("reads the host's view through the probe container", async () => {
     const result = await probeHostDevice("/dev/dri", {
       containerized: true,

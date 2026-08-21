@@ -24,6 +24,7 @@ Instead of each plugin implementing its own container orchestration, they delega
 - **Host timezone propagation** -- managed containers and one-shot jobs get `TZ=<host zone>` injected automatically, so time-based logic inside them (cron-style Node-RED flows, Grafana/QuestDB time rendering, log timestamps) agrees with the host clock instead of defaulting to UTC. Consumer plugins that set `env.TZ` themselves keep full control; shell-level tools inside minimal images may additionally need the image's `tzdata` package to interpret the zone name. See the [developer guide](doc/plugin-developer-guide.md#host-timezone).
 - **SELinux support** -- `:Z` volume flags for Podman bind mounts on Fedora/RHEL; named volumes are handled correctly (`:Z` is not applied)
 - **Host device access** -- `ContainerConfig.devices` exposes host device nodes or whole device directories (`/dev/snd`, `/dev/input`, …) to a managed container — directory bindings are hot-plug-safe, so a USB replug keeps working without a recreate (individual nodes are attached statically and need one) — and `ContainerConfig.groupAdd` resolves host group names to the GIDs that own those nodes. Works across docker and rootless Podman (on rootless the access comes from the Podman caller's own host groups, so that user must be in the device-owning group); a missing device never blocks container start. See [Exposing host devices](#exposing-host-devices-devices-groupadd).
+- **Read-only volumes** -- `{ source, readOnly: true }` binds a volume `:ro`, for sharing a directory another component owns (charts published by a chart provider, say) without granting write access to it. 1.30.0+.
 - **Per-volume host-source policy** -- volumes accept `{ source, ifMissing: "skip" | "abort" }` for user-managed (USB drives, NFS) or deployment-required (TLS certs) mounts. Plugins subscribe to `onVolumeIssue` events for `'skipped'`, `'aborted'`, and `'recovered'` actions; signalk-container auto-recreates the container when a previously-missing source reappears. See the [developer guide](doc/plugin-developer-guide.md#optional-and-required-volumes).
 - **Container log streaming** -- click **Logs** on any managed-container card to open a live-streaming popup of the container's stdout+stderr (combined, the same shape `podman logs <name>` produces). Plugin authors can also wire `onContainerLog` in `ensureRunning` options to forward the same stream into their plugin's `app.debug` channel — visible in the Signal K server log when debug is enabled. Multiple subscribers share a single underlying log stream. See the [developer guide](doc/plugin-developer-guide.md#streaming-container-logs-into-your-plugins-debug-channel).
 - **Host-UID ownership alignment** -- managed containers run by default under the Signal K host user's UID/GID (via `--user host:host` on Docker/rootful Podman, `--userns=keep-id` on rootless Podman). Files created on bind mounts are owned by the same identity that runs Signal K, with no `chmod` sweeps. Override per container via `ContainerConfig.user` for images with a non-root `USER` directive, or `user: false` to opt out. See the [developer guide](doc/plugin-developer-guide.md#host-uid-ownership).
@@ -715,6 +716,47 @@ The deployment-mode resolution is identical to `signalkDataMount`: bare-metal re
 
 ### When SignalK runs in a container: self-container detection
 
+### Detecting host devices
+
+`probeHostDevice(path)` answers "does this machine have a GPU" — or any other
+device you might pass through — from a plugin that cannot see the host:
+
+```js
+const gpu = await containers.probeHostDevice('/dev/dri')
+if (gpu?.exists) {
+  config.devices = ['/dev/dri']
+  config.groupAdd = gpu.groups   // names, resolved per host
+}
+```
+
+A plugin cannot do this itself. `stat('/dev/dri')` reports on the plugin's own
+filesystem, which is the SignalK container whenever SignalK is containerized —
+and that container has no `/dev/dri` even on a machine with a GPU. The result
+is a silent false negative.
+
+`groups` are **names**, not gids, because that is what `groupAdd` needs: the
+gid of `render` or `video` differs per distro and per install, so a hardcoded
+number loses access on someone else's machine.
+
+Three results, and the difference matters:
+
+| Result                          | Meaning                                                |
+| ------------------------------- | ------------------------------------------------------ |
+| `{exists: true, nodes, groups}` | Device is there; pass `groups` to `groupAdd`            |
+| `{exists: false, …}`            | Definitely absent                                       |
+| `null`                          | **Unknown** — no runtime, or the host could not be read |
+
+Treat `null` as "assume no device, but do not report it as absent".
+
+**Runtime differences.** Under Docker the probe reads the real gids. Under
+**rootless podman** it cannot: a rootless user namespace maps only the user's
+subgid range, so a host gid outside it (44 = `video`) comes back as the
+overflow id from every route into that namespace — a probe container,
+`--userns=host`, `--userns=keep-id`, even `podman unshare`. The file *content*
+is undistorted, so the probe falls back to udev's naming convention
+(`card*` → `video`, `renderD*` → `render`) and keeps only names the host's own
+`/etc/group` actually defines. Both runtimes return the same answer.
+
 `signalkDataMount`, `signalkAccessiblePorts`, and `resolveHostPath` all need to know **which container** SignalK itself is running in (so they can read its mount list and join its network). signalk-container detects this automatically by cascading three signals — most reliable first:
 
 1. **`SIGNALK_CONTAINER_ID` environment variable** (explicit override)
@@ -901,6 +943,7 @@ See [doc/plugin-developer-guide.md](doc/plugin-developer-guide.md) for the full 
 | `updateResources(name, limits)`                 | Apply new resource limits live, fall back to recreate                                                                                                                                                                                                                                                                |
 | `getResources(name)`                            | Currently effective limits (plugin defaults ⊕ user override)                                                                                                                                                                                                                                                         |
 | `resolveSignalkDataMount()`                     | Resolve the volume name or host path that backs `app.getDataDirPath()` in the current deployment; returns `null` if the runtime is not yet initialised                                                                                                                                                               |
+| `probeHostDevice(path)`                         | Ask whether a device path exists **on the host** and which groups own its nodes — a plugin cannot `stat()` this itself once SignalK is containerized. Returns `null` for "unknown", which is not the same as `{exists:false}`. 1.30.0+                                                                                |
 | `resolveHostPath(absPath)`                      | Translate an arbitrary absolute path into the `{ source, subPath }` pair the runtime needs to mount it; handles bare-metal, bind, and named-volume topologies                                                                                                                                                        |
 | `resolveContainerAddress(name, port)`           | Return the `host:port` string to reach `port` on a managed container from the SignalK process; call after `ensureRunning()` with `signalkAccessiblePorts` set                                                                                                                                                        |
 | `doctor.imageRunsAsUser(image, user?)`          | Probe whether `image` runs cleanly under the host-UID mapping signalk-container will emit (1.8.0+). Never throws — returns `{ ok, output, error? }`                                                                                                                                                                  |

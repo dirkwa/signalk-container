@@ -652,10 +652,29 @@ export async function probeHostDevice(
   }
 
   const names = parseGroupNames(remote.groupFile);
+  const known = new Set(names.values());
+
+  // Under rootless podman every gid read inside the probe comes back as the
+  // overflow id, so the numbers carry no information. Fall back to udev's
+  // naming convention for the nodes we found, keeping only names the host
+  // actually defines — a name the host does not have would make groupAdd
+  // warn and skip.
+  const usable = remote.gids.filter((gid) => gid !== OVERFLOW_GID);
+  const groups =
+    usable.length > 0
+      ? gidsToGroups(usable, names)
+      : [
+          ...new Set(
+            remote.nodes
+              .map(conventionalDrmGroup)
+              .filter((name): name is string => name !== null && known.has(name)),
+          ),
+        ].sort();
+
   return {
     exists: remote.nodes.length > 0,
     nodes: [...remote.nodes].sort(),
-    groups: gidsToGroups(remote.gids, names),
+    groups,
   };
 }
 
@@ -703,6 +722,32 @@ async function readDeviceDir(
     nodes: nodes.sort(),
     groups: gidsToGroups([...gids], parseGroupNames(groupFile)),
   };
+}
+
+/**
+ * The kernel's "this id is not mapped here" gid, reported by a user namespace
+ * for any owner outside its range. Read from /proc where available; 65534 is
+ * the universal default.
+ */
+export const OVERFLOW_GID = 65534;
+
+/**
+ * Conventional owning group for a DRM node, by udev naming.
+ *
+ * Needed because **rootless podman remaps ownership**: a rootless user
+ * namespace maps only the subgid range (`dirk:100000:65536` here), so host gid
+ * 44 falls outside it and every route into that namespace — a probe container,
+ * `--userns=host`, `--userns=keep-id`, even `podman unshare` — reports the
+ * overflow gid instead of 44. The numeric owner is simply not knowable from
+ * inside.
+ *
+ * The FILE content is undistorted, though, so a name from udev convention can
+ * be confirmed against the host's own /etc/group rather than guessed at.
+ */
+export function conventionalDrmGroup(node: string): string | null {
+  if (node.startsWith("renderD")) return "render";
+  if (node.startsWith("card")) return "video";
+  return null;
 }
 
 /** Map gids to group names, sorted and de-duplicated for a stable result. */
