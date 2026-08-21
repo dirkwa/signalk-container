@@ -1259,7 +1259,7 @@ export interface LiveContainerConfig {
   command: string[] | null;
   networkMode: string;
   env: Map<string, string>;
-  binds: Array<{ host: string; container: string }>;
+  binds: Array<{ host: string; container: string; readOnly?: boolean }>;
   portBindings: Map<string, PortBinding[]>;
   extraHosts: Map<string, string>;
   /**
@@ -1371,7 +1371,8 @@ export async function getLiveContainerConfig(
 
   const networkMode = (rawNetworkMode ?? "").trim();
 
-  const binds: Array<{ host: string; container: string }> = [];
+  const binds: Array<{ host: string; container: string; readOnly?: boolean }> =
+    [];
   if (Array.isArray(rawBinds)) {
     for (const entry of rawBinds) {
       if (typeof entry !== "string") continue;
@@ -1384,17 +1385,22 @@ export async function getLiveContainerConfig(
       if (segments.length < 2) continue;
       // Walk backward: keep stripping trailing segments that look like
       // option flags (Z, z, ro, rw, etc.) until we have exactly host:container.
+      // `ro` is remembered rather than merely discarded — read-only is a
+      // semantic difference, so flipping it has to count as drift and
+      // recreate, not silently keep a writable mount.
       const FLAG_RE = /^[a-zA-Z,]+$/;
+      let readOnly = false;
       while (
         segments.length > 2 &&
         FLAG_RE.test(segments[segments.length - 1])
       ) {
-        segments.pop();
+        const flags = segments.pop() as string;
+        if (flags.split(",").includes("ro")) readOnly = true;
       }
       if (segments.length < 2) continue;
       const container = segments.pop() as string;
       const host = segments.join(":");
-      binds.push({ host, container });
+      binds.push({ host, container, readOnly });
     }
   }
 
@@ -1734,9 +1740,10 @@ export function diffContainerConfig(
   const requestedVolumes = new Map<string, string>();
   if (requested.volumes) {
     for (const [containerPath, raw] of Object.entries(requested.volumes)) {
+      const readOnly = typeof raw === "string" ? false : (raw.readOnly ?? false);
       requestedVolumes.set(
         stripTrailingSlash(containerPath),
-        stripTrailingSlash(volumeSource(raw)),
+        `${stripTrailingSlash(volumeSource(raw))}${readOnly ? ":ro" : ""}`,
       );
     }
   }
@@ -1750,8 +1757,12 @@ export function diffContainerConfig(
     );
   }
   const liveVolumes = new Map<string, string>();
-  for (const { host, container } of live.binds) {
-    liveVolumes.set(stripTrailingSlash(container), stripTrailingSlash(host));
+  for (const { host, container, readOnly } of live.binds) {
+    // Encode read-only into the compared value so toggling it drifts.
+    liveVolumes.set(
+      stripTrailingSlash(container),
+      `${stripTrailingSlash(host)}${readOnly === true ? ":ro" : ""}`,
+    );
   }
   let volumesDrift = requestedVolumes.size !== liveVolumes.size;
   if (!volumesDrift) {

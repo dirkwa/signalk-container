@@ -133,9 +133,9 @@ describe("probeHostDevice (containerized)", () => {
     assert.equal(result, null);
   });
 
-  // Regression, caught by an e2e against the real GPU that 16 unit tests
-  // missed: the group file must be the HOST's. An Alpine probe image has no
-  // gid 44, so reading its own /etc/group reported `video` as the number "44".
+  // The group file must be the HOST's: the gids on host device nodes are the
+  // host's, and a probe image does not share them, so reading the image's own
+  // /etc/group reports the bare number instead of the name.
   it("resolves names from the host's group file, not the probe image's", async () => {
     const alpineGroupFile = "root:x:0:root\nbin:x:1:root,bin\n";
     const result = await probeHostDevice("/dev/dri", {
@@ -195,6 +195,23 @@ describe("probeHostDevice (containerized)", () => {
     assert.deepEqual(result?.groups, ["video"]);
   });
 
+  // /dev/snd and /dev/input have no udev naming convention to fall back on.
+  // Reporting exists:true with no groups would have the caller pass the device
+  // through with nothing to open it — a silent runtime failure. Unknown is honest.
+  it("returns unknown for a non-DRM device whose ownership cannot be confirmed", async () => {
+    const result = await probeHostDevice("/dev/snd", {
+      containerized: true,
+      ...invisible,
+      runInContainer: () =>
+        Promise.resolve({
+          nodes: ["controlC0", "pcmC0D0p"],
+          gids: [65534, 65534],
+          groupFile: "audio:x:29:\n",
+        }),
+    });
+    assert.equal(result, null);
+  });
+
   it("prefers real gids when they are not remapped (docker)", async () => {
     const result = await probeHostDevice("/dev/dri", {
       containerized: true,
@@ -235,6 +252,37 @@ describe("probeHostDevice (containerized)", () => {
     });
     assert.equal(ran, false, "should not spawn a container when it can just read");
     assert.equal(result?.exists, true);
+  });
+});
+
+describe("probeHostDevice (single node path)", () => {
+  // Asking about /dev/dri/card0 is as reasonable as asking about /dev/dri;
+  // readdir on a node fails with ENOTDIR, which is not "absent".
+  it("probes a device node directly, not only a directory", async () => {
+    const result = await probeHostDevice("/dev/dri/card0", {
+      containerized: false,
+      readDir: () => Promise.reject(new Error("ENOTDIR")),
+      statPath: (p: string) =>
+        p === "/dev/dri/card0"
+          ? Promise.resolve({ isCharacterDevice: true, gid: 44 })
+          : Promise.reject(new Error("ENOENT")),
+      readFile: () => Promise.resolve(GROUP_FILE),
+    });
+    assert.deepEqual(result, {
+      exists: true,
+      nodes: ["card0"],
+      groups: ["video"],
+    });
+  });
+
+  it("still reports absent for a path that is neither node nor directory", async () => {
+    const result = await probeHostDevice("/dev/nope", {
+      containerized: false,
+      readDir: () => Promise.reject(new Error("ENOENT")),
+      statPath: () => Promise.reject(new Error("ENOENT")),
+      readFile: () => Promise.resolve(GROUP_FILE),
+    });
+    assert.deepEqual(result, { exists: false, nodes: [], groups: [] });
   });
 });
 

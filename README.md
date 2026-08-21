@@ -748,14 +748,12 @@ Three results, and the difference matters:
 
 Treat `null` as "assume no device, but do not report it as absent".
 
-**Runtime differences.** Under Docker the probe reads the real gids. Under
-**rootless podman** it cannot: a rootless user namespace maps only the user's
-subgid range, so a host gid outside it (44 = `video`) comes back as the
-overflow id from every route into that namespace — a probe container,
-`--userns=host`, `--userns=keep-id`, even `podman unshare`. The file *content*
-is undistorted, so the probe falls back to udev's naming convention
-(`card*` → `video`, `renderD*` → `render`) and keeps only names the host's own
-`/etc/group` actually defines. Both runtimes return the same answer.
+**Runtime differences.** Docker and rootless podman both resolve GPU nodes to
+the same group names, by different routes — rootless podman cannot read the
+host's numeric gids, so the probe confirms names against the host's own
+`/etc/group` instead. For devices with no naming convention (`/dev/snd`,
+`/dev/input`) rootless podman returns `null` rather than guess, since a device
+passed through without the group that opens it fails silently at runtime.
 
 `signalkDataMount`, `signalkAccessiblePorts`, and `resolveHostPath` all need to know **which container** SignalK itself is running in (so they can read its mount list and join its network). signalk-container detects this automatically by cascading three signals — most reliable first:
 

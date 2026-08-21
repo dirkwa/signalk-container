@@ -166,11 +166,11 @@ describe("getLiveContainerConfig", () => {
     );
     assert.ok(result);
     assert.deepEqual(result.binds, [
-      { host: "/host/path", container: "/data" },
+      { host: "/host/path", container: "/data", readOnly: false },
     ]);
   });
 
-  it("strips combined :ro,Z flags from binds", async () => {
+  it("records read-only and strips the remaining flags from binds", async () => {
     const result = await getLiveContainerConfig(
       dummyRuntime,
       "x",
@@ -184,7 +184,7 @@ describe("getLiveContainerConfig", () => {
     );
     assert.ok(result);
     assert.deepEqual(result.binds, [
-      { host: "/host/path", container: "/data" },
+      { host: "/host/path", container: "/data", readOnly: true },
     ]);
   });
 
@@ -201,7 +201,7 @@ describe("getLiveContainerConfig", () => {
       ),
     );
     assert.ok(result);
-    assert.deepEqual(result.binds, [{ host: "my-volume", container: "/data" }]);
+    assert.deepEqual(result.binds, [{ host: "my-volume", container: "/data", readOnly: false }]);
   });
 
   it("parses Env entries into a Map keyed by name", async () => {
@@ -316,8 +316,8 @@ describe("getLiveContainerConfig", () => {
     assert.deepEqual(result.command, ["/app/bin/run.sh"]);
     assert.equal(result.networkMode, "bridge");
     assert.deepEqual(result.binds, [
-      { host: "/host/data", container: "/data" },
-      { host: "my-cfg", container: "/etc/cfg" },
+      { host: "/host/data", container: "/data", readOnly: false },
+      { host: "my-cfg", container: "/etc/cfg", readOnly: false },
     ]);
     assert.equal(result.env.get("JAVA_OPTS"), "-Xmx2g");
     assert.equal(result.env.get("TZ"), "UTC");
