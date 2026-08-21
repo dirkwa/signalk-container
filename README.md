@@ -716,45 +716,6 @@ The deployment-mode resolution is identical to `signalkDataMount`: bare-metal re
 
 ### When SignalK runs in a container: self-container detection
 
-### Detecting host devices
-
-`probeHostDevice(path)` answers "does this machine have a GPU" — or any other
-device you might pass through — from a plugin that cannot see the host:
-
-```js
-const gpu = await containers.probeHostDevice('/dev/dri')
-if (gpu?.exists) {
-  config.devices = ['/dev/dri']
-  config.groupAdd = gpu.groups   // names, resolved per host
-}
-```
-
-A plugin cannot do this itself. `stat('/dev/dri')` reports on the plugin's own
-filesystem, which is the SignalK container whenever SignalK is containerized —
-and that container has no `/dev/dri` even on a machine with a GPU. The result
-is a silent false negative.
-
-`groups` are **names**, not gids, because that is what `groupAdd` needs: the
-gid of `render` or `video` differs per distro and per install, so a hardcoded
-number loses access on someone else's machine.
-
-Three results, and the difference matters:
-
-| Result                          | Meaning                                                |
-| ------------------------------- | ------------------------------------------------------ |
-| `{exists: true, nodes, groups}` | Device is there; pass `groups` to `groupAdd`            |
-| `{exists: false, …}`            | Definitely absent                                       |
-| `null`                          | **Unknown** — no runtime, or the host could not be read |
-
-Treat `null` as "assume no device, but do not report it as absent".
-
-**Runtime differences.** Docker and rootless podman both resolve GPU nodes to
-the same group names, by different routes — rootless podman cannot read the
-host's numeric gids, so the probe confirms names against the host's own
-`/etc/group` instead. For devices with no naming convention (`/dev/snd`,
-`/dev/input`) rootless podman returns `null` rather than guess, since a device
-passed through without the group that opens it fails silently at runtime.
-
 `signalkDataMount`, `signalkAccessiblePorts`, and `resolveHostPath` all need to know **which container** SignalK itself is running in (so they can read its mount list and join its network). signalk-container detects this automatically by cascading three signals — most reliable first:
 
 1. **`SIGNALK_CONTAINER_ID` environment variable** (explicit override)
@@ -987,6 +948,45 @@ All mounted at `/plugins/signalk-container/api/`:
 | Background update checks            | `true`   | Periodically check for updates in the background. Disable on metered connections — manual checks via the UI button still work.                                                                                                                                                                  |
 | Disable user-namespace remap        | `false`  | Suppress rootless-Podman `--userns=keep-id` on filesystems that cannot be id-mapped (ZFS, some encrypted FS). Secondary escape hatch only — the recommended primary fix is host-side `fuse-overlayfs` storage (see [ZFS host notes](#zfs-and-other-idmap-incompatible-filesystems)).            |
 | Container overrides                 | `{}`     | Per-container resource limits (CPU, memory, PIDs). Field-level merged on top of consumer plugin defaults. See dev guide.                                                                                                                                                                        |
+
+### Detecting host devices
+
+`probeHostDevice(path)` answers "does this machine have a GPU" — or any other
+device you might pass through — from a plugin that cannot see the host:
+
+```js
+const gpu = await containers.probeHostDevice?.('/dev/dri')
+if (gpu?.exists) {
+  config.devices = ['/dev/dri']
+  config.groupAdd = gpu.groups   // names, resolved per host
+}
+```
+
+A plugin cannot do this itself. `stat('/dev/dri')` reports on the plugin's own
+filesystem, which is the SignalK container whenever SignalK is containerized —
+and that container has no `/dev/dri` even on a machine with a GPU. The result
+is a silent false negative.
+
+`groups` are **names**, not gids, because that is what `groupAdd` needs: the
+gid of `render` or `video` differs per distro and per install, so a hardcoded
+number loses access on someone else's machine.
+
+Three results, and the difference matters:
+
+| Result                          | Meaning                                                |
+| ------------------------------- | ------------------------------------------------------ |
+| `{exists: true, nodes, groups}` | Device is there; pass `groups` to `groupAdd`            |
+| `{exists: false, …}`            | Definitely absent                                       |
+| `null`                          | **Unknown** — no runtime, or the host could not be read |
+
+Treat `null` as "assume no device, but do not report it as absent".
+
+**Runtime differences.** Docker and rootless podman both resolve GPU nodes to
+the same group names, by different routes — rootless podman cannot read the
+host's numeric gids, so the probe confirms names against the host's own
+`/etc/group` instead. For devices with no naming convention (`/dev/snd`,
+`/dev/input`) rootless podman returns `null` rather than guess, since a device
+passed through without the group that opens it fails silently at runtime.
 
 ### Container namespace (multiple Signal K servers on one host)
 

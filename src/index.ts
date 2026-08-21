@@ -489,6 +489,11 @@ export default (app: App) => {
    * "unknown" and moves on, so a bad candidate costs one cheap failed
    * container, not a wrong answer.
    */
+  /** Last path segment, for naming a probed node after the device not the mount. */
+  function basename(p: string): string {
+    return p.slice(p.lastIndexOf("/") + 1) || p;
+  }
+
   async function findLocalProbeImage(
     runtime: ContainerRuntimeInfo,
   ): Promise<string | null> {
@@ -1665,7 +1670,12 @@ export default (app: App) => {
             // Alpine probe has no gid 44 at all, so reading its own
             // /etc/group turned `video` into the bare number "44".
             command: [
-              `for f in ${PROBE_MOUNT}/*; do [ -c "$f" ] && echo "N $(basename "$f") $(stat -c %g "$f")"; done; ` +
+              // The mount is either the device node itself or a directory of
+              // them; handle both, as the local path does.
+              // A node mount lands at PROBE_MOUNT, so its basename would be
+              // "probe" — report the requested path's own name instead.
+              `if [ -c ${PROBE_MOUNT} ]; then echo "N ${basename(hostPath)} $(stat -c %g ${PROBE_MOUNT})"; ` +
+                `else for f in ${PROBE_MOUNT}/*; do [ -c "$f" ] && echo "N $(basename "$f") $(stat -c %g "$f")"; done; fi; ` +
                 `echo "---"; cat ${PROBE_GROUP_MOUNT} 2>/dev/null || true`,
             ],
             inputs: {
