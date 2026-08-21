@@ -4,6 +4,7 @@ import {
   parseGroupNames,
   parseProbeOutput,
   probeHostDevice,
+  PROBE_SELF_MARKER,
 } from "../devices.js";
 
 const GROUP_FILE = "root:x:0:\nvideo:x:44:dirk\nrender:x:992:\n";
@@ -295,6 +296,21 @@ describe("probeHostDevice (single node path)", () => {
       readFile: () => Promise.resolve(GROUP_FILE),
     });
     assert.deepEqual(result, { exists: false, nodes: [], groups: [] });
+  });
+});
+
+describe("probe command safety", () => {
+  // The probe runs a shell. A device path is caller-supplied, so it must never
+  // reach the command string — only the two constant mount points do, and the
+  // node's real name is substituted afterwards from the marker.
+  it("names a self-mounted node without interpolating the path", () => {
+    const parsed = parseProbeOutput(`N ${PROBE_SELF_MARKER} 44\n---\n${GROUP_FILE}`);
+    assert.deepEqual(parsed.nodes, [PROBE_SELF_MARKER]);
+    // The caller maps the marker to the requested basename.
+    const named = parsed.nodes.map((n) =>
+      n === PROBE_SELF_MARKER ? "card0" : n,
+    );
+    assert.deepEqual(named, ["card0"]);
   });
 });
 

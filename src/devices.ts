@@ -796,6 +796,16 @@ export const PROBE_MOUNT = "/probe";
 export const PROBE_GROUP_MOUNT = "/probe-group";
 
 /**
+ * Stand-in the probe emits when the mount IS the device node.
+ *
+ * The mount point is named `/probe`, so its basename would name every node
+ * "probe"; the caller swaps this for the requested path's real name. A literal
+ * marker rather than the path itself, so nothing caller-supplied is ever
+ * interpolated into the shell command.
+ */
+export const PROBE_SELF_MARKER = "__self__";
+
+/**
  * Ceiling on the probe container. Listing a few device nodes is a
  * milliseconds-long job, so a slower one is wedged — and a device check must
  * never hang the plugin that asked for it.

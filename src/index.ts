@@ -101,6 +101,7 @@ import {
   parseProbeOutput,
   PROBE_MOUNT,
   PROBE_GROUP_MOUNT,
+  PROBE_SELF_MARKER,
   PROBE_TIMEOUT_MS,
 } from "./devices.js";
 import { UpdateService } from "./updates/service.js";
@@ -1672,9 +1673,13 @@ export default (app: App) => {
             command: [
               // The mount is either the device node itself or a directory of
               // them; handle both, as the local path does.
-              // A node mount lands at PROBE_MOUNT, so its basename would be
-              // "probe" — report the requested path's own name instead.
-              `if [ -c ${PROBE_MOUNT} ]; then echo "N ${basename(hostPath)} $(stat -c %g ${PROBE_MOUNT})"; ` +
+              //
+              // Nothing caller-supplied is interpolated here: the command
+              // names only the two constant mount points. A node mount reports
+              // the literal marker below, and the caller substitutes the real
+              // device name — putting the path in the shell string instead
+              // would let a device path containing quotes break out of it.
+              `if [ -c ${PROBE_MOUNT} ]; then echo "N ${PROBE_SELF_MARKER} $(stat -c %g ${PROBE_MOUNT})"; ` +
                 `else for f in ${PROBE_MOUNT}/*; do [ -c "$f" ] && echo "N $(basename "$f") $(stat -c %g "$f")"; done; fi; ` +
                 `echo "---"; cat ${PROBE_GROUP_MOUNT} 2>/dev/null || true`,
             ],
@@ -1694,7 +1699,15 @@ export default (app: App) => {
             );
             return null;
           }
-          return parseProbeOutput(result.log.join("\n"));
+          // Replace the marker with the requested path's own name: the mount
+          // point is called "probe", which would name every node after it.
+          const parsed = parseProbeOutput(result.log.join("\n"));
+          return {
+            ...parsed,
+            nodes: parsed.nodes.map((n) =>
+              n === PROBE_SELF_MARKER ? basename(hostPath) : n,
+            ),
+          };
         },
       });
     },
