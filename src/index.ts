@@ -96,6 +96,7 @@ import {
 } from "./containers.js";
 import { createLogStreamBroker, LogStreamBroker } from "./log-stream-broker.js";
 import { runJob, cleanupOrphanedJobs } from "./jobs.js";
+import type { HostDeviceProbeResult } from "./types.js";
 import {
   probeHostDevice,
   parseProbeOutput,
@@ -103,6 +104,7 @@ import {
   PROBE_GROUP_MOUNT,
   PROBE_SELF_MARKER,
   PROBE_TIMEOUT_MS,
+  PROBE_CACHE_MS,
 } from "./devices.js";
 import { UpdateService } from "./updates/service.js";
 import { FileUpdateCache } from "./updates/cache.js";
@@ -490,6 +492,12 @@ export default (app: App) => {
    * "unknown" and moves on, so a bad candidate costs one cheap failed
    * container, not a wrong answer.
    */
+  /** Short-lived probe results, keyed by path. See probeHostDevice below. */
+  const probeCache = new Map<
+    string,
+    { at: number; result: HostDeviceProbeResult | null }
+  >();
+
   /** Last path segment, for naming a probed node after the device not the mount. */
   function basename(p: string): string {
     return p.slice(p.lastIndexOf("/") + 1) || p;
@@ -1641,7 +1649,17 @@ export default (app: App) => {
     async probeHostDevice(path: string) {
       if (!runtimeInfo) return null;
       const runtime = runtimeInfo;
-      return probeHostDevice(path, {
+
+      // Cached: the containerized path spawns a container, and a plugin that
+      // polls (a status route, a periodic health check) would otherwise start
+      // one per call. Device topology changes on replug, which the hot-plug
+      // device mode already handles at the container level, so a short TTL is
+      // enough to collapse bursts without going stale in practice.
+      const cached = probeCache.get(path);
+      if (cached && Date.now() - cached.at < PROBE_CACHE_MS) {
+        return cached.result;
+      }
+      const result = await probeHostDevice(path, {
         containerized: isContainerized(),
         readDir: (p) => fsp.readdir(p),
         statPath: async (p) => {
@@ -1710,6 +1728,8 @@ export default (app: App) => {
           };
         },
       });
+      probeCache.set(path, { at: Date.now(), result });
+      return result;
     },
 
     async start(name: string) {

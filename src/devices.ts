@@ -813,6 +813,13 @@ export const PROBE_SELF_MARKER = "__self__";
 export const PROBE_TIMEOUT_MS = 30_000;
 
 /**
+ * How long a probe result is reused. Device topology is near-static, and the
+ * containerized path costs a container per call, so a short TTL collapses a
+ * polling caller's bursts without meaningfully going stale.
+ */
+export const PROBE_CACHE_MS = 60_000;
+
+/**
  * Parse the probe container's stdout.
  *
  * Format, chosen so it can be produced by a plain `sh` in any base image:
