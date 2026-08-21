@@ -50,7 +50,7 @@ describe("probeHostDevice (visible locally)", () => {
     assert.deepEqual(result, {
       exists: true,
       nodes: ["card0", "renderD128"],
-      groups: ["video", "render"],
+      groups: ["render", "video"],
     });
   });
 
@@ -82,7 +82,7 @@ describe("probeHostDevice (visible locally)", () => {
       containerized: false,
       ...localHost({ card0: 44, card1: 44, renderD128: 992 }),
     });
-    assert.deepEqual(a?.groups, ["video", "render"]);
+    assert.deepEqual(a?.groups, ["render", "video"]);
     assert.deepEqual(a, b);
   });
 
@@ -210,6 +210,18 @@ describe("probeHostDevice (containerized)", () => {
         }),
     });
     assert.equal(result, null);
+  });
+
+  // The probe ran successfully and simply found nothing — a definite absence.
+  // null would claim we could not tell, which is a different thing.
+  it("reports a definite absence when the probe finds no nodes", async () => {
+    const result = await probeHostDevice("/dev/dri", {
+      containerized: true,
+      ...invisible,
+      runInContainer: () =>
+        Promise.resolve({ nodes: [], gids: [], groupFile: GROUP_FILE }),
+    });
+    assert.deepEqual(result, { exists: false, nodes: [], groups: [] });
   });
 
   it("prefers real gids when they are not remapped (docker)", async () => {

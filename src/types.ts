@@ -1291,7 +1291,7 @@ export interface ContainerManagerApi {
    * absent there even on a machine with a GPU. This asks something that can
    * see the host instead.
    *
-   *     const gpu = await containers.probeHostDevice("/dev/dri");
+   *     const gpu = await containers.probeHostDevice?.("/dev/dri");
    *     if (gpu?.exists) {
    *       config.devices = ["/dev/dri"];
    *       config.groupAdd = gpu.groups;   // names, resolved per host

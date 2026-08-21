@@ -308,7 +308,7 @@ containerized, and that container has no `/dev/dri` even on a machine that has
 one. Ask signalk-container, which can see the host:
 
 ```js
-const gpu = await containers.probeHostDevice("/dev/dri");
+const gpu = await containers.probeHostDevice?.("/dev/dri");
 if (gpu?.exists) {
   config.devices = ["/dev/dri"];      // hot-plug directory form
   config.groupAdd = gpu.groups;       // names, resolved on the host

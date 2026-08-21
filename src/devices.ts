@@ -633,6 +633,11 @@ export async function probeHostDevice(
     return null;
   }
 
+  // The probe ran and found nothing: a definite absence, not "could not tell".
+  if (remote.nodes.length === 0) {
+    return { exists: false, nodes: [], groups: [] };
+  }
+
   const names = parseGroupNames(remote.groupFile);
   const known = new Set(names.values());
 
@@ -772,9 +777,10 @@ function gidsToGroups(gids: number[], names: Map<number, string>): string[] {
   // Sorted deliberately: this feeds `groupAdd`, which signalk-container
   // drift-detects, and a reordered array would look like a config change and
   // trigger an endless recreate loop.
-  return [...new Set(gids)]
-    .sort((a, b) => a - b)
-    .map((gid) => names.get(gid) ?? String(gid));
+  // Sorted by NAME, not by gid: the value feeds `groupAdd`, which
+  // signalk-container drift-detects, and sorting by a number the caller never
+  // sees makes the order look arbitrary in a config diff.
+  return [...new Set(gids.map((gid) => names.get(gid) ?? String(gid)))].sort();
 }
 
 /** Where the probed host path is mounted inside the probe container. */
