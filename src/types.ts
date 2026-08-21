@@ -718,6 +718,16 @@ export interface ContainerJobConfig {
 export type ContainerJobStatus =
   "pending" | "pulling" | "running" | "completed" | "failed" | "cancelled";
 
+/** What {@link ContainerManagerApi.probeHostDevice} found. */
+export interface HostDeviceProbeResult {
+  /** The path exists on the host and holds at least one device node. */
+  exists: boolean;
+  /** Device node names found there, sorted. */
+  nodes: string[];
+  /** Host group names owning them, sorted; numeric gid when unnamed. */
+  groups: string[];
+}
+
 export interface ContainerJobResult {
   id: string;
   status: ContainerJobStatus;
@@ -832,6 +842,14 @@ export interface VolumeSpec {
    * Defaults to `'create'` for backwards compatibility.
    */
   ifMissing?: "create" | "skip" | "abort";
+  /**
+   * Bind the volume read-only. Default false.
+   *
+   * For a directory owned by ANOTHER component — charts published by a chart
+   * provider, say — this keeps the consuming container from writing into it.
+   * 1.30.0+; silently ignored by older versions.
+   */
+  readOnly?: boolean;
 }
 
 /**
@@ -1265,6 +1283,29 @@ export interface ContainerManagerApi {
   resolveHostPath(
     absPath: string,
   ): Promise<{ source: string; subPath: string } | null>;
+  /**
+   * Whether a device path exists on the HOST, and which groups own its nodes.
+   *
+   * `stat()` from a plugin answers for the plugin's own filesystem, which is
+   * the Signal K container when Signal K is containerized — `/dev/dri` is
+   * absent there even on a machine with a GPU. This asks something that can
+   * see the host instead.
+   *
+   *     const gpu = await containers.probeHostDevice("/dev/dri");
+   *     if (gpu?.exists) {
+   *       config.devices = ["/dev/dri"];
+   *       config.groupAdd = gpu.groups;   // names, resolved per host
+   *     }
+   *
+   * `groups` are NAMES (falling back to numeric gids), which is what
+   * `groupAdd` wants: the gid of `render`/`video` differs per distro, so a
+   * hardcoded number silently loses access elsewhere.
+   *
+   * Returns null for "unknown" — no runtime, or the host could not be
+   * inspected — which is deliberately distinct from `{ exists: false }`.
+   * 1.30.0+; older versions do not define this method.
+   */
+  probeHostDevice?(path: string): Promise<HostDeviceProbeResult | null>;
   /**
    * Returns the `host:port` string to reach `containerPort` on a managed
    * container from the SignalK process. Call after `ensureRunning()` with

@@ -1,5 +1,6 @@
 import { IRouter } from "express";
 import path from "node:path";
+import { promises as fsp } from "node:fs";
 import {
   CleanupOrphansResult,
   ConsumerManifest,
@@ -95,6 +96,13 @@ import {
 } from "./containers.js";
 import { createLogStreamBroker, LogStreamBroker } from "./log-stream-broker.js";
 import { runJob, cleanupOrphanedJobs } from "./jobs.js";
+import {
+  probeHostDevice,
+  parseProbeOutput,
+  PROBE_MOUNT,
+  PROBE_GROUP_MOUNT,
+  PROBE_TIMEOUT_MS,
+} from "./devices.js";
 import { UpdateService } from "./updates/service.js";
 import { FileUpdateCache } from "./updates/cache.js";
 import { registerUpdateRoutes } from "./updates/routes.js";
@@ -465,6 +473,32 @@ export default (app: App) => {
   // distinguish "registered but ensureRunning() not called yet" (a plugin
   // bug) from "port was never declared" (a legitimate null return).
   const registeredPorts = new Set<string>();
+  /**
+   * An image already on this host that can run the probe.
+   *
+   * Never pulls: a device check must not depend on the network, and returning
+   * "unknown" is better than fetching something. Candidates are the images of
+   * containers already running here, so they are on disk by definition.
+   *
+   * Sorted before use: `listContainers` order is not stable, and an unstable
+   * choice would make the probe pick a different image run to run — harmless
+   * but untraceable when one of them turns out not to work.
+   *
+   * The probe command needs a POSIX `sh` with `stat`; a distroless or scratch
+   * image has neither. Rather than guess, the caller treats a failed job as
+   * "unknown" and moves on, so a bad candidate costs one cheap failed
+   * container, not a wrong answer.
+   */
+  async function findLocalProbeImage(
+    runtime: ContainerRuntimeInfo,
+  ): Promise<string | null> {
+    const running = await listContainers(runtime).catch(() => []);
+    const candidates = [
+      ...new Set(running.map((info) => info.image).filter(Boolean)),
+    ].sort();
+    return candidates[0] ?? null;
+  }
+
   async function ensureCachedDataSource(): Promise<string> {
     if (cachedDataSource) return cachedDataSource;
     if (pendingDataSource) return pendingDataSource;
@@ -1596,6 +1630,63 @@ export default (app: App) => {
     async resolveHostPath(absPath: string) {
       if (!runtimeInfo) return null;
       return resolveHostPath(absPath, runtimeInfo, app.debug);
+    },
+
+    async probeHostDevice(path: string) {
+      if (!runtimeInfo) return null;
+      const runtime = runtimeInfo;
+      return probeHostDevice(path, {
+        containerized: isContainerized(),
+        readDir: (p) => fsp.readdir(p),
+        statPath: async (p) => {
+          const st = await fsp.stat(p);
+          return { isCharacterDevice: st.isCharacterDevice(), gid: st.gid };
+        },
+        readFile: (p) => fsp.readFile(p, "utf8"),
+        debug: app.debug,
+        // Runs inside a container so the HOST's view of the path is what gets
+        // read. Uses an image already on disk — a device check must not depend
+        // on the network, and returning "unknown" is better than pulling.
+        runInContainer: async (hostPath) => {
+          const image = await findLocalProbeImage(runtime);
+          if (!image) {
+            app.debug(
+              `probeHostDevice: no local image available to probe ${hostPath}`,
+            );
+            return null;
+          }
+          const result = await runJob(runtime, {
+            image,
+            entrypoint: ["sh", "-c"],
+            // Node names with their gids, then the HOST's group file.
+            //
+            // The host's, not the probe image's: the gids on those nodes are
+            // the host's, and a probe image will not have the same ones. An
+            // Alpine probe has no gid 44 at all, so reading its own
+            // /etc/group turned `video` into the bare number "44".
+            command: [
+              `for f in ${PROBE_MOUNT}/*; do [ -c "$f" ] && echo "N $(basename "$f") $(stat -c %g "$f")"; done; ` +
+                `echo "---"; cat ${PROBE_GROUP_MOUNT} 2>/dev/null || true`,
+            ],
+            inputs: {
+              [PROBE_MOUNT]: hostPath,
+              [PROBE_GROUP_MOUNT]: "/etc/group",
+            },
+            label: "probe-host-device",
+            // Bounded: listing a handful of device nodes takes milliseconds,
+            // so anything slower is a wedged container, and a device check
+            // must never hang the plugin that asked.
+            signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+          });
+          if (result.status !== "completed") {
+            app.debug(
+              `probeHostDevice: probe job failed: ${result.error ?? "unknown"}`,
+            );
+            return null;
+          }
+          return parseProbeOutput(result.log.join("\n"));
+        },
+      });
     },
 
     async start(name: string) {
