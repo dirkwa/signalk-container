@@ -2318,7 +2318,12 @@ function buildCreateOptions(
     hostConfig.Binds = [];
     for (const [containerPath, raw] of Object.entries(config.volumes)) {
       hostConfig.Binds.push(
-        volumeArg(volumeSource(raw), containerPath, runtime),
+        volumeArg(
+          volumeSource(raw),
+          containerPath,
+          runtime,
+          typeof raw === "string" ? false : (raw.readOnly ?? false),
+        ),
       );
     }
   }

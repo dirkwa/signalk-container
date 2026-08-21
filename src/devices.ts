@@ -555,3 +555,215 @@ function stripTrailingSlashes(p: string): string {
   while (end > 1 && p[end - 1] === "/") end--;
   return p.slice(0, end);
 }
+
+/** What a host-device probe found. */
+export interface HostDeviceProbeResult {
+  /** The path exists on the host and holds at least one device node. */
+  exists: boolean;
+  /**
+   * Device node names found directly under `path`, sorted. Empty when `path`
+   * is itself a node rather than a directory, or when nothing was found.
+   */
+  nodes: string[];
+  /**
+   * Host group NAMES owning those nodes, sorted and de-duplicated, falling
+   * back to the numeric gid when a group has no name.
+   *
+   * These are what `ContainerConfig.groupAdd` wants: group ownership is the
+   * gate on a device node, and the gid differs per distro and per install, so
+   * a hardcoded number silently loses access on someone else's machine.
+   */
+  groups: string[];
+}
+
+/** Parse an `/etc/group` body into gid -> name. */
+export function parseGroupNames(contents: string): Map<number, string> {
+  const byGid = new Map<number, string>();
+  for (const line of contents.split("\n")) {
+    // name:password:gid:members
+    const parts = line.split(":");
+    const name = parts[0];
+    const gidRaw = parts[2];
+    if (!name || gidRaw === undefined) continue;
+    const gid = Number.parseInt(gidRaw, 10);
+    // First definition wins: /etc/group may alias a gid to several names, and
+    // the earlier entry is the canonical one on every distro we care about.
+    if (!Number.isNaN(gid) && !byGid.has(gid)) byGid.set(gid, name);
+  }
+  return byGid;
+}
+
+/**
+ * Probe a host path for device nodes and the groups that own them.
+ *
+ * Why this cannot simply `stat()`: when Signal K runs in a container — the
+ * common deployment — the plugin's filesystem is that container's, not the
+ * host's. `/dev/dri` is absent there even on a machine that has a GPU, so a
+ * direct check reports "no device" and the caller silently degrades. Only
+ * something with a view of the host can answer, and that is the runtime.
+ *
+ * Two paths, cheapest first:
+ *
+ *  1. Not containerized, or the path happens to be bound into this container
+ *     (`/dev/snd` often is): read it directly. No container involved.
+ *  2. Containerized and the path is not visible: run a throwaway container
+ *     with the path bind-mounted read-only and read it from there. `image`
+ *     must already be present on the host — this deliberately never pulls,
+ *     because a device check should not depend on the network. When no usable
+ *     image is available the probe returns null, meaning "unknown", which is
+ *     NOT the same as `{ exists: false }`.
+ */
+export async function probeHostDevice(
+  path: string,
+  options: {
+    containerized: boolean;
+    /** Reads a directory on this process's own filesystem. */
+    readDir: (p: string) => Promise<string[]>;
+    /** Stats a path on this process's own filesystem. */
+    statPath: (p: string) => Promise<{ isCharacterDevice: boolean; gid: number }>;
+    /** Reads a file on this process's own filesystem. */
+    readFile: (p: string) => Promise<string>;
+    /** Runs the probe inside a container; null when none can be run. */
+    runInContainer?: (
+      hostPath: string,
+    ) => Promise<{ nodes: string[]; gids: number[]; groupFile: string } | null>;
+    debug?: (msg: string) => void;
+  },
+): Promise<HostDeviceProbeResult | null> {
+  const debug = options.debug ?? (() => {});
+
+  const fromLocal = await readDeviceDir(path, options);
+  if (fromLocal) return fromLocal;
+
+  if (!options.containerized) {
+    // Bare metal and nothing there: a definite answer, not an unknown one.
+    return { exists: false, nodes: [], groups: [] };
+  }
+
+  if (!options.runInContainer) {
+    debug(`probeHostDevice: ${path} not visible here and no probe runner`);
+    return null;
+  }
+
+  const remote = await options.runInContainer(path);
+  if (!remote) {
+    debug(`probeHostDevice: could not probe ${path} via the runtime`);
+    return null;
+  }
+
+  const names = parseGroupNames(remote.groupFile);
+  return {
+    exists: remote.nodes.length > 0,
+    nodes: [...remote.nodes].sort(),
+    groups: gidsToGroups(remote.gids, names),
+  };
+}
+
+/** Read a device directory on this process's own filesystem. */
+async function readDeviceDir(
+  path: string,
+  options: {
+    readDir: (p: string) => Promise<string[]>;
+    statPath: (p: string) => Promise<{ isCharacterDevice: boolean; gid: number }>;
+    readFile: (p: string) => Promise<string>;
+  },
+): Promise<HostDeviceProbeResult | null> {
+  let entries: string[];
+  try {
+    entries = await options.readDir(path);
+  } catch {
+    return null;
+  }
+
+  const nodes: string[] = [];
+  const gids = new Set<number>();
+  for (const entry of entries) {
+    try {
+      const st = await options.statPath(`${path}/${entry}`);
+      // Only character devices are device nodes; skip `by-path/` and friends.
+      if (!st.isCharacterDevice) continue;
+      nodes.push(entry);
+      gids.add(st.gid);
+    } catch {
+      // Vanished between listing and stat (hot-unplug): ignore it.
+    }
+  }
+
+  if (nodes.length === 0) return { exists: false, nodes: [], groups: [] };
+
+  let groupFile = "";
+  try {
+    groupFile = await options.readFile("/etc/group");
+  } catch {
+    // Unreadable: fall back to numeric gids below.
+  }
+
+  return {
+    exists: true,
+    nodes: nodes.sort(),
+    groups: gidsToGroups([...gids], parseGroupNames(groupFile)),
+  };
+}
+
+/** Map gids to group names, sorted and de-duplicated for a stable result. */
+function gidsToGroups(gids: number[], names: Map<number, string>): string[] {
+  // Sorted deliberately: this feeds `groupAdd`, which signalk-container
+  // drift-detects, and a reordered array would look like a config change and
+  // trigger an endless recreate loop.
+  return [...new Set(gids)]
+    .sort((a, b) => a - b)
+    .map((gid) => names.get(gid) ?? String(gid));
+}
+
+/** Where the probed host path is mounted inside the probe container. */
+export const PROBE_MOUNT = "/probe";
+
+/**
+ * Where the HOST's `/etc/group` is mounted inside the probe container.
+ *
+ * The gids on host device nodes are the host's, and a probe image does not
+ * share them — Alpine has no gid 44, so reading its own group file reported
+ * `video` as the bare number "44". The names have to come from the host.
+ */
+export const PROBE_GROUP_MOUNT = "/probe-group";
+
+/**
+ * Ceiling on the probe container. Listing a few device nodes is a
+ * milliseconds-long job, so a slower one is wedged — and a device check must
+ * never hang the plugin that asked for it.
+ */
+export const PROBE_TIMEOUT_MS = 30_000;
+
+/**
+ * Parse the probe container's stdout.
+ *
+ * Format, chosen so it can be produced by a plain `sh` in any base image:
+ *   N <name> <gid>      one line per character device found
+ *   ---                 separator
+ *   <contents of /etc/group>
+ *
+ * The group file is the HOST's, bind-mounted in — a probe image's own
+ * /etc/group does not carry the host's gids (Alpine has no gid 44), which
+ * would report `video` as the bare number "44".
+ */
+export function parseProbeOutput(output: string): {
+  nodes: string[];
+  gids: number[];
+  groupFile: string;
+} {
+  const [devicePart = "", groupFile = ""] = output.split(/^---$/m, 2);
+  const nodes: string[] = [];
+  const gids: number[] = [];
+
+  for (const line of devicePart.split("\n")) {
+    const match = /^N (\S+) (\d+)$/.exec(line.trim());
+    if (!match) continue;
+    const name = match[1];
+    const gid = Number.parseInt(match[2] ?? "", 10);
+    if (name === undefined || Number.isNaN(gid)) continue;
+    nodes.push(name);
+    gids.push(gid);
+  }
+
+  return { nodes, gids, groupFile };
+}
