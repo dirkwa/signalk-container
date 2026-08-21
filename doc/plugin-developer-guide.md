@@ -284,6 +284,49 @@ Like `healthcheck` and `labels`, `ulimits` is **not** part of drift detection �
 
 > Availability: `ContainerConfig.ulimits` requires signalk-container ≥ 1.17.0. On older versions the field is ignored — the container still runs, it just inherits the runtime's default ulimits.
 
+### Read-only volumes
+
+A volume can be bound read-only, for a directory another component owns:
+
+```js
+volumes: {
+  // Charts published by signalk-charts-provider-simple: this container reads
+  // them, the provider owns them.
+  "/charts": { source: chartsPath, readOnly: true },
+}
+```
+
+Requires signalk-container 1.30.0+; older versions ignore the field and bind
+read-write, so treat it as defence in depth rather than a guarantee.
+
+### Detecting a host device
+
+Whether the machine has a GPU — or any device worth passing through — cannot be
+answered from the plugin. `stat("/dev/dri")` reports on the plugin's own
+filesystem, which is the Signal K container whenever Signal K is
+containerized, and that container has no `/dev/dri` even on a machine that has
+one. Ask signalk-container, which can see the host:
+
+```js
+const gpu = await containers.probeHostDevice("/dev/dri");
+if (gpu?.exists) {
+  config.devices = ["/dev/dri"];      // hot-plug directory form
+  config.groupAdd = gpu.groups;       // names, resolved on the host
+}
+```
+
+`groups` are names rather than gids on purpose: the gid of `render` or `video`
+differs per distro and per install, so a hardcoded number silently loses access
+elsewhere.
+
+`null` means **unknown** — no runtime, or the host could not be inspected — and
+is deliberately distinct from `{ exists: false }`, which means definitely
+absent. Assume no device, but do not tell the user there isn't one.
+
+Works the same on Docker and rootless podman, though by different routes: see
+the README's *Detecting host devices* for why rootless podman cannot report
+real gids and what the probe does instead.
+
 ### Optional and required volumes
 
 By default, `volumes` entries with a missing host path are auto-created as empty directories by the runtime — fine for plugin state dirs. When a volume represents a _user-managed_ or _deployment-required_ resource, use the `VolumeSpec` object form with an `ifMissing` policy:
