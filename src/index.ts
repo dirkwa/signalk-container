@@ -476,6 +476,17 @@ export default (app: App) => {
   // distinguish "registered but ensureRunning() not called yet" (a plugin
   // bug) from "port was never declared" (a legitimate null return).
   const registeredPorts = new Set<string>();
+  /** Short-lived probe results, keyed by path. See probeHostDevice below. */
+  const probeCache = new Map<
+    string,
+    { at: number; result: Promise<HostDeviceProbeResult | null> }
+  >();
+
+  /** Last path segment, for naming a probed node after the device not the mount. */
+  function basename(p: string): string {
+    return p.slice(p.lastIndexOf("/") + 1) || p;
+  }
+
   /**
    * An image already on this host that can run the probe.
    *
@@ -492,17 +503,6 @@ export default (app: App) => {
    * "unknown" and moves on, so a bad candidate costs one cheap failed
    * container, not a wrong answer.
    */
-  /** Short-lived probe results, keyed by path. See probeHostDevice below. */
-  const probeCache = new Map<
-    string,
-    { at: number; result: HostDeviceProbeResult | null }
-  >();
-
-  /** Last path segment, for naming a probed node after the device not the mount. */
-  function basename(p: string): string {
-    return p.slice(p.lastIndexOf("/") + 1) || p;
-  }
-
   async function findLocalProbeImage(
     runtime: ContainerRuntimeInfo,
   ): Promise<string | null> {
@@ -1655,11 +1655,17 @@ export default (app: App) => {
       // one per call. Device topology changes on replug, which the hot-plug
       // device mode already handles at the container level, so a short TTL is
       // enough to collapse bursts without going stale in practice.
-      const cached = probeCache.get(path);
-      if (cached && Date.now() - cached.at < PROBE_CACHE_MS) {
-        return cached.result;
+      // Prune first so a long-lived server does not accumulate entries for
+      // paths nobody asks about any more.
+      const now = Date.now();
+      for (const [key, entry] of probeCache) {
+        if (now - entry.at >= PROBE_CACHE_MS) probeCache.delete(key);
       }
-      const result = await probeHostDevice(path, {
+      // The PROMISE is cached, not just the result: two callers racing on the
+      // same path would otherwise each spawn a probe container.
+      const cached = probeCache.get(path);
+      if (cached) return cached.result;
+      const pending = probeHostDevice(path, {
         containerized: isContainerized(),
         readDir: (p) => fsp.readdir(p),
         statPath: async (p) => {
@@ -1728,8 +1734,10 @@ export default (app: App) => {
           };
         },
       });
-      probeCache.set(path, { at: Date.now(), result });
-      return result;
+      // Dropped on rejection so a transient failure is not cached as an answer.
+      probeCache.set(path, { at: now, result: pending });
+      pending.catch(() => probeCache.delete(path));
+      return pending;
     },
 
     async start(name: string) {

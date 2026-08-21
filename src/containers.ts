@@ -1394,10 +1394,10 @@ export async function getLiveContainerConfig(
         segments.length > 2 &&
         FLAG_RE.test(segments[segments.length - 1])
       ) {
-        const flags = segments.pop() as string;
-        if (flags.split(",").includes("ro")) readOnly = true;
+        const flags = (segments.pop() as string).split(",");
+        // `rro` is the recursive form; both mean the mount is not writable.
+        if (flags.includes("ro") || flags.includes("rro")) readOnly = true;
       }
-      if (segments.length < 2) continue;
       const container = segments.pop() as string;
       const host = segments.join(":");
       binds.push({ host, container, readOnly });

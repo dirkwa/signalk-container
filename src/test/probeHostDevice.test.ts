@@ -299,11 +299,46 @@ describe("probeHostDevice (single node path)", () => {
   });
 });
 
-describe("probe command safety", () => {
-  // The probe runs a shell. A device path is caller-supplied, so it must never
-  // reach the command string — only the two constant mount points do, and the
-  // node's real name is substituted afterwards from the marker.
-  it("names a self-mounted node without interpolating the path", () => {
+describe("probeHostDevice (local read, remapped gids)", () => {
+  // A local read can also see overflow gids — a Signal K container with
+  // /dev/dri bound through a user namespace. It must behave like the remote
+  // path, not report the bare number as a group.
+  it("uses the DRM convention when a local gid is remapped", async () => {
+    const result = await probeHostDevice("/dev/dri", {
+      containerized: true,
+      readDir: () => Promise.resolve(["card0"]),
+      statPath: (p: string) =>
+        p.endsWith("card0")
+          ? Promise.resolve({ isCharacterDevice: true, gid: 65534 })
+          : Promise.reject(new Error("ENOTDIR")),
+      readFile: () => Promise.resolve(GROUP_FILE),
+    });
+    assert.deepEqual(result, {
+      exists: true,
+      nodes: ["card0"],
+      groups: ["video"],
+    });
+  });
+
+  it("returns unknown for a local non-DRM device with a remapped gid", async () => {
+    const result = await probeHostDevice("/dev/snd", {
+      containerized: true,
+      readDir: () => Promise.resolve(["controlC0"]),
+      statPath: (p: string) =>
+        p.endsWith("controlC0")
+          ? Promise.resolve({ isCharacterDevice: true, gid: 65534 })
+          : Promise.reject(new Error("ENOTDIR")),
+      readFile: () => Promise.resolve("audio:x:29:\n"),
+    });
+    assert.equal(result, null);
+  });
+});
+
+describe("self-mount marker", () => {
+  // A node mount lands at the constant mount point, so the probe emits a
+  // marker and the caller substitutes the requested path's own name. Keeping
+  // the path out of the emitted command is why the marker exists.
+  it("parses the marker so the caller can substitute the node name", () => {
     const parsed = parseProbeOutput(`N ${PROBE_SELF_MARKER} 44\n---\n${GROUP_FILE}`);
     assert.deepEqual(parsed.nodes, [PROBE_SELF_MARKER]);
     // The caller maps the marker to the requested basename.

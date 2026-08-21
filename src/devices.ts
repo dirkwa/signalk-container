@@ -646,7 +646,7 @@ export async function probeHostDevice(
   const usable = remote.gids.filter((gid) => gid !== OVERFLOW_GID);
   if (usable.length > 0) {
     return {
-      exists: remote.nodes.length > 0,
+      exists: true,
       nodes: [...remote.nodes].sort(),
       groups: gidsToGroups(usable, names),
     };
@@ -671,7 +671,7 @@ export async function probeHostDevice(
   if (conventional.length === 0) return null;
 
   return {
-    exists: remote.nodes.length > 0,
+    exists: true,
     nodes: [...remote.nodes].sort(),
     groups: conventional,
   };
@@ -698,10 +698,20 @@ async function readDeviceDir(
       } catch {
         // Unreadable: numeric gid below.
       }
+      const names = parseGroupNames(groupFile);
+      if (st.gid === OVERFLOW_GID) {
+        // Ownership is unknowable through this namespace; a conventional name
+        // is only meaningful if the host actually defines it.
+        const conventional = conventionalDrmGroup(name);
+        if (conventional === null || !new Set(names.values()).has(conventional)) {
+          return null;
+        }
+        return { exists: true, nodes: [name], groups: [conventional] };
+      }
       return {
         exists: true,
         nodes: [name],
-        groups: gidsToGroups([st.gid], parseGroupNames(groupFile)),
+        groups: gidsToGroups([st.gid], names),
       };
     }
   } catch {
@@ -739,17 +749,33 @@ async function readDeviceDir(
     // Unreadable: fall back to numeric gids below.
   }
 
+  const names = parseGroupNames(groupFile);
+  const usable = [...gids].filter((gid) => gid !== OVERFLOW_GID);
+  if (usable.length === 0) {
+    // Same rule as a remote read: with no usable gid, only a DRM name the host
+    // defines is trustworthy, and anything else is unknown rather than absent.
+    const known = new Set(names.values());
+    const conventional = [
+      ...new Set(
+        nodes
+          .map(conventionalDrmGroup)
+          .filter((n): n is string => n !== null && known.has(n)),
+      ),
+    ].sort();
+    if (conventional.length === 0) return null;
+    return { exists: true, nodes: nodes.sort(), groups: conventional };
+  }
+
   return {
     exists: true,
     nodes: nodes.sort(),
-    groups: gidsToGroups([...gids], parseGroupNames(groupFile)),
+    groups: gidsToGroups(usable, names),
   };
 }
 
 /**
  * The kernel's "this id is not mapped here" gid, reported by a user namespace
- * for any owner outside its range. Read from /proc where available; 65534 is
- * the universal default.
+ * for any owner outside its range. 65534 (`nobody`) is the value Linux uses.
  */
 export const OVERFLOW_GID = 65534;
 
@@ -777,9 +803,8 @@ function gidsToGroups(gids: number[], names: Map<number, string>): string[] {
   // Sorted deliberately: this feeds `groupAdd`, which signalk-container
   // drift-detects, and a reordered array would look like a config change and
   // trigger an endless recreate loop.
-  // Sorted by NAME, not by gid: the value feeds `groupAdd`, which
-  // signalk-container drift-detects, and sorting by a number the caller never
-  // sees makes the order look arbitrary in a config diff.
+  // Sorted by name so `groupAdd` — which is drift-detected — has a stable
+  // order that reads sensibly in a config diff.
   return [...new Set(gids.map((gid) => names.get(gid) ?? String(gid)))].sort();
 }
 
