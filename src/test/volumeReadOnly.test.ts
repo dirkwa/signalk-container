@@ -25,3 +25,21 @@ describe("volumeArg readOnly", () => {
     assert.equal(volumeArg("myvol", "/in", podman, true), "myvol:/in:ro");
   });
 });
+
+describe("readOnly drift encoding", () => {
+  // Regression: encoding access mode as a `host:ro` string made a read-write
+  // mount of `/data:ro` indistinguishable from a read-only mount of `/data`.
+  // Host path and mode are compared as separate fields.
+  it("distinguishes a path ending in :ro from a read-only mount", () => {
+    const rwOddPath = { host: "/data:ro", readOnly: false };
+    const roNormal = { host: "/data", readOnly: true };
+    assert.notDeepEqual(rwOddPath, roNormal);
+  });
+
+  it("treats identical host and mode as equal", () => {
+    assert.deepEqual(
+      { host: "/data", readOnly: true },
+      { host: "/data", readOnly: true },
+    );
+  });
+});

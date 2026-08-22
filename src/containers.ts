@@ -1737,37 +1737,39 @@ export function diffContainerConfig(
   );
 
   // Volumes: build canonical Map<containerPath, hostPath> for each side.
-  const requestedVolumes = new Map<string, string>();
+  // Keyed by container path; the value pairs host path with access mode.
+  // Kept as separate fields rather than a `host:ro` string, which would make a
+  // read-write mount of `/data:ro` indistinguishable from a read-only `/data`.
+  const requestedVolumes = new Map<string, { host: string; readOnly: boolean }>();
   if (requested.volumes) {
     for (const [containerPath, raw] of Object.entries(requested.volumes)) {
-      const readOnly = typeof raw === "string" ? false : (raw.readOnly ?? false);
-      requestedVolumes.set(
-        stripTrailingSlash(containerPath),
-        `${stripTrailingSlash(volumeSource(raw))}${readOnly ? ":ro" : ""}`,
-      );
+      requestedVolumes.set(stripTrailingSlash(containerPath), {
+        host: stripTrailingSlash(volumeSource(raw)),
+        readOnly: typeof raw === "string" ? false : (raw.readOnly ?? false),
+      });
     }
   }
   // Hot-plug device directories are emitted as binds, so the live Binds
   // include them; mirror them into the requested side or every reconcile
   // of a directory-device config would flag volumes drift.
   for (const bind of requestedDevices.directoryBinds) {
-    requestedVolumes.set(
-      stripTrailingSlash(bind.pathInContainer),
-      stripTrailingSlash(bind.pathOnHost),
-    );
+    requestedVolumes.set(stripTrailingSlash(bind.pathInContainer), {
+      host: stripTrailingSlash(bind.pathOnHost),
+      readOnly: false,
+    });
   }
-  const liveVolumes = new Map<string, string>();
+  const liveVolumes = new Map<string, { host: string; readOnly: boolean }>();
   for (const { host, container, readOnly } of live.binds) {
-    // Encode read-only into the compared value so toggling it drifts.
-    liveVolumes.set(
-      stripTrailingSlash(container),
-      `${stripTrailingSlash(host)}${readOnly === true ? ":ro" : ""}`,
-    );
+    liveVolumes.set(stripTrailingSlash(container), {
+      host: stripTrailingSlash(host),
+      readOnly: readOnly === true,
+    });
   }
   let volumesDrift = requestedVolumes.size !== liveVolumes.size;
   if (!volumesDrift) {
-    for (const [container, host] of requestedVolumes) {
-      if (liveVolumes.get(container) !== host) {
+    for (const [container, want] of requestedVolumes) {
+      const have = liveVolumes.get(container);
+      if (!have || have.host !== want.host || have.readOnly !== want.readOnly) {
         volumesDrift = true;
         break;
       }

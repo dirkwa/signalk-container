@@ -615,12 +615,17 @@ export async function probeHostDevice(
   const debug = options.debug ?? (() => {});
 
   const fromLocal = await readDeviceDir(path, options);
-  if (fromLocal) return fromLocal;
 
   if (!options.containerized) {
-    // Bare metal and nothing there: a definite answer, not an unknown one.
-    return { exists: false, nodes: [], groups: [] };
+    // Bare metal: what this process sees IS the host, so a local read is the
+    // final answer either way.
+    return fromLocal ?? { exists: false, nodes: [], groups: [] };
   }
+
+  // Containerized: only trust a local read that actually found something. An
+  // empty or absent path here says nothing about the host — that is the whole
+  // reason this probe exists — so fall through and ask the runtime.
+  if (fromLocal?.exists) return fromLocal;
 
   if (!options.runInContainer) {
     debug(`probeHostDevice: ${path} not visible here and no probe runner`);
@@ -829,6 +834,20 @@ export const PROBE_GROUP_MOUNT = "/probe-group";
  * interpolated into the shell command.
  */
 export const PROBE_SELF_MARKER = "__self__";
+
+/**
+ * Replace the self-mount marker with the requested path's own name.
+ *
+ * The probe emits the marker rather than the path so nothing caller-supplied
+ * reaches the shell command; the real name is restored here.
+ */
+export function nameSelfMountedNodes(
+  nodes: string[],
+  requestedPath: string,
+): string[] {
+  const name = requestedPath.slice(requestedPath.lastIndexOf("/") + 1);
+  return nodes.map((n) => (n === PROBE_SELF_MARKER ? name : n));
+}
 
 /**
  * Ceiling on the probe container. Listing a few device nodes is a
