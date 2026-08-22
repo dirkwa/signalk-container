@@ -5,6 +5,7 @@ import {
   parseProbeOutput,
   probeHostDevice,
   PROBE_SELF_MARKER,
+  nameSelfMountedNodes,
 } from "../devices.js";
 
 const GROUP_FILE = "root:x:0:\nvideo:x:44:dirk\nrender:x:992:\n";
@@ -334,6 +335,55 @@ describe("probeHostDevice (local read, remapped gids)", () => {
   });
 });
 
+describe("containerized fall-through", () => {
+  // The point of the probe: a path that is empty or absent inside the Signal K
+  // container says nothing about the host, so it must not short-circuit.
+  it("asks the runtime when a local read finds nothing", async () => {
+    const result = await probeHostDevice("/dev/dri", {
+      containerized: true,
+      readDir: () => Promise.resolve([]),
+      statPath: () => Promise.reject(new Error("ENOTDIR")),
+      readFile: () => Promise.resolve(GROUP_FILE),
+      runInContainer: () =>
+        Promise.resolve({ nodes: ["card0"], gids: [44], groupFile: GROUP_FILE }),
+    });
+    assert.deepEqual(result, {
+      exists: true,
+      nodes: ["card0"],
+      groups: ["video"],
+    });
+  });
+
+  it("keeps a local read that did find something", async () => {
+    let ran = false;
+    const result = await probeHostDevice("/dev/dri", {
+      containerized: true,
+      readDir: () => Promise.resolve(["card0"]),
+      statPath: (p: string) =>
+        p.endsWith("card0")
+          ? Promise.resolve({ isCharacterDevice: true, gid: 44 })
+          : Promise.reject(new Error("ENOTDIR")),
+      readFile: () => Promise.resolve(GROUP_FILE),
+      runInContainer: () => {
+        ran = true;
+        return Promise.resolve(null);
+      },
+    });
+    assert.equal(ran, false, "no container needed when the read succeeded");
+    assert.equal(result?.exists, true);
+  });
+
+  it("still reports a definite absence on bare metal", async () => {
+    const result = await probeHostDevice("/dev/dri", {
+      containerized: false,
+      readDir: () => Promise.resolve([]),
+      statPath: () => Promise.reject(new Error("ENOTDIR")),
+      readFile: () => Promise.resolve(GROUP_FILE),
+    });
+    assert.deepEqual(result, { exists: false, nodes: [], groups: [] });
+  });
+});
+
 describe("self-mount marker", () => {
   // A node mount lands at the constant mount point, so the probe emits a
   // marker and the caller substitutes the requested path's own name. Keeping
@@ -341,11 +391,17 @@ describe("self-mount marker", () => {
   it("parses the marker so the caller can substitute the node name", () => {
     const parsed = parseProbeOutput(`N ${PROBE_SELF_MARKER} 44\n---\n${GROUP_FILE}`);
     assert.deepEqual(parsed.nodes, [PROBE_SELF_MARKER]);
-    // The caller maps the marker to the requested basename.
-    const named = parsed.nodes.map((n) =>
-      n === PROBE_SELF_MARKER ? "card0" : n,
+    assert.deepEqual(
+      nameSelfMountedNodes(parsed.nodes, "/dev/dri/card0"),
+      ["card0"],
     );
-    assert.deepEqual(named, ["card0"]);
+  });
+
+  it("leaves names that are not the marker alone", () => {
+    assert.deepEqual(
+      nameSelfMountedNodes(["card0", "renderD128"], "/dev/dri"),
+      ["card0", "renderD128"],
+    );
   });
 });
 

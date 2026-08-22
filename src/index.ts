@@ -102,6 +102,7 @@ import {
   parseProbeOutput,
   PROBE_MOUNT,
   PROBE_GROUP_MOUNT,
+  nameSelfMountedNodes,
   PROBE_SELF_MARKER,
   PROBE_TIMEOUT_MS,
   PROBE_CACHE_MS,
@@ -482,11 +483,6 @@ export default (app: App) => {
     { at: number; result: Promise<HostDeviceProbeResult | null> }
   >();
 
-  /** Last path segment, for naming a probed node after the device not the mount. */
-  function basename(p: string): string {
-    return p.slice(p.lastIndexOf("/") + 1) || p;
-  }
-
   /**
    * An image already on this host that can run the probe.
    *
@@ -503,14 +499,13 @@ export default (app: App) => {
    * "unknown" and moves on, so a bad candidate costs one cheap failed
    * container, not a wrong answer.
    */
-  async function findLocalProbeImage(
+  async function findLocalProbeImages(
     runtime: ContainerRuntimeInfo,
-  ): Promise<string | null> {
+  ): Promise<string[]> {
     const running = await listContainers(runtime).catch(() => []);
-    const candidates = [
+    return [
       ...new Set(running.map((info) => info.image).filter(Boolean)),
     ].sort();
-    return candidates[0] ?? null;
   }
 
   async function ensureCachedDataSource(): Promise<string> {
@@ -1678,65 +1673,72 @@ export default (app: App) => {
         // read. Uses an image already on disk — a device check must not depend
         // on the network, and returning "unknown" is better than pulling.
         runInContainer: async (hostPath) => {
-          const image = await findLocalProbeImage(runtime);
-          if (!image) {
+          const images = await findLocalProbeImages(runtime);
+          if (images.length === 0) {
             app.debug(
               `probeHostDevice: no local image available to probe ${hostPath}`,
             );
             return null;
           }
-          const result = await runJob(runtime, {
-            image,
-            entrypoint: ["sh", "-c"],
-            // Node names with their gids, then the HOST's group file.
-            //
-            // The host's, not the probe image's: the gids on those nodes are
-            // the host's, and a probe image will not have the same ones. An
-            // Alpine probe has no gid 44 at all, so reading its own
-            // /etc/group turned `video` into the bare number "44".
-            command: [
-              // The mount is either the device node itself or a directory of
-              // them; handle both, as the local path does.
+          // Try each in turn: the command needs a POSIX `sh` with `stat`, and a
+          // distroless or scratch image has neither. One bad candidate costs a
+          // cheap failed container, not a wrong answer.
+          for (const image of images) {
+            const result = await runJob(runtime, {
+              image,
+              entrypoint: ["sh", "-c"],
+              // Node names with their gids, then the HOST's group file.
               //
-              // Nothing caller-supplied is interpolated here: the command
-              // names only the two constant mount points. A node mount reports
-              // the literal marker below, and the caller substitutes the real
-              // device name — putting the path in the shell string instead
-              // would let a device path containing quotes break out of it.
-              `if [ -c ${PROBE_MOUNT} ]; then echo "N ${PROBE_SELF_MARKER} $(stat -c %g ${PROBE_MOUNT})"; ` +
-                `else for f in ${PROBE_MOUNT}/*; do [ -c "$f" ] && echo "N $(basename "$f") $(stat -c %g "$f")"; done; fi; ` +
-                `echo "---"; cat ${PROBE_GROUP_MOUNT} 2>/dev/null || true`,
-            ],
-            inputs: {
-              [PROBE_MOUNT]: hostPath,
-              [PROBE_GROUP_MOUNT]: "/etc/group",
-            },
-            label: "probe-host-device",
-            // Bounded: listing a handful of device nodes takes milliseconds,
-            // so anything slower is a wedged container, and a device check
-            // must never hang the plugin that asked.
-            signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
-          });
-          if (result.status !== "completed") {
-            app.debug(
-              `probeHostDevice: probe job failed: ${result.error ?? "unknown"}`,
-            );
-            return null;
+              // The host's, not the probe image's: the gids on those nodes are
+              // the host's, and a probe image will not have the same ones. An
+              // Alpine probe has no gid 44 at all, so reading its own
+              // /etc/group turned `video` into the bare number "44".
+              command: [
+                // The mount is either the device node itself or a directory of
+                // them; handle both, as the local path does.
+                //
+                // Nothing caller-supplied is interpolated here: the command
+                // names only the two constant mount points. A node mount reports
+                // the literal marker below, and the caller substitutes the real
+                // device name — putting the path in the shell string instead
+                // would let a device path containing quotes break out of it.
+                `if [ -c ${PROBE_MOUNT} ]; then echo "N ${PROBE_SELF_MARKER} $(stat -c %g ${PROBE_MOUNT})"; ` +
+                  `else for f in ${PROBE_MOUNT}/*; do [ -c "$f" ] && echo "N $(basename "$f") $(stat -c %g "$f")"; done; fi; ` +
+                  `echo "---"; cat ${PROBE_GROUP_MOUNT} 2>/dev/null || true`,
+              ],
+              inputs: {
+                [PROBE_MOUNT]: hostPath,
+                [PROBE_GROUP_MOUNT]: "/etc/group",
+              },
+              label: "probe-host-device",
+              // Bounded: listing a handful of device nodes takes milliseconds,
+              // so anything slower is a wedged container, and a device check
+              // must never hang the plugin that asked.
+              signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+            });
+            if (result.status !== "completed") {
+              app.debug(
+                `probeHostDevice: probe with ${image} failed: ${result.error ?? "unknown"}`,
+              );
+              continue;
+            }
+            const parsed = parseProbeOutput(result.log.join("\n"));
+            return {
+              ...parsed,
+              nodes: nameSelfMountedNodes(parsed.nodes, hostPath),
+            };
           }
-          // Replace the marker with the requested path's own name: the mount
-          // point is called "probe", which would name every node after it.
-          const parsed = parseProbeOutput(result.log.join("\n"));
-          return {
-            ...parsed,
-            nodes: parsed.nodes.map((n) =>
-              n === PROBE_SELF_MARKER ? basename(hostPath) : n,
-            ),
-          };
+          return null;
         },
       });
-      // Dropped on rejection so a transient failure is not cached as an answer.
       probeCache.set(path, { at: now, result: pending });
-      pending.catch(() => probeCache.delete(path));
+      // A rejection, or a null meaning "could not tell", is not an answer worth
+      // holding for the full TTL — drop it so the next caller retries.
+      pending
+        .then((r) => {
+          if (r === null) probeCache.delete(path);
+        })
+        .catch(() => probeCache.delete(path));
       return pending;
     },
 
