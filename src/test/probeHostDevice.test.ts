@@ -6,6 +6,7 @@ import {
   probeHostDevice,
   PROBE_SELF_MARKER,
   nameSelfMountedNodes,
+  resolveNodeGroups,
 } from "../devices.js";
 
 /** The gids GROUP_FILE names, so fixtures do not repeat bare numbers. */
@@ -350,6 +351,126 @@ describe("probeHostDevice (local read, remapped gids)", () => {
       readFile: () => Promise.resolve("audio:x:29:\n"),
     });
     assert.equal(result, null);
+  });
+});
+
+describe("resolveNodeGroups", () => {
+  const names = parseGroupNames(GROUP_FILE);
+
+  it("resolves each node by its own gid", () => {
+    assert.deepEqual(
+      resolveNodeGroups(
+        [
+          { node: "card0", gid: VIDEO_GID },
+          { node: "renderD128", gid: RENDER_GID },
+        ],
+        names,
+      ),
+      ["render", "video"],
+    );
+  });
+
+  it("uses the DRM convention only for the remapped node", () => {
+    assert.deepEqual(
+      resolveNodeGroups(
+        [
+          { node: "card0", gid: VIDEO_GID },
+          { node: "renderD128", gid: 65534 },
+        ],
+        names,
+      ),
+      ["render", "video"],
+    );
+  });
+
+  it("drops a conventional name the host does not define", () => {
+    assert.deepEqual(
+      resolveNodeGroups([{ node: "renderD128", gid: 65534 }], parseGroupNames("video:x:44:\n")),
+      null,
+    );
+  });
+
+  it("returns null when nothing could be resolved", () => {
+    assert.equal(resolveNodeGroups([{ node: "controlC0", gid: 65534 }], names), null);
+  });
+
+  it("falls back to the numeric gid for an unnamed group", () => {
+    assert.deepEqual(resolveNodeGroups([{ node: "card0", gid: 1234 }], names), ["1234"]);
+  });
+});
+
+describe("mixed node ownership", () => {
+  // A directory can hold a mapped card0 beside an overflow-gid renderD128.
+  // Resolving over a flat list of gids dropped whichever rule lost, so the
+  // consumer got `video` alone and could not open the render node.
+  it("keeps a group for each node when the remote gids are mixed", async () => {
+    const result = await probeHostDevice("/dev/dri", {
+      containerized: true,
+      readDir: () => Promise.reject(new Error("ENOENT")),
+      statPath: () => Promise.reject(new Error("ENOENT")),
+      readFile: () => Promise.resolve(""),
+      runInContainer: () =>
+        Promise.resolve({
+          nodes: ["card0", "renderD128"],
+          gids: [VIDEO_GID, 65534],
+          groupFile: GROUP_FILE,
+        }),
+    });
+    assert.deepEqual(result?.groups, ["render", "video"]);
+  });
+
+  it("keeps a group for each node when the local gids are mixed", async () => {
+    const result = await probeHostDevice("/dev/dri", {
+      containerized: false,
+      readDir: (p: string) =>
+        p === "/dev/dri"
+          ? Promise.resolve(["card0", "renderD128"])
+          : Promise.reject(new Error("ENOTDIR")),
+      statPath: (p: string) => {
+        if (p === "/dev/dri") {
+          return Promise.resolve({ isCharacterDevice: false, gid: 0 });
+        }
+        return Promise.resolve({
+          isCharacterDevice: true,
+          gid: p.endsWith("card0") ? VIDEO_GID : 65534,
+        });
+      },
+      readFile: () => Promise.resolve(GROUP_FILE),
+    });
+    assert.deepEqual(result?.groups, ["render", "video"]);
+  });
+
+  it("still resolves when every node is remapped", async () => {
+    const result = await probeHostDevice("/dev/dri", {
+      containerized: true,
+      readDir: () => Promise.reject(new Error("ENOENT")),
+      statPath: () => Promise.reject(new Error("ENOENT")),
+      readFile: () => Promise.resolve(""),
+      runInContainer: () =>
+        Promise.resolve({
+          nodes: ["card0", "renderD128"],
+          gids: [65534, 65534],
+          groupFile: GROUP_FILE,
+        }),
+    });
+    assert.deepEqual(result?.groups, ["render", "video"]);
+  });
+
+  it("resolves the mapped node when the other cannot be resolved at all", async () => {
+    // controlC0 has no DRM convention; card0 still yields its group.
+    const result = await probeHostDevice("/dev/mixed", {
+      containerized: true,
+      readDir: () => Promise.reject(new Error("ENOENT")),
+      statPath: () => Promise.reject(new Error("ENOENT")),
+      readFile: () => Promise.resolve(""),
+      runInContainer: () =>
+        Promise.resolve({
+          nodes: ["card0", "controlC0"],
+          gids: [VIDEO_GID, 65534],
+          groupFile: GROUP_FILE,
+        }),
+    });
+    assert.deepEqual(result?.groups, ["video"]);
   });
 });
 
