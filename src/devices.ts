@@ -657,37 +657,22 @@ export async function probeHostDevice(
 
   // Under rootless podman every gid read inside the probe comes back as the
   // overflow id, so the numbers carry no information.
-  const usable = remote.gids.filter((gid) => gid !== OVERFLOW_GID);
-  if (usable.length > 0) {
-    return {
-      exists: true,
-      nodes: [...remote.nodes].sort(),
-      groups: gidsToGroups(usable, names),
-    };
-  }
+  const pairs = remote.nodes.map((node, i) => ({
+    node,
+    gid: remote.gids[i] ?? OVERFLOW_GID,
+  }));
+  const groups = resolveNodeGroups(pairs, names);
 
-  // No usable gid. Fall back to udev's naming convention, which is only
-  // defined for DRM nodes — `card*` and `renderD*` are reliably `video` and
-  // `render` on every distro. Keep only names the host actually defines; one
-  // it does not have would make groupAdd warn and skip.
-  const conventional = [
-    ...new Set(
-      remote.nodes
-        .map(conventionalDrmGroup)
-        .filter((name): name is string => name !== null && known.has(name)),
-    ),
-  ].sort();
-
-  // For anything else — /dev/snd, /dev/input — there is no convention to fall
-  // back on, and answering `exists: true` with no groups would have the caller
-  // pass the device through with no group to open it, failing silently at
+  // Nothing resolvable — /dev/snd and /dev/input have no convention to fall
+  // back on. Answering `exists: true` with no groups would have the caller pass
+  // the device through with nothing able to open it, failing silently at
   // runtime. "Unknown" is the honest answer.
-  if (conventional.length === 0) return null;
+  if (groups === null) return null;
 
   return {
     exists: true,
     nodes: [...remote.nodes].sort(),
-    groups: conventional,
+    groups,
   };
 }
 
@@ -712,21 +697,12 @@ async function readDeviceDir(
       } catch {
         // Unreadable: numeric gid below.
       }
-      const names = parseGroupNames(groupFile);
-      if (st.gid === OVERFLOW_GID) {
-        // Ownership is unknowable through this namespace; a conventional name
-        // is only meaningful if the host actually defines it.
-        const conventional = conventionalDrmGroup(name);
-        if (conventional === null || !new Set(names.values()).has(conventional)) {
-          return null;
-        }
-        return { exists: true, nodes: [name], groups: [conventional] };
-      }
-      return {
-        exists: true,
-        nodes: [name],
-        groups: gidsToGroups([st.gid], names),
-      };
+      const groups = resolveNodeGroups(
+        [{ node: name, gid: st.gid }],
+        parseGroupNames(groupFile),
+      );
+      if (groups === null) return null;
+      return { exists: true, nodes: [name], groups };
     }
   } catch {
     // Not there, or not statable: fall through to the directory attempt.
@@ -740,19 +716,20 @@ async function readDeviceDir(
     return null;
   }
 
-  const nodes: string[] = [];
-  const gids = new Set<number>();
+  // Kept as pairs: a directory can hold a mapped card0 beside an overflow-gid
+  // renderD128, and each needs its own group.
+  const found: { node: string; gid: number }[] = [];
   for (const entry of entries) {
     try {
       const st = await options.statPath(`${path}/${entry}`);
       // Only character devices are device nodes; skip `by-path/` and friends.
       if (!st.isCharacterDevice) continue;
-      nodes.push(entry);
-      gids.add(st.gid);
+      found.push({ node: entry, gid: st.gid });
     } catch {
       // Vanished between listing and stat (hot-unplug): ignore it.
     }
   }
+  const nodes = found.map((f) => f.node);
 
   if (nodes.length === 0) return { exists: false, nodes: [], groups: [] };
 
@@ -764,27 +741,11 @@ async function readDeviceDir(
   }
 
   const names = parseGroupNames(groupFile);
-  const usable = [...gids].filter((gid) => gid !== OVERFLOW_GID);
-  if (usable.length === 0) {
-    // Same rule as a remote read: with no usable gid, only a DRM name the host
-    // defines is trustworthy, and anything else is unknown rather than absent.
-    const known = new Set(names.values());
-    const conventional = [
-      ...new Set(
-        nodes
-          .map(conventionalDrmGroup)
-          .filter((n): n is string => n !== null && known.has(n)),
-      ),
-    ].sort();
-    if (conventional.length === 0) return null;
-    return { exists: true, nodes: nodes.sort(), groups: conventional };
-  }
+  // Same per-node rule as a remote read.
+  const groups = resolveNodeGroups(found, names);
+  if (groups === null) return null;
 
-  return {
-    exists: true,
-    nodes: nodes.sort(),
-    groups: gidsToGroups(usable, names),
-  };
+  return { exists: true, nodes: nodes.sort(), groups };
 }
 
 /**
@@ -810,6 +771,46 @@ export function conventionalDrmGroup(node: string): string | null {
   if (node.startsWith("renderD")) return "render";
   if (node.startsWith("card")) return "video";
   return null;
+}
+
+
+/**
+ * Resolve the group for each device node individually.
+ *
+ * Per node rather than over a flat set of gids: a directory can hold a mapped
+ * `card0` (gid 44 -> video) beside an overflow-gid `renderD128`, and treating
+ * the gids as one list drops whichever rule loses. The consumer would then
+ * pass `renderD128` through with no group able to open it.
+ *
+ * A node whose gid is readable resolves by gid. One reported as the overflow
+ * id falls back to udev's convention, kept only when the host defines that
+ * name. A node that resolves to neither contributes nothing.
+ *
+ * @returns the group names, or null when NO node could be resolved — unknown,
+ * which is not the same as "no groups needed".
+ */
+export function resolveNodeGroups(
+  pairs: readonly { node: string; gid: number }[],
+  names: Map<number, string>,
+): string[] | null {
+  const known = new Set(names.values());
+  const groups = new Set<string>();
+  let resolvedAny = false;
+
+  for (const { node, gid } of pairs) {
+    if (gid !== OVERFLOW_GID) {
+      groups.add(names.get(gid) ?? String(gid));
+      resolvedAny = true;
+      continue;
+    }
+    const conventional = conventionalDrmGroup(node);
+    if (conventional !== null && known.has(conventional)) {
+      groups.add(conventional);
+      resolvedAny = true;
+    }
+  }
+
+  return resolvedAny ? [...groups].sort() : null;
 }
 
 /** Map gids to group names, sorted and de-duplicated for a stable result. */
