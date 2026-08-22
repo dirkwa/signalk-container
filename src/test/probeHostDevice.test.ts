@@ -8,7 +8,10 @@ import {
   nameSelfMountedNodes,
 } from "../devices.js";
 
-const GROUP_FILE = "root:x:0:\nvideo:x:44:dirk\nrender:x:992:\n";
+/** The gids GROUP_FILE names, so fixtures do not repeat bare numbers. */
+const VIDEO_GID = 44;
+const RENDER_GID = 992;
+const GROUP_FILE = `root:x:0:\nvideo:x:${String(VIDEO_GID)}:dirk\nrender:x:${String(RENDER_GID)}:\n`;
 
 /** Filesystem that behaves like a host with a GPU. */
 function localHost(nodes: Record<string, number>) {
@@ -29,13 +32,13 @@ function localHost(nodes: Record<string, number>) {
 describe("parseGroupNames", () => {
   it("maps gids to names", () => {
     const names = parseGroupNames(GROUP_FILE);
-    assert.equal(names.get(44), "video");
-    assert.equal(names.get(992), "render");
+    assert.equal(names.get(VIDEO_GID), "video");
+    assert.equal(names.get(RENDER_GID), "render");
   });
 
   it("keeps the first name when a gid is aliased", () => {
     const names = parseGroupNames("first:x:44:\nsecond:x:44:\n");
-    assert.equal(names.get(44), "first");
+    assert.equal(names.get(VIDEO_GID), "first");
   });
 
   it("survives a malformed file", () => {
@@ -47,7 +50,7 @@ describe("probeHostDevice (visible locally)", () => {
   it("reports the nodes and their owning group names", async () => {
     const result = await probeHostDevice("/dev/dri", {
       containerized: false,
-      ...localHost({ card0: 44, renderD128: 992 }),
+      ...localHost({ card0: VIDEO_GID, renderD128: RENDER_GID }),
     });
     assert.deepEqual(result, {
       exists: true,
@@ -61,7 +64,7 @@ describe("probeHostDevice (visible locally)", () => {
   it("handles a host with only card0", async () => {
     const result = await probeHostDevice("/dev/dri", {
       containerized: false,
-      ...localHost({ card0: 44 }),
+      ...localHost({ card0: VIDEO_GID }),
     });
     assert.deepEqual(result?.groups, ["video"]);
   });
@@ -78,11 +81,11 @@ describe("probeHostDevice (visible locally)", () => {
   it("de-duplicates and sorts groups, so groupAdd is drift-stable", async () => {
     const a = await probeHostDevice("/dev/dri", {
       containerized: false,
-      ...localHost({ card0: 44, card1: 44, renderD128: 992 }),
+      ...localHost({ card0: VIDEO_GID, card1: VIDEO_GID, renderD128: RENDER_GID }),
     });
     const b = await probeHostDevice("/dev/dri", {
       containerized: false,
-      ...localHost({ card0: 44, card1: 44, renderD128: 992 }),
+      ...localHost({ card0: VIDEO_GID, card1: VIDEO_GID, renderD128: RENDER_GID }),
     });
     assert.deepEqual(a?.groups, ["render", "video"]);
     assert.deepEqual(a, b);
@@ -144,7 +147,7 @@ describe("probeHostDevice (containerized)", () => {
       containerized: true,
       ...invisible,
       runInContainer: () =>
-        Promise.resolve({ nodes: ["card0"], gids: [44], groupFile: GROUP_FILE }),
+        Promise.resolve({ nodes: ["card0"], gids: [VIDEO_GID], groupFile: GROUP_FILE }),
     });
     assert.deepEqual(result?.groups, ["video"]);
 
@@ -156,7 +159,7 @@ describe("probeHostDevice (containerized)", () => {
       runInContainer: () =>
         Promise.resolve({
           nodes: ["card0"],
-          gids: [44],
+          gids: [VIDEO_GID],
           groupFile: alpineGroupFile,
         }),
     });
@@ -231,7 +234,7 @@ describe("probeHostDevice (containerized)", () => {
       containerized: true,
       ...invisible,
       runInContainer: () =>
-        Promise.resolve({ nodes: ["card0"], gids: [44], groupFile: GROUP_FILE }),
+        Promise.resolve({ nodes: ["card0"], gids: [VIDEO_GID], groupFile: GROUP_FILE }),
     });
     assert.deepEqual(result?.groups, ["video"]);
   });
@@ -243,7 +246,7 @@ describe("probeHostDevice (containerized)", () => {
       runInContainer: () =>
         Promise.resolve({
           nodes: ["card0"],
-          gids: [44],
+          gids: [VIDEO_GID],
           groupFile: GROUP_FILE,
         }),
     });
@@ -254,18 +257,33 @@ describe("probeHostDevice (containerized)", () => {
     });
   });
 
-  it("prefers the local read when the path IS visible, without a container", async () => {
-    let ran = false;
+  // A visible local read still goes to the runtime when one is available: the
+  // gids on the nodes are the host's, but the names this container would
+  // resolve them to come from ITS /etc/group, which need not agree.
+  it("prefers host group resolution over a visible local read", async () => {
     const result = await probeHostDevice("/dev/dri", {
       containerized: true,
-      ...localHost({ card0: 44 }),
-      runInContainer: () => {
-        ran = true;
-        return Promise.resolve(null);
-      },
+      ...localHost({ card0: VIDEO_GID }),
+      // Container's group file disagrees with the host's about gid 44.
+      readFile: () => Promise.resolve(`somethingelse:x:${String(VIDEO_GID)}:\n`),
+      runInContainer: () =>
+        Promise.resolve({
+          nodes: ["card0"],
+          gids: [VIDEO_GID],
+          groupFile: GROUP_FILE,
+        }),
     });
-    assert.equal(ran, false, "should not spawn a container when it can just read");
+    assert.deepEqual(result?.groups, ["video"]);
+  });
+
+  it("falls back to the local read when no probe can run", async () => {
+    const result = await probeHostDevice("/dev/dri", {
+      containerized: true,
+      ...localHost({ card0: VIDEO_GID }),
+      runInContainer: () => Promise.resolve(null),
+    });
     assert.equal(result?.exists, true);
+    assert.deepEqual(result?.nodes, ["card0"]);
   });
 });
 
@@ -278,7 +296,7 @@ describe("probeHostDevice (single node path)", () => {
       readDir: () => Promise.reject(new Error("ENOTDIR")),
       statPath: (p: string) =>
         p === "/dev/dri/card0"
-          ? Promise.resolve({ isCharacterDevice: true, gid: 44 })
+          ? Promise.resolve({ isCharacterDevice: true, gid: VIDEO_GID })
           : Promise.reject(new Error("ENOENT")),
       readFile: () => Promise.resolve(GROUP_FILE),
     });
@@ -345,7 +363,7 @@ describe("containerized fall-through", () => {
       statPath: () => Promise.reject(new Error("ENOTDIR")),
       readFile: () => Promise.resolve(GROUP_FILE),
       runInContainer: () =>
-        Promise.resolve({ nodes: ["card0"], gids: [44], groupFile: GROUP_FILE }),
+        Promise.resolve({ nodes: ["card0"], gids: [VIDEO_GID], groupFile: GROUP_FILE }),
     });
     assert.deepEqual(result, {
       exists: true,
@@ -354,23 +372,19 @@ describe("containerized fall-through", () => {
     });
   });
 
-  it("keeps a local read that did find something", async () => {
-    let ran = false;
+  it("keeps a local read when the runtime cannot answer", async () => {
     const result = await probeHostDevice("/dev/dri", {
       containerized: true,
       readDir: () => Promise.resolve(["card0"]),
       statPath: (p: string) =>
         p.endsWith("card0")
-          ? Promise.resolve({ isCharacterDevice: true, gid: 44 })
+          ? Promise.resolve({ isCharacterDevice: true, gid: VIDEO_GID })
           : Promise.reject(new Error("ENOTDIR")),
       readFile: () => Promise.resolve(GROUP_FILE),
-      runInContainer: () => {
-        ran = true;
-        return Promise.resolve(null);
-      },
+      runInContainer: () => Promise.resolve(null),
     });
-    assert.equal(ran, false, "no container needed when the read succeeded");
     assert.equal(result?.exists, true);
+    assert.deepEqual(result?.nodes, ["card0"]);
   });
 
   it("still reports a definite absence on bare metal", async () => {
@@ -408,7 +422,7 @@ describe("self-mount marker", () => {
 describe("parseProbeOutput", () => {
   it("parses nodes, gids and the group file", () => {
     const parsed = parseProbeOutput(
-      `N card0 44\nN renderD128 992\n---\n${GROUP_FILE}`,
+      `N card0 ${String(VIDEO_GID)}\nN renderD128 992\n---\n${GROUP_FILE}`,
     );
     assert.deepEqual(parsed.nodes, ["card0", "renderD128"]);
     assert.deepEqual(parsed.gids, [44, 992]);
@@ -422,7 +436,7 @@ describe("parseProbeOutput", () => {
   });
 
   it("ignores noise the shell may have emitted", () => {
-    const parsed = parseProbeOutput("sh: glob failed\nN card0 44\n---\n");
+    const parsed = parseProbeOutput(`sh: glob failed\nN card0 ${String(VIDEO_GID)}\n---\n`);
     assert.deepEqual(parsed.nodes, ["card0"]);
   });
 });

@@ -96,12 +96,13 @@ import {
 } from "./containers.js";
 import { createLogStreamBroker, LogStreamBroker } from "./log-stream-broker.js";
 import { runJob, cleanupOrphanedJobs } from "./jobs.js";
-import type { HostDeviceProbeResult } from "./types.js";
+import type { ProbeCacheEntry } from "./devices.js";
 import {
   probeHostDevice,
   parseProbeOutput,
   PROBE_MOUNT,
   PROBE_GROUP_MOUNT,
+  cachedProbe,
   nameSelfMountedNodes,
   PROBE_SELF_MARKER,
   PROBE_TIMEOUT_MS,
@@ -478,10 +479,7 @@ export default (app: App) => {
   // bug) from "port was never declared" (a legitimate null return).
   const registeredPorts = new Set<string>();
   /** Short-lived probe results, keyed by path. See probeHostDevice below. */
-  const probeCache = new Map<
-    string,
-    { at: number; result: Promise<HostDeviceProbeResult | null> }
-  >();
+  const probeCache = new Map<string, ProbeCacheEntry>();
 
   /**
    * An image already on this host that can run the probe.
@@ -1650,96 +1648,79 @@ export default (app: App) => {
       // one per call. Device topology changes on replug, which the hot-plug
       // device mode already handles at the container level, so a short TTL is
       // enough to collapse bursts without going stale in practice.
-      // Prune first so a long-lived server does not accumulate entries for
-      // paths nobody asks about any more.
-      const now = Date.now();
-      for (const [key, entry] of probeCache) {
-        if (now - entry.at >= PROBE_CACHE_MS) probeCache.delete(key);
-      }
-      // The PROMISE is cached, not just the result: two callers racing on the
-      // same path would otherwise each spawn a probe container.
-      const cached = probeCache.get(path);
-      if (cached) return cached.result;
-      const pending = probeHostDevice(path, {
-        containerized: isContainerized(),
-        readDir: (p) => fsp.readdir(p),
-        statPath: async (p) => {
-          const st = await fsp.stat(p);
-          return { isCharacterDevice: st.isCharacterDevice(), gid: st.gid };
-        },
-        readFile: (p) => fsp.readFile(p, "utf8"),
-        debug: app.debug,
-        // Runs inside a container so the HOST's view of the path is what gets
-        // read. Uses an image already on disk — a device check must not depend
-        // on the network, and returning "unknown" is better than pulling.
-        runInContainer: async (hostPath) => {
-          const images = await findLocalProbeImages(runtime);
-          if (images.length === 0) {
-            app.debug(
-              `probeHostDevice: no local image available to probe ${hostPath}`,
-            );
-            return null;
-          }
-          // Try each in turn: the command needs a POSIX `sh` with `stat`, and a
-          // distroless or scratch image has neither. One bad candidate costs a
-          // cheap failed container, not a wrong answer.
-          for (const image of images) {
-            const result = await runJob(runtime, {
-              image,
-              entrypoint: ["sh", "-c"],
-              // Node names with their gids, then the HOST's group file.
-              //
-              // The host's, not the probe image's: the gids on those nodes are
-              // the host's, and a probe image will not have the same ones. An
-              // Alpine probe has no gid 44 at all, so reading its own
-              // /etc/group turned `video` into the bare number "44".
-              command: [
-                // The mount is either the device node itself or a directory of
-                // them; handle both, as the local path does.
-                //
-                // Nothing caller-supplied is interpolated here: the command
-                // names only the two constant mount points. A node mount reports
-                // the literal marker below, and the caller substitutes the real
-                // device name — putting the path in the shell string instead
-                // would let a device path containing quotes break out of it.
-                `if [ -c ${PROBE_MOUNT} ]; then echo "N ${PROBE_SELF_MARKER} $(stat -c %g ${PROBE_MOUNT})"; ` +
-                  `else for f in ${PROBE_MOUNT}/*; do [ -c "$f" ] && echo "N $(basename "$f") $(stat -c %g "$f")"; done; fi; ` +
-                  `echo "---"; cat ${PROBE_GROUP_MOUNT} 2>/dev/null || true`,
-              ],
-              inputs: {
-                [PROBE_MOUNT]: hostPath,
-                [PROBE_GROUP_MOUNT]: "/etc/group",
-              },
-              label: "probe-host-device",
-              // Bounded: listing a handful of device nodes takes milliseconds,
-              // so anything slower is a wedged container, and a device check
-              // must never hang the plugin that asked.
-              signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
-            });
-            if (result.status !== "completed") {
+      return cachedProbe(probeCache, path, Date.now(), PROBE_CACHE_MS, () =>
+        probeHostDevice(path, {
+          containerized: isContainerized(),
+          readDir: (p) => fsp.readdir(p),
+          statPath: async (p) => {
+            const st = await fsp.stat(p);
+            return { isCharacterDevice: st.isCharacterDevice(), gid: st.gid };
+          },
+          readFile: (p) => fsp.readFile(p, "utf8"),
+          debug: app.debug,
+          // Runs inside a container so the HOST's view of the path is what gets
+          // read. Uses an image already on disk — a device check must not depend
+          // on the network, and returning "unknown" is better than pulling.
+          runInContainer: async (hostPath) => {
+            const images = await findLocalProbeImages(runtime);
+            if (images.length === 0) {
               app.debug(
-                `probeHostDevice: probe with ${image} failed: ${result.error ?? "unknown"}`,
+                `probeHostDevice: no local image available to probe ${hostPath}`,
               );
-              continue;
+              return null;
             }
-            const parsed = parseProbeOutput(result.log.join("\n"));
-            return {
-              ...parsed,
-              nodes: nameSelfMountedNodes(parsed.nodes, hostPath),
-            };
-          }
-          return null;
-        },
-      });
-      probeCache.set(path, { at: now, result: pending });
-      // A rejection, or a null meaning "could not tell", is not an answer worth
-      // holding for the full TTL — drop it so the next caller retries.
-      pending
-        .then((r) => {
-          if (r === null) probeCache.delete(path);
-        })
-        .catch(() => probeCache.delete(path));
-      return pending;
+            // Try each in turn: the command needs a POSIX `sh` with `stat`, and a
+            // distroless or scratch image has neither. One bad candidate costs a
+            // cheap failed container, not a wrong answer.
+            for (const image of images) {
+              const result = await runJob(runtime, {
+                image,
+                entrypoint: ["sh", "-c"],
+                // Node names with their gids, then the HOST's group file.
+                //
+                // The host's, not the probe image's: the gids on those nodes are
+                // the host's, and a probe image will not have the same ones. An
+                // Alpine probe has no gid 44 at all, so reading its own
+                // /etc/group turned `video` into the bare number "44".
+                command: [
+                  // The mount is either the device node itself or a directory of
+                  // them; handle both, as the local path does.
+                  //
+                  // Nothing caller-supplied is interpolated here: the command
+                  // names only the two constant mount points. A node mount reports
+                  // the literal marker below, and the caller substitutes the real
+                  // device name — putting the path in the shell string instead
+                  // would let a device path containing quotes break out of it.
+                  `if [ -c ${PROBE_MOUNT} ]; then echo "N ${PROBE_SELF_MARKER} $(stat -c %g ${PROBE_MOUNT})"; ` +
+                    `else for f in ${PROBE_MOUNT}/*; do [ -c "$f" ] && echo "N $(basename "$f") $(stat -c %g "$f")"; done; fi; ` +
+                    `echo "---"; cat ${PROBE_GROUP_MOUNT} 2>/dev/null || true`,
+                ],
+                inputs: {
+                  [PROBE_MOUNT]: hostPath,
+                  [PROBE_GROUP_MOUNT]: "/etc/group",
+                },
+                label: "probe-host-device",
+                // Bounded: listing a handful of device nodes takes milliseconds,
+                // so anything slower is a wedged container, and a device check
+                // must never hang the plugin that asked.
+                signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+              });
+              if (result.status !== "completed") {
+                app.debug(
+                  `probeHostDevice: probe with ${image} failed: ${result.error ?? "unknown"}`,
+                );
+                continue;
+              }
+              const parsed = parseProbeOutput(result.log.join("\n"));
+              return {
+                ...parsed,
+                nodes: nameSelfMountedNodes(parsed.nodes, hostPath),
+              };
+            }
+            return null;
+          },
+        }),
+      );
     },
 
     async start(name: string) {
