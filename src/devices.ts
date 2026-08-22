@@ -658,7 +658,6 @@ export async function probeHostDevice(
   }
 
   const names = parseGroupNames(remote.groupFile);
-  const known = new Set(names.values());
 
   // Under rootless podman every gid read inside the probe comes back as the
   // overflow id, so the numbers carry no information.
@@ -816,16 +815,6 @@ export function resolveNodeGroups(
   }
 
   return resolvedAny ? [...groups].sort() : null;
-}
-
-/** Map gids to group names, sorted and de-duplicated for a stable result. */
-function gidsToGroups(gids: number[], names: Map<number, string>): string[] {
-  // Sorted deliberately: this feeds `groupAdd`, which signalk-container
-  // drift-detects, and a reordered array would look like a config change and
-  // trigger an endless recreate loop.
-  // Sorted by name so `groupAdd` — which is drift-detected — has a stable
-  // order that reads sensibly in a config diff.
-  return [...new Set(gids.map((gid) => names.get(gid) ?? String(gid)))].sort();
 }
 
 /** Where the probed host path is mounted inside the probe container. */
