@@ -625,7 +625,14 @@ export async function probeHostDevice(
   // Containerized: only trust a local read that actually found something. An
   // empty or absent path here says nothing about the host — that is the whole
   // reason this probe exists — so fall through and ask the runtime.
-  if (fromLocal?.exists) return fromLocal;
+  //
+  // Even then, the NAMES it resolved came from this container's /etc/group,
+  // which need not agree with the host's: the gids on the nodes are the
+  // host's, so a container whose group file numbers them differently would
+  // produce a name that means nothing to groupAdd. Prefer the runtime, which
+  // reads the host's own group file, and fall back to the local read only when
+  // no probe can run.
+  if (fromLocal?.exists && !options.runInContainer) return fromLocal;
 
   if (!options.runInContainer) {
     debug(`probeHostDevice: ${path} not visible here and no probe runner`);
@@ -635,7 +642,9 @@ export async function probeHostDevice(
   const remote = await options.runInContainer(path);
   if (!remote) {
     debug(`probeHostDevice: could not probe ${path} via the runtime`);
-    return null;
+    // A local read still beats nothing — the nodes are real even if the names
+    // came from the wrong group file.
+    return fromLocal?.exists ? fromLocal : null;
   }
 
   // The probe ran and found nothing: a definite absence, not "could not tell".
@@ -895,4 +904,45 @@ export function parseProbeOutput(output: string): {
   }
 
   return { nodes, gids, groupFile };
+}
+
+/** One cached probe, keyed by path. Holds the in-flight promise, not a result. */
+export interface ProbeCacheEntry {
+  at: number;
+  result: Promise<HostDeviceProbeResult | null>;
+}
+
+/**
+ * Share one in-flight probe per path, and hold successful answers briefly.
+ *
+ * The containerized path spawns a container, so a plugin polling a status
+ * route would otherwise start one per call, and two concurrent callers would
+ * each start their own. A `null` — "could not tell" — is dropped rather than
+ * held, so one inconclusive probe does not suppress retries for the whole TTL.
+ *
+ * Extracted from the manager method so this behaviour is testable without
+ * standing up a runtime.
+ */
+export function cachedProbe(
+  cache: Map<string, ProbeCacheEntry>,
+  path: string,
+  now: number,
+  ttlMs: number,
+  run: () => Promise<HostDeviceProbeResult | null>,
+): Promise<HostDeviceProbeResult | null> {
+  for (const [key, entry] of cache) {
+    if (now - entry.at >= ttlMs) cache.delete(key);
+  }
+
+  const cached = cache.get(path);
+  if (cached) return cached.result;
+
+  const pending = run();
+  cache.set(path, { at: now, result: pending });
+  pending
+    .then((r) => {
+      if (r === null) cache.delete(path);
+    })
+    .catch(() => cache.delete(path));
+  return pending;
 }
