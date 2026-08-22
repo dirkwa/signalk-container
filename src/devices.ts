@@ -567,6 +567,11 @@ export function parseGroupNames(contents: string): Map<number, string> {
     const name = parts[0];
     const gidRaw = parts[2];
     if (!name || gidRaw === undefined) continue;
+    // Whole-field match only. `Number.parseInt` stops at the first
+    // non-digit, so `44invalid` would parse as 44 — and because the first
+    // definition wins, a malformed line ahead of the real one would shadow
+    // it and hand groupAdd a name the host does not define.
+    if (!/^\d+$/.test(gidRaw)) continue;
     const gid = Number.parseInt(gidRaw, 10);
     // First definition wins: /etc/group may alias a gid to several names, and
     // the earlier entry is the canonical one on every distro we care about.

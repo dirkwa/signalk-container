@@ -45,6 +45,28 @@ describe("parseGroupNames", () => {
   it("survives a malformed file", () => {
     assert.equal(parseGroupNames("nonsense\n\n:::\n").size, 0);
   });
+
+  // Number.parseInt stops at the first non-digit, so "44invalid" would parse
+  // as 44. Since the first definition wins, a malformed line ahead of the real
+  // one would shadow it and hand groupAdd a name the host does not define.
+  it("rejects a gid field that is not entirely digits", () => {
+    for (const bad of [
+      "bogus:x:44invalid:",
+      "neg:x:-5:",
+      "space:x: 44:",
+      "hex:x:0x2c:",
+      "empty:x::",
+    ]) {
+      assert.equal(parseGroupNames(`${bad}\n`).size, 0, bad);
+    }
+  });
+
+  it("does not let a malformed line shadow the real group", () => {
+    const names = parseGroupNames(
+      `bogus:x:${String(VIDEO_GID)}invalid:\nvideo:x:${String(VIDEO_GID)}:dirk\n`,
+    );
+    assert.equal(names.get(VIDEO_GID), "video");
+  });
 });
 
 describe("probeHostDevice (visible locally)", () => {
