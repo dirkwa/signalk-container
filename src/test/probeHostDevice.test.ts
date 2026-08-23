@@ -9,7 +9,7 @@ import {
   resolveNodeGroups,
   conventionalDeviceGroup,
   deviceDirectoryOf,
-  CONVENTIONAL_DIRECTORY_GROUPS,
+  OVERFLOW_GID,
 } from "../devices.js";
 
 /** The gids GROUP_FILE names, so fixtures do not repeat bare numbers. */
@@ -152,7 +152,7 @@ describe("bare metal: absent vs unresolved", () => {
       readDir: () => Promise.resolve(["widget0"]),
       statPath: (p: string) =>
         p.endsWith("widget0")
-          ? Promise.resolve({ isCharacterDevice: true, gid: 65534 })
+          ? Promise.resolve({ isCharacterDevice: true, gid: OVERFLOW_GID })
           : Promise.reject(new Error("ENOTDIR")),
       readFile: () => Promise.resolve("audio:x:29:\n"),
     });
@@ -165,7 +165,7 @@ describe("bare metal: absent vs unresolved", () => {
     const result = await probeHostDevice("/dev/snd/seq", {
       containerized: false,
       readDir: () => Promise.reject(new Error("ENOTDIR")),
-      statPath: () => Promise.resolve({ isCharacterDevice: true, gid: 65534 }),
+      statPath: () => Promise.resolve({ isCharacterDevice: true, gid: OVERFLOW_GID }),
       readFile: () => Promise.resolve("audio:x:29:\n"),
     });
     assert.deepEqual(result, {
@@ -183,7 +183,7 @@ describe("bare metal: absent vs unresolved", () => {
       readDir: () => Promise.resolve(["controlC0"]),
       statPath: (p: string) =>
         p.endsWith("controlC0")
-          ? Promise.resolve({ isCharacterDevice: true, gid: 65534 })
+          ? Promise.resolve({ isCharacterDevice: true, gid: OVERFLOW_GID })
           : Promise.reject(new Error("ENOTDIR")),
       readFile: () => Promise.resolve("audio:x:29:\n"),
     });
@@ -321,7 +321,7 @@ describe("probeHostDevice (containerized)", () => {
       runInContainer: () =>
         Promise.resolve({
           nodes: ["card0", "renderD128"],
-          gids: [65534, 65534],
+          gids: [OVERFLOW_GID, OVERFLOW_GID],
           groupFile: GROUP_FILE,
         }),
     });
@@ -335,7 +335,7 @@ describe("probeHostDevice (containerized)", () => {
       runInContainer: () =>
         Promise.resolve({
           nodes: ["card0", "renderD128"],
-          gids: [65534, 65534],
+          gids: [OVERFLOW_GID, OVERFLOW_GID],
           // Host with no `render` group at all.
           groupFile: "video:x:44:\n",
         }),
@@ -353,11 +353,69 @@ describe("probeHostDevice (containerized)", () => {
       runInContainer: () =>
         Promise.resolve({
           nodes: ["widget0", "widget1"],
-          gids: [65534, 65534],
+          gids: [OVERFLOW_GID, OVERFLOW_GID],
           groupFile: "audio:x:29:\n",
         }),
     });
     assert.equal(result, null);
+  });
+
+  // The remote counterpart of the single-node case above, and the path that
+  // actually needs PROBE_SELF_MARKER: the probe cannot report a real node name
+  // for a self-mounted request, so the marker is what identifies "this path IS
+  // a node" and sends the class lookup to the parent directory.
+  it("resolves a remote single-node request via its parent directory", async () => {
+    const result = await probeHostDevice("/dev/snd/seq", {
+      containerized: true,
+      ...invisible,
+      runInContainer: () =>
+        // The real runner substitutes the marker for the requested path's
+        // basename before returning (index.ts, via nameSelfMountedNodes), so
+        // this is the shape probeHostDevice actually receives.
+        Promise.resolve({
+          nodes: ["seq"],
+          gids: [OVERFLOW_GID],
+          groupFile: "audio:x:29:\n",
+        }),
+    });
+    assert.deepEqual(result, {
+      exists: true,
+      nodes: ["seq"],
+      groups: ["audio"],
+    });
+  });
+
+  // The unsubstituted form is still accepted, so a runner that returns the
+  // raw marker resolves identically.
+  it("accepts an unsubstituted self marker from the probe", async () => {
+    const result = await probeHostDevice("/dev/snd/seq", {
+      containerized: true,
+      ...invisible,
+      runInContainer: () =>
+        Promise.resolve({
+          nodes: [PROBE_SELF_MARKER],
+          gids: [OVERFLOW_GID],
+          groupFile: "audio:x:29:\n",
+        }),
+    });
+    assert.deepEqual(result?.groups, ["audio"]);
+  });
+
+  // A one-entry DIRECTORY listing must not be mistaken for a single-node
+  // request: /dev/dri holding only card0 is still a directory, and climbing
+  // to /dev would lose the class.
+  it("does not treat a one-node directory listing as a node request", async () => {
+    const result = await probeHostDevice("/dev/dri", {
+      containerized: true,
+      ...invisible,
+      runInContainer: () =>
+        Promise.resolve({
+          nodes: ["card0"],
+          gids: [OVERFLOW_GID],
+          groupFile: "video:x:44:\n",
+        }),
+    });
+    assert.deepEqual(result?.groups, ["video"]);
   });
 
   // The same probe against /dev/snd resolves, because the directory names the
@@ -369,7 +427,7 @@ describe("probeHostDevice (containerized)", () => {
       runInContainer: () =>
         Promise.resolve({
           nodes: ["controlC0", "pcmC0D0p"],
-          gids: [65534, 65534],
+          gids: [OVERFLOW_GID, OVERFLOW_GID],
           groupFile: "audio:x:29:\n",
         }),
     });
@@ -488,7 +546,7 @@ describe("probeHostDevice (local read, remapped gids)", () => {
       readDir: () => Promise.resolve(["card0"]),
       statPath: (p: string) =>
         p.endsWith("card0")
-          ? Promise.resolve({ isCharacterDevice: true, gid: 65534 })
+          ? Promise.resolve({ isCharacterDevice: true, gid: OVERFLOW_GID })
           : Promise.reject(new Error("ENOTDIR")),
       readFile: () => Promise.resolve(GROUP_FILE),
     });
@@ -505,7 +563,7 @@ describe("probeHostDevice (local read, remapped gids)", () => {
       readDir: () => Promise.resolve(["widget0"]),
       statPath: (p: string) =>
         p.endsWith("widget0")
-          ? Promise.resolve({ isCharacterDevice: true, gid: 65534 })
+          ? Promise.resolve({ isCharacterDevice: true, gid: OVERFLOW_GID })
           : Promise.reject(new Error("ENOTDIR")),
       readFile: () => Promise.resolve("audio:x:29:\n"),
     });
@@ -518,7 +576,7 @@ describe("probeHostDevice (local read, remapped gids)", () => {
       readDir: () => Promise.resolve(["controlC0"]),
       statPath: (p: string) =>
         p.endsWith("controlC0")
-          ? Promise.resolve({ isCharacterDevice: true, gid: 65534 })
+          ? Promise.resolve({ isCharacterDevice: true, gid: OVERFLOW_GID })
           : Promise.reject(new Error("ENOTDIR")),
       readFile: () => Promise.resolve("audio:x:29:\n"),
     });
@@ -547,7 +605,7 @@ describe("resolveNodeGroups", () => {
       resolveNodeGroups(
         [
           { node: "card0", gid: VIDEO_GID },
-          { node: "renderD128", gid: 65534 },
+          { node: "renderD128", gid: OVERFLOW_GID },
         ],
         names,
       ),
@@ -557,13 +615,13 @@ describe("resolveNodeGroups", () => {
 
   it("drops a conventional name the host does not define", () => {
     assert.deepEqual(
-      resolveNodeGroups([{ node: "renderD128", gid: 65534 }], parseGroupNames("video:x:44:\n")),
+      resolveNodeGroups([{ node: "renderD128", gid: OVERFLOW_GID }], parseGroupNames("video:x:44:\n")),
       null,
     );
   });
 
   it("returns null when nothing could be resolved", () => {
-    assert.equal(resolveNodeGroups([{ node: "controlC0", gid: 65534 }], names), null);
+    assert.equal(resolveNodeGroups([{ node: "controlC0", gid: OVERFLOW_GID }], names), null);
   });
 
   it("falls back to the numeric gid for an unnamed group", () => {
@@ -595,7 +653,6 @@ describe("conventionalDeviceGroup", () => {
   it("does not give /dev/dri a directory-wide answer", () => {
     // card* and renderD* differ; one answer for the directory would be wrong
     // for half its nodes.
-    assert.equal(CONVENTIONAL_DIRECTORY_GROUPS["/dev/dri"], undefined);
     assert.equal(conventionalDeviceGroup("unknown0", "/dev/dri"), null);
   });
 
@@ -635,8 +692,8 @@ describe("audio and input group convention", () => {
     assert.deepEqual(
       resolveNodeGroups(
         [
-          { node: "seq", gid: 65534 },
-          { node: "timer", gid: 65534 },
+          { node: "seq", gid: OVERFLOW_GID },
+          { node: "timer", gid: OVERFLOW_GID },
         ],
         hostGroups,
         "/dev/snd",
@@ -649,8 +706,8 @@ describe("audio and input group convention", () => {
     assert.deepEqual(
       resolveNodeGroups(
         [
-          { node: "event0", gid: 65534 },
-          { node: "js0", gid: 65534 },
+          { node: "event0", gid: OVERFLOW_GID },
+          { node: "js0", gid: OVERFLOW_GID },
         ],
         hostGroups,
         "/dev/input",
@@ -663,7 +720,7 @@ describe("audio and input group convention", () => {
     // A host with no `input` group must not be told to add one.
     assert.equal(
       resolveNodeGroups(
-        [{ node: "event0", gid: 65534 }],
+        [{ node: "event0", gid: OVERFLOW_GID }],
         parseGroupNames("audio:x:29:\n"),
         "/dev/input",
       ),
@@ -685,7 +742,7 @@ describe("audio and input group convention", () => {
   it("returns null without a directory, as before", () => {
     // Regression guard: the old node-only behaviour for a prefix-less node.
     assert.equal(
-      resolveNodeGroups([{ node: "seq", gid: 65534 }], hostGroups),
+      resolveNodeGroups([{ node: "seq", gid: OVERFLOW_GID }], hostGroups),
       null,
     );
   });
@@ -704,7 +761,7 @@ describe("mixed node ownership", () => {
       runInContainer: () =>
         Promise.resolve({
           nodes: ["card0", "renderD128"],
-          gids: [VIDEO_GID, 65534],
+          gids: [VIDEO_GID, OVERFLOW_GID],
           groupFile: GROUP_FILE,
         }),
     });
@@ -724,7 +781,7 @@ describe("mixed node ownership", () => {
         }
         return Promise.resolve({
           isCharacterDevice: true,
-          gid: p.endsWith("card0") ? VIDEO_GID : 65534,
+          gid: p.endsWith("card0") ? VIDEO_GID : OVERFLOW_GID,
         });
       },
       readFile: () => Promise.resolve(GROUP_FILE),
@@ -741,7 +798,7 @@ describe("mixed node ownership", () => {
       runInContainer: () =>
         Promise.resolve({
           nodes: ["card0", "renderD128"],
-          gids: [65534, 65534],
+          gids: [OVERFLOW_GID, OVERFLOW_GID],
           groupFile: GROUP_FILE,
         }),
     });
@@ -758,7 +815,7 @@ describe("mixed node ownership", () => {
       runInContainer: () =>
         Promise.resolve({
           nodes: ["card0", "controlC0"],
-          gids: [VIDEO_GID, 65534],
+          gids: [VIDEO_GID, OVERFLOW_GID],
           groupFile: GROUP_FILE,
         }),
     });

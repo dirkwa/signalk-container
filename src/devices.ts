@@ -667,10 +667,19 @@ export async function probeHostDevice(
     node,
     gid: remote.gids[i] ?? OVERFLOW_GID,
   }));
-  // The probe reports a single-node request as the self marker rather than a
-  // listing, so that marker is what says "this path IS a node" — and the class
-  // then lives on its parent, not on the path itself.
-  const isNode = remote.nodes.includes(PROBE_SELF_MARKER);
+  // Was this a single-node request? The runner substitutes PROBE_SELF_MARKER
+  // for the requested path's own basename before returning (see
+  // nameSelfMountedNodes), so by here a self-mounted node looks like an
+  // ordinary one-entry listing whose name IS the path's last segment. Both
+  // forms are checked: the marker in case a runner returns it unsubstituted,
+  // and the basename for the substituted shape the real runner produces.
+  // A single-node request classifies against its parent directory.
+  const basename = stripTrailingSlashes(path).slice(
+    stripTrailingSlashes(path).lastIndexOf("/") + 1,
+  );
+  const isNode =
+    remote.nodes.length === 1 &&
+    (remote.nodes[0] === PROBE_SELF_MARKER || remote.nodes[0] === basename);
   const groups = resolveNodeGroups(
     pairs,
     names,
