@@ -9,6 +9,7 @@ import {
   resolveNodeGroups,
   conventionalDeviceGroup,
   deviceDirectoryOf,
+  deviceNodeNameOf,
   OVERFLOW_GID,
 } from "../devices.js";
 
@@ -701,6 +702,64 @@ describe("deviceDirectoryOf", () => {
   it("does not climb past the root", () => {
     assert.equal(deviceDirectoryOf("/snd", true), "/snd");
     assert.equal(deviceDirectoryOf("snd", true), "snd");
+  });
+});
+
+describe("trailing slash on a single-node request", () => {
+  const invisible = {
+    readDir: () => Promise.reject(new Error("ENOENT")),
+    statPath: () => Promise.reject(new Error("ENOENT")),
+    readFile: () => Promise.resolve(""),
+  };
+
+  // "/dev/snd/seq/" takes everything after the last "/" -- the empty string --
+  // unless trailing slashes are stripped first. That named the node "" and
+  // turned a resolvable request into unknown.
+  it("names the node the same with or without a trailing slash", () => {
+    assert.equal(deviceNodeNameOf("/dev/snd/seq"), "seq");
+    assert.equal(deviceNodeNameOf("/dev/snd/seq/"), "seq");
+    assert.equal(deviceNodeNameOf("/dev/snd/seq//"), "seq");
+  });
+
+  it("substitutes the marker for a trailing-slash path", () => {
+    assert.deepEqual(
+      nameSelfMountedNodes([PROBE_SELF_MARKER], "/dev/snd/seq/"),
+      ["seq"],
+    );
+  });
+
+  it("resolves a trailing-slash node through the runtime probe", async () => {
+    const result = await probeHostDevice("/dev/snd/seq/", {
+      containerized: true,
+      ...invisible,
+      runInContainer: () =>
+        Promise.resolve({
+          nodes: [PROBE_SELF_MARKER],
+          gids: [OVERFLOW_GID],
+          groupFile: "audio:x:29:\n",
+        }),
+    });
+    assert.deepEqual(result, {
+      exists: true,
+      nodes: ["seq"],
+      groups: ["audio"],
+    });
+  });
+
+  it("resolves a trailing-slash node on a local read", async () => {
+    const result = await probeHostDevice("/dev/snd/seq/", {
+      containerized: false,
+      readDir: () =>
+        Promise.reject(Object.assign(new Error("ENOTDIR"), { code: "ENOTDIR" })),
+      statPath: () =>
+        Promise.resolve({ isCharacterDevice: true, gid: OVERFLOW_GID }),
+      readFile: () => Promise.resolve("audio:x:29:\n"),
+    });
+    assert.deepEqual(result, {
+      exists: true,
+      nodes: ["seq"],
+      groups: ["audio"],
+    });
   });
 });
 
