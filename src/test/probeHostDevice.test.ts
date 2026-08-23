@@ -135,6 +135,57 @@ describe("probeHostDevice (visible locally)", () => {
   });
 });
 
+describe("bare metal: absent vs unresolved", () => {
+  // A device that is there but whose ownership cannot be resolved is not the
+  // same as no device. Reporting `exists: false` would have the caller skip
+  // passthrough silently instead of surfacing that it could not tell.
+  it("reports unknown for a present device with unresolvable ownership", async () => {
+    const result = await probeHostDevice("/dev/snd", {
+      containerized: false,
+      readDir: () => Promise.resolve(["controlC0"]),
+      statPath: (p: string) =>
+        p.endsWith("controlC0")
+          ? Promise.resolve({ isCharacterDevice: true, gid: 65534 })
+          : Promise.reject(new Error("ENOTDIR")),
+      readFile: () => Promise.resolve("audio:x:29:\n"),
+    });
+    assert.equal(result, null);
+  });
+
+  it("still reports a definite absence for a path that is not there", async () => {
+    const result = await probeHostDevice("/dev/nope", {
+      containerized: false,
+      readDir: () => Promise.reject(new Error("ENOENT")),
+      statPath: () => Promise.reject(new Error("ENOENT")),
+      readFile: () => Promise.resolve(GROUP_FILE),
+    });
+    assert.deepEqual(result, { exists: false, nodes: [], groups: [] });
+  });
+
+  it("still reports a definite absence for a directory holding no devices", async () => {
+    const result = await probeHostDevice("/dev/dri", {
+      containerized: false,
+      readDir: () => Promise.resolve(["by-path", "README"]),
+      statPath: () => Promise.resolve({ isCharacterDevice: false, gid: 0 }),
+      readFile: () => Promise.resolve(GROUP_FILE),
+    });
+    assert.deepEqual(result, { exists: false, nodes: [], groups: [] });
+  });
+
+  it("resolves normally when ownership is readable", async () => {
+    const result = await probeHostDevice("/dev/snd", {
+      containerized: false,
+      readDir: () => Promise.resolve(["controlC0"]),
+      statPath: (p: string) =>
+        p.endsWith("controlC0")
+          ? Promise.resolve({ isCharacterDevice: true, gid: 29 })
+          : Promise.reject(new Error("ENOTDIR")),
+      readFile: () => Promise.resolve("audio:x:29:\n"),
+    });
+    assert.deepEqual(result?.groups, ["audio"]);
+  });
+});
+
 describe("probeHostDevice (containerized)", () => {
   const invisible = {
     readDir: () => Promise.reject(new Error("ENOENT")),

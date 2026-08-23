@@ -319,9 +319,10 @@ if (gpu?.exists) {
 differs per distro and per install, so a hardcoded number silently loses access
 elsewhere.
 
-`null` means **unknown** — no runtime, or the host could not be inspected — and
-is deliberately distinct from `{ exists: false }`, which means definitely
-absent. Assume no device, but do not tell the user there isn't one.
+`null` means **unknown** — no runtime, the host could not be inspected, or the
+nodes are there but their owning group could not be determined. It is
+deliberately distinct from `{ exists: false }`, which means definitely absent.
+Assume no device, but do not tell the user there isn't one.
 
 Works the same on Docker and rootless podman, though by different routes: see
 the README's *Detecting host devices* for why rootless podman cannot report
