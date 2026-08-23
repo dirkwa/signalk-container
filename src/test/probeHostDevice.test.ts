@@ -125,10 +125,12 @@ describe("probeHostDevice (visible locally)", () => {
   });
 
   it("reports a definite absence on bare metal", async () => {
+    // Coded: only ENOENT/ENOTDIR prove absence, anything else is unknown.
+    const enoent = Object.assign(new Error("ENOENT"), { code: "ENOENT" });
     const result = await probeHostDevice("/dev/dri", {
       containerized: false,
-      readDir: () => Promise.reject(new Error("ENOENT")),
-      statPath: () => Promise.reject(new Error("ENOENT")),
+      readDir: () => Promise.reject(enoent),
+      statPath: () => Promise.reject(enoent),
       readFile: () => Promise.resolve(""),
     });
     assert.deepEqual(result, { exists: false, nodes: [], groups: [] });
@@ -152,11 +154,38 @@ describe("bare metal: absent vs unresolved", () => {
     assert.equal(result, null);
   });
 
+  // Only ENOENT and ENOTDIR prove absence. EACCES — a hardened host where
+  // Signal K's user is outside the device group — means we could not look,
+  // which is not the same as looking and finding nothing.
+  it("reports unknown when the path cannot be read", async () => {
+    for (const code of ["EACCES", "EIO", "EPERM"]) {
+      const err = Object.assign(new Error(code), { code });
+      const result = await probeHostDevice("/dev/dri", {
+        containerized: false,
+        readDir: () => Promise.reject(err),
+        statPath: () => Promise.reject(err),
+        readFile: () => Promise.resolve(GROUP_FILE),
+      });
+      assert.equal(result, null, code);
+    }
+  });
+
+  it("reports unknown for a failure with no error code", async () => {
+    const result = await probeHostDevice("/dev/dri", {
+      containerized: false,
+      readDir: () => Promise.reject(new Error("something odd")),
+      statPath: () => Promise.reject(new Error("something odd")),
+      readFile: () => Promise.resolve(GROUP_FILE),
+    });
+    assert.equal(result, null);
+  });
+
   it("still reports a definite absence for a path that is not there", async () => {
+    const enoent = Object.assign(new Error("ENOENT"), { code: "ENOENT" });
     const result = await probeHostDevice("/dev/nope", {
       containerized: false,
-      readDir: () => Promise.reject(new Error("ENOENT")),
-      statPath: () => Promise.reject(new Error("ENOENT")),
+      readDir: () => Promise.reject(enoent),
+      statPath: () => Promise.reject(enoent),
       readFile: () => Promise.resolve(GROUP_FILE),
     });
     assert.deepEqual(result, { exists: false, nodes: [], groups: [] });
@@ -382,10 +411,11 @@ describe("probeHostDevice (single node path)", () => {
   });
 
   it("still reports absent for a path that is neither node nor directory", async () => {
+    const enoent = Object.assign(new Error("ENOENT"), { code: "ENOENT" });
     const result = await probeHostDevice("/dev/nope", {
       containerized: false,
-      readDir: () => Promise.reject(new Error("ENOENT")),
-      statPath: () => Promise.reject(new Error("ENOENT")),
+      readDir: () => Promise.reject(enoent),
+      statPath: () => Promise.reject(enoent),
       readFile: () => Promise.resolve(GROUP_FILE),
     });
     assert.deepEqual(result, { exists: false, nodes: [], groups: [] });
