@@ -622,9 +622,11 @@ export async function probeHostDevice(
   const fromLocal = await readDeviceDir(path, options);
 
   if (!options.containerized) {
-    // Bare metal: what this process sees IS the host, so a local read is the
-    // final answer either way.
-    return fromLocal ?? { exists: false, nodes: [], groups: [] };
+    // Bare metal: what this process sees IS the host, so the local read is the
+    // final answer — including its null, which means the nodes are there but
+    // their ownership could not be resolved. Reporting that as `exists: false`
+    // would tell the caller there is no device at all.
+    return fromLocal;
   }
 
   // Containerized: only trust a local read that actually found something. An
@@ -680,6 +682,14 @@ export async function probeHostDevice(
   };
 }
 
+/**
+ * Returned when a path is genuinely not present, as distinct from `null`,
+ * which a local read uses for "the nodes are there but their ownership could
+ * not be resolved". Collapsing the two would report a device that exists as
+ * definitely absent.
+ */
+const ABSENT: HostDeviceProbeResult = { exists: false, nodes: [], groups: [] };
+
 /** Read a device directory on this process's own filesystem. */
 async function readDeviceDir(
   devicePath: string,
@@ -717,7 +727,8 @@ async function readDeviceDir(
   try {
     entries = await options.readDir(path);
   } catch {
-    return null;
+    // Neither a node nor a readable directory: nothing is there to describe.
+    return ABSENT;
   }
 
   // Kept as pairs: a directory can hold a mapped card0 beside an overflow-gid
@@ -735,7 +746,7 @@ async function readDeviceDir(
   }
   const nodes = found.map((f) => f.node);
 
-  if (nodes.length === 0) return { exists: false, nodes: [], groups: [] };
+  if (nodes.length === 0) return ABSENT;
 
   let groupFile = "";
   try {

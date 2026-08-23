@@ -977,7 +977,7 @@ Three results, and the difference matters:
 | ------------------------------- | ------------------------------------------------------ |
 | `{exists: true, nodes, groups}` | Device is there; pass `groups` to `groupAdd`            |
 | `{exists: false, …}`            | Definitely absent                                       |
-| `null`                          | **Unknown** — no runtime, or the host could not be read |
+| `null`                          | **Unknown** — no runtime, the host could not be read, or the nodes are there but their owning group could not be determined |
 
 Treat `null` as "assume no device, but do not report it as absent".
 
