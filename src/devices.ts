@@ -667,12 +667,19 @@ export async function probeHostDevice(
     node,
     gid: remote.gids[i] ?? OVERFLOW_GID,
   }));
-  const groups = resolveNodeGroups(pairs, names);
+  // The probe reports a single-node request as the self marker rather than a
+  // listing, so that marker is what says "this path IS a node" — and the class
+  // then lives on its parent, not on the path itself.
+  const isNode = remote.nodes.includes(PROBE_SELF_MARKER);
+  const groups = resolveNodeGroups(
+    pairs,
+    names,
+    deviceDirectoryOf(path, isNode),
+  );
 
-  // Nothing resolvable — /dev/snd and /dev/input have no convention to fall
-  // back on. Answering `exists: true` with no groups would have the caller pass
-  // the device through with nothing able to open it, failing silently at
-  // runtime. "Unknown" is the honest answer.
+  // Nothing resolvable at all. Answering `exists: true` with no groups would
+  // have the caller pass the device through with nothing able to open it,
+  // failing silently at runtime. "Unknown" is the honest answer.
   if (groups === null) return null;
 
   return {
@@ -714,6 +721,8 @@ async function readDeviceDir(
       const groups = resolveNodeGroups(
         [{ node: name, gid: st.gid }],
         parseGroupNames(groupFile),
+        // The class lives on the containing directory, not on this node.
+        deviceDirectoryOf(devicePath, true),
       );
       if (groups === null) return null;
       return { exists: true, nodes: [name], groups };
@@ -762,7 +771,7 @@ async function readDeviceDir(
 
   const names = parseGroupNames(groupFile);
   // Same per-node rule as a remote read.
-  const groups = resolveNodeGroups(found, names);
+  const groups = resolveNodeGroups(found, names, deviceDirectoryOf(path));
   if (groups === null) return null;
 
   return { exists: true, nodes: nodes.sort(), groups };
@@ -775,7 +784,44 @@ async function readDeviceDir(
 export const OVERFLOW_GID = 65534;
 
 /**
- * Conventional owning group for a DRM node, by udev naming.
+ * The device directory a request should be classified against.
+ *
+ * `probeHostDevice` accepts either a directory (`/dev/snd`) or a single node
+ * inside one (`/dev/snd/seq`). Only the directory carries the class, so a
+ * single-node request has to be reduced to its parent before the convention
+ * table is consulted.
+ *
+ * @param path the requested path.
+ * @param isNode true when `path` is known to be a node, so the parent is
+ * taken unconditionally. When false the path is used as-is: the caller
+ * listed it as a directory, and a directory is already what we want.
+ */
+export function deviceDirectoryOf(path: string, isNode = false): string {
+  const trimmed = stripTrailingSlashes(path);
+  if (!isNode) return trimmed;
+  const cut = trimmed.lastIndexOf("/");
+  // No separator, or a top-level path like "/snd": nothing to climb to.
+  return cut > 0 ? trimmed.slice(0, cut) : trimmed;
+}
+
+/**
+ * Device directories whose members all share one owning group.
+ *
+ * Unlike `/dev/dri`, these have no usable node-name prefix — `/dev/snd` holds
+ * `seq`, `timer`, `pcmC0D0p`; `/dev/input` holds `event0`, `js0`, `mice` — so
+ * the class is keyed off the directory instead. Both are uniformly one group
+ * on every mainstream distribution's udev rules.
+ *
+ * `/dev/dri` is deliberately absent: its nodes split between `render` and
+ * `video`, so a single directory-wide answer would be wrong for half of them.
+ */
+export const CONVENTIONAL_DIRECTORY_GROUPS: Readonly<Record<string, string>> = {
+  "/dev/snd": "audio",
+  "/dev/input": "input",
+};
+
+/**
+ * Conventional owning group for a device node, by udev naming.
  *
  * Needed because **rootless podman remaps ownership**: a rootless user
  * namespace maps only the subgid range (`dirk:100000:65536` here), so host gid
@@ -786,10 +832,33 @@ export const OVERFLOW_GID = 65534;
  *
  * The FILE content is undistorted, though, so a name from udev convention can
  * be confirmed against the host's own /etc/group rather than guessed at.
+ *
+ * Two rule shapes, because the two device classes are named differently:
+ *
+ * - **By node prefix**, for `/dev/dri`, whose nodes split across two groups by
+ *   name: `renderD*` is the render node, `card*` the display one. The
+ *   directory alone cannot tell them apart.
+ * - **By directory**, for `/dev/snd` and `/dev/input`, whose members share no
+ *   common prefix at all (`seq`, `timer`, `pcmC0D0p`; `event0`, `js0`, `mice`)
+ *   yet are uniformly one group each. Enumerating the node names would be a
+ *   losing game; the containing directory is the reliable signal.
+ *
+ * `directory` is the path the caller asked about. For a single-node request
+ * (`/dev/snd/seq`) pass its parent, since that is what carries the class.
+ *
+ * @returns the conventional group name, or null when no rule applies. The
+ * caller must still confirm the name against the host's /etc/group.
  */
-export function conventionalDrmGroup(node: string): string | null {
+export function conventionalDeviceGroup(
+  node: string,
+  directory?: string,
+): string | null {
   if (node.startsWith("renderD")) return "render";
   if (node.startsWith("card")) return "video";
+  if (directory !== undefined) {
+    const known = CONVENTIONAL_DIRECTORY_GROUPS[stripTrailingSlashes(directory)];
+    if (known !== undefined) return known;
+  }
   return null;
 }
 
@@ -806,12 +875,17 @@ export function conventionalDrmGroup(node: string): string | null {
  * id falls back to udev's convention, kept only when the host defines that
  * name. A node that resolves to neither contributes nothing.
  *
+ * `directory` is the device directory the nodes were listed from; it lets the
+ * convention cover classes whose node names carry no prefix (`/dev/snd`,
+ * `/dev/input`). Omit it and only the node-prefix rules apply.
+ *
  * @returns the group names, or null when NO node could be resolved — unknown,
  * which is not the same as "no groups needed".
  */
 export function resolveNodeGroups(
   pairs: readonly { node: string; gid: number }[],
   names: Map<number, string>,
+  directory?: string,
 ): string[] | null {
   const known = new Set(names.values());
   const groups = new Set<string>();
@@ -823,7 +897,7 @@ export function resolveNodeGroups(
       resolvedAny = true;
       continue;
     }
-    const conventional = conventionalDrmGroup(node);
+    const conventional = conventionalDeviceGroup(node, directory);
     if (conventional !== null && known.has(conventional)) {
       groups.add(conventional);
       resolvedAny = true;

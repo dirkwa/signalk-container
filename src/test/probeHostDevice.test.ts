@@ -7,6 +7,9 @@ import {
   PROBE_SELF_MARKER,
   nameSelfMountedNodes,
   resolveNodeGroups,
+  conventionalDeviceGroup,
+  deviceDirectoryOf,
+  CONVENTIONAL_DIRECTORY_GROUPS,
 } from "../devices.js";
 
 /** The gids GROUP_FILE names, so fixtures do not repeat bare numbers. */
@@ -142,6 +145,39 @@ describe("bare metal: absent vs unresolved", () => {
   // same as no device. Reporting `exists: false` would have the caller skip
   // passthrough silently instead of surfacing that it could not tell.
   it("reports unknown for a present device with unresolvable ownership", async () => {
+    // A directory with no convention rule AND an unreadable gid: nothing left
+    // to resolve from.
+    const result = await probeHostDevice("/dev/unknownclass", {
+      containerized: false,
+      readDir: () => Promise.resolve(["widget0"]),
+      statPath: (p: string) =>
+        p.endsWith("widget0")
+          ? Promise.resolve({ isCharacterDevice: true, gid: 65534 })
+          : Promise.reject(new Error("ENOTDIR")),
+      readFile: () => Promise.resolve("audio:x:29:\n"),
+    });
+    assert.equal(result, null);
+  });
+
+  // A single-node request classifies against its PARENT: "/dev/snd/seq" is not
+  // itself in the convention table, "/dev/snd" is.
+  it("resolves a single remapped node by its parent directory", async () => {
+    const result = await probeHostDevice("/dev/snd/seq", {
+      containerized: false,
+      readDir: () => Promise.reject(new Error("ENOTDIR")),
+      statPath: () => Promise.resolve({ isCharacterDevice: true, gid: 65534 }),
+      readFile: () => Promise.resolve("audio:x:29:\n"),
+    });
+    assert.deepEqual(result, {
+      exists: true,
+      nodes: ["seq"],
+      groups: ["audio"],
+    });
+  });
+
+  // /dev/snd has no usable node prefix, but the directory itself identifies the
+  // class, so a remapped gid still resolves. This is the rootless-podman case.
+  it("resolves a remapped /dev/snd node by directory convention", async () => {
     const result = await probeHostDevice("/dev/snd", {
       containerized: false,
       readDir: () => Promise.resolve(["controlC0"]),
@@ -151,7 +187,11 @@ describe("bare metal: absent vs unresolved", () => {
           : Promise.reject(new Error("ENOTDIR")),
       readFile: () => Promise.resolve("audio:x:29:\n"),
     });
-    assert.equal(result, null);
+    assert.deepEqual(result, {
+      exists: true,
+      nodes: ["controlC0"],
+      groups: ["audio"],
+    });
   });
 
   // Only ENOENT and ENOTDIR prove absence. EACCES — a hardened host where
@@ -303,10 +343,26 @@ describe("probeHostDevice (containerized)", () => {
     assert.deepEqual(result?.groups, ["video"]);
   });
 
-  // /dev/snd and /dev/input have no udev naming convention to fall back on.
+  // A directory with no convention rule still has nothing to fall back on.
   // Reporting exists:true with no groups would have the caller pass the device
   // through with nothing to open it — a silent runtime failure. Unknown is honest.
-  it("returns unknown for a non-DRM device whose ownership cannot be confirmed", async () => {
+  it("returns unknown for a device whose ownership cannot be confirmed", async () => {
+    const result = await probeHostDevice("/dev/unknownclass", {
+      containerized: true,
+      ...invisible,
+      runInContainer: () =>
+        Promise.resolve({
+          nodes: ["widget0", "widget1"],
+          gids: [65534, 65534],
+          groupFile: "audio:x:29:\n",
+        }),
+    });
+    assert.equal(result, null);
+  });
+
+  // The same probe against /dev/snd resolves, because the directory names the
+  // class even though the node names carry no prefix.
+  it("resolves remapped /dev/snd nodes through the runtime probe", async () => {
     const result = await probeHostDevice("/dev/snd", {
       containerized: true,
       ...invisible,
@@ -317,7 +373,7 @@ describe("probeHostDevice (containerized)", () => {
           groupFile: "audio:x:29:\n",
         }),
     });
-    assert.equal(result, null);
+    assert.deepEqual(result?.groups, ["audio"]);
   });
 
   // The probe ran successfully and simply found nothing — a definite absence.
@@ -443,7 +499,20 @@ describe("probeHostDevice (local read, remapped gids)", () => {
     });
   });
 
-  it("returns unknown for a local non-DRM device with a remapped gid", async () => {
+  it("returns unknown for a local device with a remapped gid and no rule", async () => {
+    const result = await probeHostDevice("/dev/unknownclass", {
+      containerized: true,
+      readDir: () => Promise.resolve(["widget0"]),
+      statPath: (p: string) =>
+        p.endsWith("widget0")
+          ? Promise.resolve({ isCharacterDevice: true, gid: 65534 })
+          : Promise.reject(new Error("ENOTDIR")),
+      readFile: () => Promise.resolve("audio:x:29:\n"),
+    });
+    assert.equal(result, null);
+  });
+
+  it("resolves a local remapped /dev/snd node by directory convention", async () => {
     const result = await probeHostDevice("/dev/snd", {
       containerized: true,
       readDir: () => Promise.resolve(["controlC0"]),
@@ -453,7 +522,7 @@ describe("probeHostDevice (local read, remapped gids)", () => {
           : Promise.reject(new Error("ENOTDIR")),
       readFile: () => Promise.resolve("audio:x:29:\n"),
     });
-    assert.equal(result, null);
+    assert.deepEqual(result?.groups, ["audio"]);
   });
 });
 
@@ -499,6 +568,126 @@ describe("resolveNodeGroups", () => {
 
   it("falls back to the numeric gid for an unnamed group", () => {
     assert.deepEqual(resolveNodeGroups([{ node: "card0", gid: 1234 }], names), ["1234"]);
+  });
+});
+
+describe("conventionalDeviceGroup", () => {
+  it("keeps the DRM node-prefix rules", () => {
+    assert.equal(conventionalDeviceGroup("renderD128"), "render");
+    assert.equal(conventionalDeviceGroup("card0"), "video");
+  });
+
+  it("resolves /dev/snd and /dev/input by directory", () => {
+    // These nodes share no prefix with each other -- the whole reason the
+    // directory rule exists.
+    assert.equal(conventionalDeviceGroup("seq", "/dev/snd"), "audio");
+    assert.equal(conventionalDeviceGroup("timer", "/dev/snd"), "audio");
+    assert.equal(conventionalDeviceGroup("pcmC0D0p", "/dev/snd"), "audio");
+    assert.equal(conventionalDeviceGroup("event0", "/dev/input"), "input");
+    assert.equal(conventionalDeviceGroup("js0", "/dev/input"), "input");
+    assert.equal(conventionalDeviceGroup("mice", "/dev/input"), "input");
+  });
+
+  it("tolerates a trailing slash on the directory", () => {
+    assert.equal(conventionalDeviceGroup("seq", "/dev/snd/"), "audio");
+  });
+
+  it("does not give /dev/dri a directory-wide answer", () => {
+    // card* and renderD* differ; one answer for the directory would be wrong
+    // for half its nodes.
+    assert.equal(CONVENTIONAL_DIRECTORY_GROUPS["/dev/dri"], undefined);
+    assert.equal(conventionalDeviceGroup("unknown0", "/dev/dri"), null);
+  });
+
+  it("lets the node prefix win over the directory", () => {
+    assert.equal(conventionalDeviceGroup("renderD128", "/dev/snd"), "render");
+  });
+
+  it("returns null for an unknown directory", () => {
+    assert.equal(conventionalDeviceGroup("ttyUSB0", "/dev/serial"), null);
+    assert.equal(conventionalDeviceGroup("seq"), null);
+  });
+});
+
+describe("deviceDirectoryOf", () => {
+  it("passes a directory request through unchanged", () => {
+    assert.equal(deviceDirectoryOf("/dev/snd"), "/dev/snd");
+    assert.equal(deviceDirectoryOf("/dev/snd/"), "/dev/snd");
+  });
+
+  it("climbs to the parent for a single-node request", () => {
+    assert.equal(deviceDirectoryOf("/dev/snd/seq", true), "/dev/snd");
+    assert.equal(deviceDirectoryOf("/dev/input/event0", true), "/dev/input");
+  });
+
+  it("does not climb past the root", () => {
+    assert.equal(deviceDirectoryOf("/snd", true), "/snd");
+    assert.equal(deviceDirectoryOf("snd", true), "snd");
+  });
+});
+
+describe("audio and input group convention", () => {
+  const hostGroups = parseGroupNames("audio:x:29:\ninput:x:996:\n");
+
+  it("resolves overflow-gid /dev/snd nodes to audio", () => {
+    // Exactly the rootless-podman case: every gid reads back as the overflow
+    // id, so only the convention can answer.
+    assert.deepEqual(
+      resolveNodeGroups(
+        [
+          { node: "seq", gid: 65534 },
+          { node: "timer", gid: 65534 },
+        ],
+        hostGroups,
+        "/dev/snd",
+      ),
+      ["audio"],
+    );
+  });
+
+  it("resolves overflow-gid /dev/input nodes to input", () => {
+    assert.deepEqual(
+      resolveNodeGroups(
+        [
+          { node: "event0", gid: 65534 },
+          { node: "js0", gid: 65534 },
+        ],
+        hostGroups,
+        "/dev/input",
+      ),
+      ["input"],
+    );
+  });
+
+  it("still drops a name the host does not define", () => {
+    // A host with no `input` group must not be told to add one.
+    assert.equal(
+      resolveNodeGroups(
+        [{ node: "event0", gid: 65534 }],
+        parseGroupNames("audio:x:29:\n"),
+        "/dev/input",
+      ),
+      null,
+    );
+  });
+
+  it("prefers a readable gid over the convention", () => {
+    assert.deepEqual(
+      resolveNodeGroups(
+        [{ node: "seq", gid: 29 }],
+        hostGroups,
+        "/dev/snd",
+      ),
+      ["audio"],
+    );
+  });
+
+  it("returns null without a directory, as before", () => {
+    // Regression guard: the old node-only behaviour for a prefix-less node.
+    assert.equal(
+      resolveNodeGroups([{ node: "seq", gid: 65534 }], hostGroups),
+      null,
+    );
   });
 });
 
