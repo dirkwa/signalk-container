@@ -661,25 +661,30 @@ export async function probeHostDevice(
 
   const names = parseGroupNames(remote.groupFile);
 
+  // A self-mounted single-node request comes back as PROBE_SELF_MARKER, which
+  // is a placeholder rather than a device name. The real runner substitutes it
+  // (nameSelfMountedNodes) before returning, but normalize here too so this
+  // function behaves the same whichever form it is handed: left raw, the
+  // marker would reach the udev rules as a node named "__self__", match no
+  // prefix, and turn a resolvable renderD128 into "unknown".
+  const nodes = nameSelfMountedNodes([...remote.nodes], path);
+
   // Under rootless podman every gid read inside the probe comes back as the
   // overflow id, so the numbers carry no information.
-  const pairs = remote.nodes.map((node, i) => ({
+  const pairs = nodes.map((node, i) => ({
     node,
     gid: remote.gids[i] ?? OVERFLOW_GID,
   }));
-  // Was this a single-node request? The runner substitutes PROBE_SELF_MARKER
-  // for the requested path's own basename before returning (see
-  // nameSelfMountedNodes), so by here a self-mounted node looks like an
-  // ordinary one-entry listing whose name IS the path's last segment. Both
-  // forms are checked: the marker in case a runner returns it unsubstituted,
-  // and the basename for the substituted shape the real runner produces.
-  // A single-node request classifies against its parent directory.
-  const basename = stripTrailingSlashes(path).slice(
-    stripTrailingSlashes(path).lastIndexOf("/") + 1,
-  );
+
+  // Was this a single-node request? After the normalization above, one entry
+  // whose name IS the path's last segment is exactly that shape. A single node
+  // classifies against its PARENT, since the class lives on the directory.
   const isNode =
-    remote.nodes.length === 1 &&
-    (remote.nodes[0] === PROBE_SELF_MARKER || remote.nodes[0] === basename);
+    nodes.length === 1 &&
+    nodes[0] ===
+      stripTrailingSlashes(path).slice(
+        stripTrailingSlashes(path).lastIndexOf("/") + 1,
+      );
   const groups = resolveNodeGroups(
     pairs,
     names,
@@ -693,7 +698,7 @@ export async function probeHostDevice(
 
   return {
     exists: true,
-    nodes: [...remote.nodes].sort(),
+    nodes: [...nodes].sort(),
     groups,
   };
 }
