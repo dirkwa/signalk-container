@@ -668,6 +668,7 @@ export async function probeHostDevice(
   // marker would reach the udev rules as a node named "__self__", match no
   // prefix, and turn a resolvable renderD128 into "unknown".
   const nodes = nameSelfMountedNodes([...remote.nodes], path);
+  const requestedName = deviceNodeNameOf(path);
 
   // Under rootless podman every gid read inside the probe comes back as the
   // overflow id, so the numbers carry no information.
@@ -679,12 +680,7 @@ export async function probeHostDevice(
   // Was this a single-node request? After the normalization above, one entry
   // whose name IS the path's last segment is exactly that shape. A single node
   // classifies against its PARENT, since the class lives on the directory.
-  const isNode =
-    nodes.length === 1 &&
-    nodes[0] ===
-      stripTrailingSlashes(path).slice(
-        stripTrailingSlashes(path).lastIndexOf("/") + 1,
-      );
+  const isNode = nodes.length === 1 && nodes[0] === requestedName;
   const groups = resolveNodeGroups(
     pairs,
     names,
@@ -725,7 +721,7 @@ async function readDeviceDir(
   try {
     const st = await options.statPath(devicePath);
     if (st.isCharacterDevice) {
-      const name = devicePath.slice(devicePath.lastIndexOf("/") + 1);
+      const name = deviceNodeNameOf(devicePath);
       let groupFile = "";
       try {
         groupFile = await options.readFile("/etc/group");
@@ -796,6 +792,16 @@ async function readDeviceDir(
  * for any owner outside its range. 65534 (`nobody`) is the value Linux uses.
  */
 export const OVERFLOW_GID = 65534;
+
+/**
+ * Last path segment of a device path, ignoring trailing slashes.
+ *
+ * `/dev/snd/seq` and `/dev/snd/seq/` both name the node `seq`.
+ */
+export function deviceNodeNameOf(path: string): string {
+  const trimmed = stripTrailingSlashes(path);
+  return trimmed.slice(trimmed.lastIndexOf("/") + 1);
+}
 
 /**
  * The device directory a request should be classified against.
@@ -953,7 +959,9 @@ export function nameSelfMountedNodes(
   nodes: string[],
   requestedPath: string,
 ): string[] {
-  const name = requestedPath.slice(requestedPath.lastIndexOf("/") + 1);
+  // Trailing slashes are stripped first: "/dev/snd/seq/" would otherwise take
+  // everything after the last "/" and name the node "".
+  const name = deviceNodeNameOf(requestedPath);
   return nodes.map((n) => (n === PROBE_SELF_MARKER ? name : n));
 }
 
