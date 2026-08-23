@@ -385,6 +385,27 @@ describe("probeHostDevice (containerized)", () => {
     });
   });
 
+  // A raw marker must resolve identically to the substituted form. Left as
+  // "__self__" it matches no udev prefix, and /dev/dri has no directory rule
+  // by design, so a resolvable renderD128 would come back as unknown.
+  it("resolves a raw-marker DRM node request", async () => {
+    const result = await probeHostDevice("/dev/dri/renderD128", {
+      containerized: true,
+      ...invisible,
+      runInContainer: () =>
+        Promise.resolve({
+          nodes: [PROBE_SELF_MARKER],
+          gids: [OVERFLOW_GID],
+          groupFile: GROUP_FILE,
+        }),
+    });
+    assert.deepEqual(result, {
+      exists: true,
+      nodes: ["renderD128"],
+      groups: ["render"],
+    });
+  });
+
   // The unsubstituted form is still accepted, so a runner that returns the
   // raw marker resolves identically.
   it("accepts an unsubstituted self marker from the probe", async () => {
@@ -684,7 +705,11 @@ describe("deviceDirectoryOf", () => {
 });
 
 describe("audio and input group convention", () => {
-  const hostGroups = parseGroupNames("audio:x:29:\ninput:x:996:\n");
+  const AUDIO_GID = 29;
+  const INPUT_GID = 996;
+  const hostGroups = parseGroupNames(
+    `audio:x:${String(AUDIO_GID)}:\ninput:x:${String(INPUT_GID)}:\n`,
+  );
 
   it("resolves overflow-gid /dev/snd nodes to audio", () => {
     // Exactly the rootless-podman case: every gid reads back as the overflow
@@ -721,7 +746,7 @@ describe("audio and input group convention", () => {
     assert.equal(
       resolveNodeGroups(
         [{ node: "event0", gid: OVERFLOW_GID }],
-        parseGroupNames("audio:x:29:\n"),
+        parseGroupNames(`audio:x:${String(AUDIO_GID)}:\n`),
         "/dev/input",
       ),
       null,
@@ -729,18 +754,24 @@ describe("audio and input group convention", () => {
   });
 
   it("prefers a readable gid over the convention", () => {
+    // Deliberately contradictory: a node in /dev/snd (convention says audio)
+    // whose gid is readable and says input. A readable gid is fact, the
+    // convention only a fallback, so the gid must win -- and picking a gid
+    // that disagrees is the only way to tell the two apart.
     assert.deepEqual(
       resolveNodeGroups(
-        [{ node: "seq", gid: 29 }],
+        [{ node: "seq", gid: INPUT_GID }],
         hostGroups,
         "/dev/snd",
       ),
-      ["audio"],
+      ["input"],
     );
   });
 
-  it("returns null without a directory, as before", () => {
-    // Regression guard: the old node-only behaviour for a prefix-less node.
+  it("returns null without a directory", () => {
+    // A prefix-less node cannot resolve on its own: `seq` matches no udev
+    // prefix rule, and without the containing directory there is no class to
+    // look up.
     assert.equal(
       resolveNodeGroups([{ node: "seq", gid: OVERFLOW_GID }], hostGroups),
       null,
