@@ -319,8 +319,9 @@ if (gpu?.exists) {
 differs per distro and per install, so a hardcoded number silently loses access
 elsewhere.
 
-`null` means **unknown** — no runtime, the host could not be inspected, or the
-nodes are there but their owning group could not be determined. It is
+`null` means **unknown** — no runtime, the path could not be read (a permission
+error, say), or the nodes are there but their owning group could not be
+determined. It is
 deliberately distinct from `{ exists: false }`, which means definitely absent.
 Assume no device, but do not tell the user there isn't one.
 

@@ -726,9 +726,14 @@ async function readDeviceDir(
   let entries: string[];
   try {
     entries = await options.readDir(path);
-  } catch {
-    // Neither a node nor a readable directory: nothing is there to describe.
-    return ABSENT;
+  } catch (err) {
+    // Only ENOENT (nothing there) and ENOTDIR (a node, already handled above)
+    // prove the path is absent. Anything else — EACCES on a hardened host
+    // where Signal K's user is outside the device group, EIO on failing
+    // hardware — means we could not look, which is not the same as looking and
+    // finding nothing.
+    const code = (err as NodeJS.ErrnoException).code;
+    return code === "ENOENT" || code === "ENOTDIR" ? ABSENT : null;
   }
 
   // Kept as pairs: a directory can hold a mapped card0 beside an overflow-gid
