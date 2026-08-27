@@ -3263,27 +3263,27 @@ function headlineForDoctorStatus(
  * Bare metal: yes -- this filesystem IS the host's, so `existsSync` is the
  * final answer, present or absent.
  *
- * Containerized: no, in general. The runtime resolves a bind source against
- * the HOST filesystem, which this process cannot see; `existsSync` here
- * answers about a different filesystem entirely and reports a real host
- * directory as missing. Return "unknown" so the caller keeps the volume and
- * lets the runtime decide against the real thing.
- *
- * The exception is a path this container has itself mounted: it is visible
- * here AND backed by a host source, so a positive result is trustworthy. A
- * negative one is not -- absence inside this filesystem says nothing about the
- * host -- so only `true` is promoted out of it.
+ * Containerized: only for a path covered by one of this container's own bind
+ * mounts. There, what is seen here IS the host's filesystem at a known offset,
+ * so both answers are trustworthy. Everywhere else `existsSync` answers about
+ * a different filesystem entirely -- a path can exist in the image layer while
+ * the host has nothing (verified: `mkdir /data` inside a container against a
+ * host with no `/data`), and a real host directory reads as missing -- so
+ * neither answer means anything and the result is "unknown".
  *
  * Exported for tests; the dependencies are parameters so neither a real
- * filesystem nor a real container is needed to exercise both branches.
+ * filesystem nor a real container is needed to exercise every branch.
  */
 export function probeVolumeSource(
   hostPath: string,
   containerized: boolean = isContainerized(),
   exists: (p: string) => boolean = existsSync,
+  coveredByOwnMount: (p: string) => boolean = () => false,
 ): VolumeSourceState {
   if (!containerized) return exists(hostPath);
-  return exists(hostPath) ? true : "unknown";
+  // A bind mount makes this container's view of the path the host's view.
+  if (coveredByOwnMount(hostPath)) return exists(hostPath);
+  return "unknown";
 }
 
 export function pluginErrorForDoctor(

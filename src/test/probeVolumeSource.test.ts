@@ -2,9 +2,8 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { probeVolumeSource } from "../index.js";
 
-/** Filesystem stub: only the listed paths are visible to this process. */
-function fs(visible: string[]) {
-  const set = new Set(visible);
+function visibleTo(paths: string[]) {
+  const set = new Set(paths);
   return (p: string) => set.has(p);
 }
 
@@ -12,13 +11,13 @@ describe("probeVolumeSource — bare metal", () => {
   // This process's filesystem IS the host's, so both answers are final and
   // `skip` / `abort` keep working exactly as they did before the tri-state.
   it("answers definitively in both directions", () => {
-    const exists = fs(["/host/present"]);
+    const exists = visibleTo(["/host/present"]);
     assert.equal(probeVolumeSource("/host/present", false, exists), true);
     assert.equal(probeVolumeSource("/host/absent", false, exists), false);
   });
 
   it("never returns unknown", () => {
-    const exists = fs([]);
+    const exists = visibleTo([]);
     assert.notEqual(probeVolumeSource("/anything", false, exists), "unknown");
   });
 });
@@ -28,24 +27,40 @@ describe("probeVolumeSource — containerized", () => {
   // this process cannot see, so "not here" proves nothing and must not be
   // reported as absent.
   it("reports a path it cannot see as unknown, not missing", () => {
-    const exists = fs([]);
+    const exists = visibleTo([]);
     assert.equal(
       probeVolumeSource("/home/user/.signalk/charts", true, exists),
       "unknown",
     );
   });
 
-  // A path this container has itself mounted is visible here AND backed by a
-  // host source, so a positive result is trustworthy.
-  it("trusts a positive result from a mounted path", () => {
-    const exists = fs(["/data/visible"]);
-    assert.equal(probeVolumeSource("/data/visible", true, exists), true);
+  // Visibility alone proves nothing: a path can exist in the container's own
+  // image layer while the host has nothing there. Verified against a real
+  // runtime -- `mkdir /data` inside a container on a host with no /data.
+  it("does not trust a visible path that is not a bind mount", () => {
+    const exists = visibleTo(["/data/in-image-layer"]);
+    assert.equal(
+      probeVolumeSource("/data/in-image-layer", true, exists),
+      "unknown",
+    );
   });
 
-  it("never returns a bare false", () => {
-    // False would mean "proven absent on the host", which this process is not
-    // in a position to establish.
-    const exists = fs(["/seen"]);
+  // A bind mount makes this container's view of the path the host's view, so
+  // both answers become trustworthy again.
+  it("answers definitively for a path under one of its own bind mounts", () => {
+    const exists = visibleTo(["/data/bound"]);
+    const bound = (p: string) => p.startsWith("/data/");
+    assert.equal(probeVolumeSource("/data/bound", true, exists, bound), true);
+    assert.equal(
+      probeVolumeSource("/data/gone", true, exists, bound),
+      false,
+    );
+  });
+
+  it("never returns a bare false without a covering mount", () => {
+    // False would mean "proven absent on the host", which this process cannot
+    // establish without a bind mount to look through.
+    const exists = visibleTo(["/seen"]);
     for (const p of ["/seen", "/unseen"]) {
       assert.notEqual(probeVolumeSource(p, true, exists), false);
     }
