@@ -4617,6 +4617,63 @@ export async function resolveHostPath(
 }
 
 /**
+ * Does one of these mounts make `absPath` a truthful view of the host?
+ *
+ * Bind mounts only. A named volume's contents are not the host filesystem at
+ * that path, so seeing a file inside one proves nothing about a bind source
+ * the runtime would resolve against the host.
+ *
+ * Matching is exact-or-child: a mount at `/data` covers `/data` and
+ * `/data/sub`, but not `/database`. Factored out of `ownBindMountCoverage`
+ * so the rule is testable without a runtime.
+ */
+export function isPathUnderBindMount(
+  absPath: string,
+  mounts: readonly InspectedMount[],
+): boolean {
+  return mounts.some(
+    (m) =>
+      m.type === "bind" &&
+      (absPath === m.dest || absPath.startsWith(m.dest + "/")),
+  );
+}
+
+/**
+ * Host paths this container can see truthfully, as a predicate.
+ *
+ * A bind mount makes this container's view of a path the HOST's view at a
+ * known offset, so `existsSync` under one is authoritative in both directions.
+ * Anywhere else a containerized process is looking at a different filesystem
+ * entirely, and neither answer means anything about the host.
+ *
+ * Returns a predicate rather than resolving one path so the inspect happens
+ * ONCE per reconcile instead of once per volume. On bare metal, or when the
+ * self-inspect fails, every path is covered / not covered respectively — the
+ * caller decides what that means.
+ */
+export async function ownBindMountCoverage(
+  runtime: ContainerRuntimeInfo,
+  debug: (msg: string) => void = () => {},
+  client: ContainerClient = getClient(),
+): Promise<(absPath: string) => boolean> {
+  if (!isContainerized()) return () => true;
+
+  const selfId = await findSelfContainerId(runtime, debug, client);
+  if (!selfId) {
+    debug("ownBindMountCoverage: could not detect self container id");
+    return () => false;
+  }
+  const info = await safeInspect(() => client.getContainer(selfId).inspect());
+  if (info === null) {
+    debug(`ownBindMountCoverage: inspect ${selfId} failed`);
+    return () => false;
+  }
+
+  const mounts = mountsFromInspect(info);
+  return (absPath: string) => isPathUnderBindMount(absPath, mounts);
+}
+
+/**
  * Process-local set of ports that are currently reserved by an in-flight
  * `findAvailablePort()` call.  Prevents two concurrent `ensureRunning()`
  * calls from probing and claiming the same host port before either

@@ -28,8 +28,10 @@ describe("probeVolumeSource — containerized", () => {
   // reported as absent.
   it("reports a path it cannot see as unknown, not missing", () => {
     const exists = visibleTo([]);
+    // Shape of the path from #245, without a literal home directory: the
+    // plugin CI validator rejects any "/home/<name>/" string in the tree.
     assert.equal(
-      probeVolumeSource("/home/user/.signalk/charts", true, exists),
+      probeVolumeSource("/srv/sk-data/charts-simple", true, exists),
       "unknown",
     );
   });

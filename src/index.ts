@@ -47,6 +47,7 @@ import {
 import { resetClient } from "./client.js";
 import {
   classifyVolumeSources,
+  ownBindMountCoverage,
   type VolumeSourceState,
   collectRecoveredVolumes,
   defaultHomeForConfigRoot,
@@ -1153,10 +1154,20 @@ export default (app: App) => {
       // `abort` entry never lands in `unverified` (it aborts instead), so this
       // is recorded as the probe runs rather than derived from that list.
       const unverifiable = new Set<string>();
+      // Fetched once per reconcile: it costs a self-inspect, and every volume
+      // in this call is judged against the same mount table.
+      const coveredByOwnMount = runtimeInfo
+        ? await ownBindMountCoverage(runtimeInfo, app.debug)
+        : () => false;
       const { kept, skipped, aborted, unverified } = classifyVolumeSources(
         effectiveConfigPreFilter.volumes,
         (hostPath) => {
-          const state = probeVolumeSource(hostPath);
+          const state = probeVolumeSource(
+            hostPath,
+            isContainerized(),
+            existsSync,
+            coveredByOwnMount,
+          );
           if (state === "unknown") unverifiable.add(hostPath);
           return state;
         },
