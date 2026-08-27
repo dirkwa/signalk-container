@@ -1,6 +1,6 @@
 import { IRouter } from "express";
 import path from "node:path";
-import { promises as fsp } from "node:fs";
+import { existsSync, promises as fsp } from "node:fs";
 import {
   CleanupOrphansResult,
   ConsumerManifest,
@@ -47,6 +47,7 @@ import {
 import { resetClient } from "./client.js";
 import {
   classifyVolumeSources,
+  type VolumeSourceState,
   collectRecoveredVolumes,
   defaultHomeForConfigRoot,
   defaultTimezoneEnv,
@@ -762,6 +763,28 @@ export default (app: App) => {
     return broker;
   }
 
+  /**
+   * Can this process establish whether a host bind source exists?
+   *
+   * Bare metal: yes -- this filesystem IS the host's, so `existsSync` is the
+   * final answer, present or absent.
+   *
+   * Containerized: no, in general. The runtime resolves a bind source against
+   * the HOST filesystem, which this process cannot see; `existsSync` here
+   * answers about a different filesystem entirely and reports a real host
+   * directory as missing. Return "unknown" so the caller keeps the volume and
+   * lets the runtime decide against the real thing.
+   *
+   * The exception is a path this container has itself mounted: it is visible
+   * here AND backed by a host source, so a positive result is trustworthy. A
+   * negative one still is not -- absence inside this filesystem does not prove
+   * absence on the host -- so only `true` is promoted out of it.
+   */
+  function probeVolumeSource(hostPath: string): VolumeSourceState {
+    if (!isContainerized()) return existsSync(hostPath);
+    return existsSync(hostPath) ? true : "unknown";
+  }
+
   const api: ContainerManagerApi = {
     getRuntime() {
       return runtimeInfo;
@@ -1140,9 +1163,26 @@ export default (app: App) => {
       // ifMissing policy. `skipped` volumes are dropped from the
       // request and announced via onVolumeIssue; `aborted` volumes
       // trigger an event then a throw.
-      const { kept, skipped, aborted } = classifyVolumeSources(
+      // The probe answers "unknown" rather than "missing" whenever this
+      // process cannot see the host filesystem. When the manager itself runs
+      // in a container -- the common deployment -- `existsSync` on a host
+      // path checks THIS container's filesystem, not the one the runtime
+      // resolves bind sources against. A host directory that plainly exists
+      // then reads as absent, and `ifMissing: 'skip'` silently drops a
+      // working mount. Consumers worked around it by passing a bare string
+      // source, which gives up the skip policy altogether.
+      const { kept, skipped, aborted, unverified } = classifyVolumeSources(
         effectiveConfigPreFilter.volumes,
+        probeVolumeSource,
       );
+
+      for (const v of unverified) {
+        app.debug(
+          `ensureRunning(${name}): cannot verify host path ${v.source} from ` +
+            `inside this container; keeping volume ${v.containerPath} ` +
+            `unverified -- the runtime resolves it against the real host`,
+        );
+      }
 
       const emitVolumeIssue = (event: VolumeIssue) =>
         safeInvokeVolumeIssue(options?.onVolumeIssue, event, (err) =>

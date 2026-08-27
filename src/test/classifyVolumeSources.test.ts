@@ -186,3 +186,92 @@ describe("classifyVolumeSources — relative paths (dot prefix)", () => {
     ]);
   });
 });
+
+describe("classifyVolumeSources — unverifiable host source", () => {
+  /** A probe that cannot see the host filesystem at all. */
+  const blind = () => "unknown" as const;
+
+  // The reported bug: signalk-container runs inside a container, existsSync
+  // checks ITS filesystem, and a real host directory reads as missing. The
+  // volume was dropped and the consumer had to fall back to a bare string
+  // source, losing the skip policy entirely.
+  it("keeps a skip-policy volume whose source cannot be verified", () => {
+    const r = classifyVolumeSources(
+      { "/charts": { source: "/host/charts", ifMissing: "skip" } },
+      blind,
+    );
+    assert.deepEqual(r.kept, { "/charts": "/host/charts" });
+    assert.deepEqual(r.skipped, []);
+    assert.deepEqual(r.unverified, [
+      { containerPath: "/charts", source: "/host/charts" },
+    ]);
+  });
+
+  // "Required" means required, not "fail whenever the check is inconclusive".
+  // Aborting on unknown would take down every consumer using ifMissing:abort
+  // the moment the manager is containerized.
+  it("does not abort on a source it merely cannot verify", () => {
+    const r = classifyVolumeSources(
+      { "/data": { source: "/host/data", ifMissing: "abort" } },
+      blind,
+    );
+    assert.deepEqual(r.kept, { "/data": "/host/data" });
+    assert.deepEqual(r.aborted, []);
+    assert.equal(r.unverified.length, 1);
+  });
+
+  it("still skips and aborts on a source proven absent", () => {
+    const gone = () => false;
+    const skip = classifyVolumeSources(
+      { "/charts": { source: "/host/charts", ifMissing: "skip" } },
+      gone,
+    );
+    assert.deepEqual(skip.kept, {});
+    assert.equal(skip.skipped.length, 1);
+    assert.deepEqual(skip.unverified, []);
+
+    const abort = classifyVolumeSources(
+      { "/data": { source: "/host/data", ifMissing: "abort" } },
+      gone,
+    );
+    assert.equal(abort.aborted.length, 1);
+    assert.deepEqual(abort.unverified, []);
+  });
+
+  // A named volume has no host path to check, so it must never reach the probe
+  // and never be reported unverified.
+  it("does not report a named volume as unverified", () => {
+    const r = classifyVolumeSources(
+      { "/data": { source: "my-named-volume", ifMissing: "skip" } },
+      blind,
+    );
+    assert.deepEqual(r.kept, { "/data": "my-named-volume" });
+    assert.deepEqual(r.unverified, []);
+  });
+
+  it("classifies a mixed set independently", () => {
+    const r = classifyVolumeSources(
+      {
+        "/a": { source: "/host/seen", ifMissing: "skip" },
+        "/b": { source: "/host/blind", ifMissing: "skip" },
+        "/c": { source: "/host/gone", ifMissing: "skip" },
+      },
+      (path) =>
+        path === "/host/seen" ? true : path === "/host/gone" ? false : "unknown",
+    );
+    assert.deepEqual(r.kept, {
+      "/a": "/host/seen",
+      "/b": "/host/blind",
+    });
+    assert.deepEqual(r.skipped, [
+      { containerPath: "/c", source: "/host/gone" },
+    ]);
+    assert.deepEqual(r.unverified, [
+      { containerPath: "/b", source: "/host/blind" },
+    ]);
+  });
+
+  it("reports no unverified entries for undefined volumes", () => {
+    assert.deepEqual(classifyVolumeSources(undefined, blind).unverified, []);
+  });
+});
