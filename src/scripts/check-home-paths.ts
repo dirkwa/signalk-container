@@ -8,17 +8,20 @@
  *
  * The regex is copied verbatim from the upstream workflow. Note it matches a
  * quote or BACKTICK followed by the path, so a doc comment is not exempt --
- * write such examples with the segment assembled, or use a neutral path.
+ * write such an example with the segment assembled, or use a neutral path.
+ *
+ * Scans sources, not build output: `dist/` is compiled from `src/` and would
+ * only ever duplicate a finding, while the CI validator reads the published
+ * tree.
  */
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 
 const HARDCODED_PATH_RE = /["'`]\/home\/[a-zA-Z][a-zA-Z0-9_-]*\//g;
-const ROOT = process.cwd();
 const SKIP = new Set(["node_modules", ".git", "dist", "public", "coverage"]);
 const EXTENSIONS = [".ts", ".tsx", ".js", ".mjs", ".cjs", ".json"];
 
-function* walk(dir) {
+function* walk(dir: string): Generator<string> {
   for (const entry of readdirSync(dir)) {
     if (SKIP.has(entry)) continue;
     const full = join(dir, entry);
@@ -27,14 +30,18 @@ function* walk(dir) {
   }
 }
 
-const errors = [];
-for (const file of walk(ROOT)) {
-  const matches = readFileSync(file, "utf8").match(HARDCODED_PATH_RE);
-  if (matches) {
-    errors.push(`${relative(ROOT, file)}: ${[...new Set(matches)].join(", ")}`);
+export function findHardcodedHomePaths(root: string): string[] {
+  const errors: string[] = [];
+  for (const file of walk(root)) {
+    const matches = readFileSync(file, "utf8").match(HARDCODED_PATH_RE);
+    if (matches) {
+      errors.push(`${relative(root, file)}: ${[...new Set(matches)].join(", ")}`);
+    }
   }
+  return errors;
 }
 
+const errors = findHardcodedHomePaths(process.cwd());
 if (errors.length > 0) {
   console.error("Hardcoded home directory paths (plugin CI rejects these):");
   for (const e of errors) console.error(`  ${e}`);

@@ -4,6 +4,9 @@ dist/test/
 # src/configpanel from emit, but the rule stays as a safety belt
 # in case the exclude is ever removed.
 dist/configpanel/
+# Build-time guard against hardcoded home paths; runs from the repo, never
+# from an installed copy.
+dist/scripts/
 .github/
 *.tsbuildinfo
 .DS_Store

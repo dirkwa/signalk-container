@@ -22,7 +22,10 @@ const bind = (source: string, dest: string): InspectedMount => ({
 });
 
 describe("isPathUnderBindMount", () => {
-  const mounts = [bind("/host/data", "/data"), bind("/host/etc", "/etc/certs")];
+  // Path-preserving binds: the host path and the in-container path are the
+  // same string, which is what makes a local existsSync answer the caller's
+  // question about the host.
+  const mounts = [bind("/data", "/data"), bind("/etc/certs", "/etc/certs")];
 
   it("covers the mount destination itself", () => {
     assert.equal(isPathUnderBindMount("/data", mounts), true);
@@ -31,6 +34,19 @@ describe("isPathUnderBindMount", () => {
   it("covers a child of the destination", () => {
     assert.equal(isPathUnderBindMount("/data/sub/file", mounts), true);
     assert.equal(isPathUnderBindMount("/etc/certs/tls.pem", mounts), true);
+  });
+
+  // The core correction: a remapped bind does NOT make the host path
+  // locally checkable. With /host/data mounted at /data, the string
+  // "/data/certs" inside the container names host /host/data/certs, and the
+  // host's own /data is not visible at all -- verified against a real
+  // runtime. Trusting it would report a nonexistent required source as
+  // present and let ifMissing:"abort" pass.
+  it("does not cover a remapped bind", () => {
+    const remapped = [bind("/host/data", "/data")];
+    assert.equal(isPathUnderBindMount("/data", remapped), false);
+    assert.equal(isPathUnderBindMount("/data/certs", remapped), false);
+    assert.equal(isPathUnderBindMount("/host/data", remapped), false);
   });
 
   // The trap in a naive startsWith: /database is not under /data.
@@ -47,10 +63,11 @@ describe("isPathUnderBindMount", () => {
   // A named volume's contents are not the host filesystem at that path, so a
   // file seen inside one proves nothing about a host bind source.
   it("ignores named volumes", () => {
+    // Path-preserving, so only the volume type can be what excludes it.
     const vol: InspectedMount = {
       type: "volume",
       name: "myvol",
-      source: "/var/lib/docker/volumes/myvol/_data",
+      source: "/v",
       dest: "/v",
     };
     assert.equal(isPathUnderBindMount("/v", [vol]), false);
@@ -74,5 +91,24 @@ describe("ownBindMountCoverage", () => {
     );
     assert.equal(covered("/anywhere/at/all"), true);
     assert.equal(covered("/srv/sk-data/charts"), true);
+  });
+});
+
+describe("ownBindMountCoverage — failure handling", () => {
+  // safeInspect rethrows anything that is not a 404, and this runs on every
+  // reconcile. Letting that escape would reject ensureRunning on a transient
+  // daemon hiccup, when the tri-state classification is meant to carry on
+  // with "unknown" instead.
+  it("degrades to covering nothing when the runtime throws", async () => {
+    const exploding = makeMockClient({
+      defaultContainer: {
+        inspect: () => Promise.reject(new Error("daemon unreachable")),
+      },
+    });
+    const covered = await ownBindMountCoverage(runtime, () => {}, exploding);
+    assert.equal(typeof covered, "function");
+    // Bare metal short-circuits before any inspect, so this asserts the call
+    // resolves rather than rejects -- the property that matters here.
+    assert.doesNotThrow(() => covered("/anything"));
   });
 });

@@ -4617,15 +4617,26 @@ export async function resolveHostPath(
 }
 
 /**
- * Does one of these mounts make `absPath` a truthful view of the host?
+ * Can `existsSync(hostPath)` be trusted inside this container?
  *
- * Bind mounts only. A named volume's contents are not the host filesystem at
- * that path, so seeing a file inside one proves nothing about a bind source
- * the runtime would resolve against the host.
+ * The caller holds a HOST path and stats that same string locally, so the
+ * mount has to make those two the same thing. Three conditions, and all are
+ * load-bearing:
  *
- * Matching is exact-or-child: a mount at `/data` covers `/data` and
- * `/data/sub`, but not `/database`. Factored out of `ownBindMountCoverage`
- * so the rule is testable without a runtime.
+ * - **Bind mounts only.** A named volume's contents are not the host
+ *   filesystem at that path, so a file seen inside one proves nothing.
+ * - **Path-preserving only** (`source === dest`). A bind of `/host/data` to
+ *   `/data` puts the host's `/host/data` at `/data`; the string `/data` inside
+ *   the container names `/host/data` on the host, and the host's own `/data`
+ *   is not visible at all. Verified against a real runtime. Trusting such a
+ *   mount would let `existsSync("/data/certs")` answer about
+ *   `/host/data/certs` and report a nonexistent required source as present --
+ *   exactly the `ifMissing: "abort"` failure this guards.
+ * - **Exact-or-child.** A mount at `/data` covers `/data` and `/data/sub`,
+ *   never `/database`.
+ *
+ * Factored out of `ownBindMountCoverage` so the rule is testable without a
+ * runtime.
  */
 export function isPathUnderBindMount(
   absPath: string,
@@ -4634,6 +4645,7 @@ export function isPathUnderBindMount(
   return mounts.some(
     (m) =>
       m.type === "bind" &&
+      m.source === m.dest &&
       (absPath === m.dest || absPath.startsWith(m.dest + "/")),
   );
 }
@@ -4658,19 +4670,33 @@ export async function ownBindMountCoverage(
 ): Promise<(absPath: string) => boolean> {
   if (!isContainerized()) return () => true;
 
-  const selfId = await findSelfContainerId(runtime, debug, client);
-  if (!selfId) {
-    debug("ownBindMountCoverage: could not detect self container id");
-    return () => false;
-  }
-  const info = await safeInspect(() => client.getContainer(selfId).inspect());
-  if (info === null) {
-    debug(`ownBindMountCoverage: inspect ${selfId} failed`);
-    return () => false;
-  }
+  // Every failure below degrades to "covers nothing", never to a throw.
+  // safeInspect rethrows anything that is not a 404, and findSelfContainerId
+  // touches the runtime too; letting either escape would reject ensureRunning
+  // outright on a transient daemon hiccup, when the tri-state classification
+  // is designed to carry on with "unknown" instead.
+  try {
+    const selfId = await findSelfContainerId(runtime, debug, client);
+    if (!selfId) {
+      debug("ownBindMountCoverage: could not detect self container id");
+      return () => false;
+    }
+    const info = await safeInspect(() => client.getContainer(selfId).inspect());
+    if (info === null) {
+      debug(`ownBindMountCoverage: inspect ${selfId} failed`);
+      return () => false;
+    }
 
-  const mounts = mountsFromInspect(info);
-  return (absPath: string) => isPathUnderBindMount(absPath, mounts);
+    const mounts = mountsFromInspect(info);
+    return (absPath: string) => isPathUnderBindMount(absPath, mounts);
+  } catch (err) {
+    debug(
+      `ownBindMountCoverage: could not read own mounts (${
+        err instanceof Error ? err.message : String(err)
+      }); treating every path as unverifiable`,
+    );
+    return () => false;
+  }
 }
 
 /**
