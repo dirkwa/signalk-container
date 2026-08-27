@@ -215,18 +215,32 @@ export function defaultTimezoneEnv(
   return { ...env, TZ: zone };
 }
 
+/**
+ * What a host-source probe could establish about a path.
+ *
+ * `"unknown"` is NOT a synonym for absent. When the manager runs inside a
+ * container its filesystem is not the one the runtime resolves bind sources
+ * against, so `existsSync` on a host path answers a different question than
+ * the one asked. Reporting that as absent drops a volume whose source is
+ * perfectly real — the bug this type exists to prevent.
+ */
+export type VolumeSourceState = boolean | "unknown";
+
 export function classifyVolumeSources(
   volumes: Record<string, string | VolumeSpec> | undefined,
-  probe: (path: string) => boolean = existsSync,
+  probe: (path: string) => VolumeSourceState = existsSync,
 ): {
   kept: Record<string, string>;
   skipped: Array<{ containerPath: string; source: string }>;
   aborted: Array<{ containerPath: string; source: string }>;
+  /** Host paths whose existence could not be established. Kept, not dropped. */
+  unverified: Array<{ containerPath: string; source: string }>;
 } {
   const kept: Record<string, string> = {};
   const skipped: Array<{ containerPath: string; source: string }> = [];
   const aborted: Array<{ containerPath: string; source: string }> = [];
-  if (!volumes) return { kept, skipped, aborted };
+  const unverified: Array<{ containerPath: string; source: string }> = [];
+  if (!volumes) return { kept, skipped, aborted, unverified };
 
   for (const [containerPath, raw] of Object.entries(volumes)) {
     const source = typeof raw === "string" ? raw : raw.source;
@@ -243,7 +257,19 @@ export function classifyVolumeSources(
     }
 
     // Host path: only the missing case differentiates policies.
-    if (probe(source)) {
+    const state = probe(source);
+    if (state === true) {
+      kept[containerPath] = source;
+      continue;
+    }
+
+    // Could not tell. Keep the volume and let the runtime decide against the
+    // real host: a false "missing" silently drops a working mount, while an
+    // optimistic keep fails loudly at container-create if the path really is
+    // absent. `abort` is not honoured on an unknown either -- it means "this
+    // volume is required", not "fail whenever the check is inconclusive".
+    if (state === "unknown") {
+      unverified.push({ containerPath, source });
       kept[containerPath] = source;
       continue;
     }
@@ -260,7 +286,7 @@ export function classifyVolumeSources(
     }
   }
 
-  return { kept, skipped, aborted };
+  return { kept, skipped, aborted, unverified };
 }
 
 /**
