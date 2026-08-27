@@ -763,28 +763,6 @@ export default (app: App) => {
     return broker;
   }
 
-  /**
-   * Can this process establish whether a host bind source exists?
-   *
-   * Bare metal: yes -- this filesystem IS the host's, so `existsSync` is the
-   * final answer, present or absent.
-   *
-   * Containerized: no, in general. The runtime resolves a bind source against
-   * the HOST filesystem, which this process cannot see; `existsSync` here
-   * answers about a different filesystem entirely and reports a real host
-   * directory as missing. Return "unknown" so the caller keeps the volume and
-   * lets the runtime decide against the real thing.
-   *
-   * The exception is a path this container has itself mounted: it is visible
-   * here AND backed by a host source, so a positive result is trustworthy. A
-   * negative one still is not -- absence inside this filesystem does not prove
-   * absence on the host -- so only `true` is promoted out of it.
-   */
-  function probeVolumeSource(hostPath: string): VolumeSourceState {
-    if (!isContainerized()) return existsSync(hostPath);
-    return existsSync(hostPath) ? true : "unknown";
-  }
-
   const api: ContainerManagerApi = {
     getRuntime() {
       return runtimeInfo;
@@ -1171,9 +1149,17 @@ export default (app: App) => {
       // then reads as absent, and `ifMissing: 'skip'` silently drops a
       // working mount. Consumers worked around it by passing a bare string
       // source, which gives up the skip policy altogether.
+      // Sources the probe could not resolve, for message wording below. An
+      // `abort` entry never lands in `unverified` (it aborts instead), so this
+      // is recorded as the probe runs rather than derived from that list.
+      const unverifiable = new Set<string>();
       const { kept, skipped, aborted, unverified } = classifyVolumeSources(
         effectiveConfigPreFilter.volumes,
-        probeVolumeSource,
+        (hostPath) => {
+          const state = probeVolumeSource(hostPath);
+          if (state === "unknown") unverifiable.add(hostPath);
+          return state;
+        },
       );
 
       for (const v of unverified) {
@@ -1204,12 +1190,20 @@ export default (app: App) => {
           reason: `Host path ${v.source} does not exist; volume omitted`,
         });
       }
+      // "does not exist" would be a false claim for a source this process
+      // merely could not see; say which case it is.
+      const abortReason = (source: string) =>
+        unverifiable.has(source)
+          ? `Required host path ${source} could not be verified from inside ` +
+            `this container; refusing to start rather than risk mounting an ` +
+            `empty directory in its place`
+          : `Required host path ${source} does not exist`;
       for (const v of aborted) {
         emitVolumeIssue({
           containerPath: v.containerPath,
           source: v.source,
           action: "aborted",
-          reason: `Required host path ${v.source} does not exist`,
+          reason: abortReason(v.source),
         });
       }
       if (aborted.length > 0) {
@@ -3263,6 +3257,35 @@ function headlineForDoctorStatus(
  * rather than reading like a generic failure; every other case keeps the
  * status headline.
  */
+/**
+ * Can this process establish whether a host bind source exists?
+ *
+ * Bare metal: yes -- this filesystem IS the host's, so `existsSync` is the
+ * final answer, present or absent.
+ *
+ * Containerized: no, in general. The runtime resolves a bind source against
+ * the HOST filesystem, which this process cannot see; `existsSync` here
+ * answers about a different filesystem entirely and reports a real host
+ * directory as missing. Return "unknown" so the caller keeps the volume and
+ * lets the runtime decide against the real thing.
+ *
+ * The exception is a path this container has itself mounted: it is visible
+ * here AND backed by a host source, so a positive result is trustworthy. A
+ * negative one is not -- absence inside this filesystem says nothing about the
+ * host -- so only `true` is promoted out of it.
+ *
+ * Exported for tests; the dependencies are parameters so neither a real
+ * filesystem nor a real container is needed to exercise both branches.
+ */
+export function probeVolumeSource(
+  hostPath: string,
+  containerized: boolean = isContainerized(),
+  exists: (p: string) => boolean = existsSync,
+): VolumeSourceState {
+  if (!containerized) return exists(hostPath);
+  return exists(hostPath) ? true : "unknown";
+}
+
 export function pluginErrorForDoctor(
   doctor: SelfDeploymentResult,
   headline: string,

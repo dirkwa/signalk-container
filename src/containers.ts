@@ -263,14 +263,27 @@ export function classifyVolumeSources(
       continue;
     }
 
-    // Could not tell. Keep the volume and let the runtime decide against the
-    // real host: a false "missing" silently drops a working mount, while an
-    // optimistic keep fails loudly at container-create if the path really is
-    // absent. `abort` is not honoured on an unknown either -- it means "this
-    // volume is required", not "fail whenever the check is inconclusive".
+    // Could not tell whether the source exists.
+    //
+    // For `skip` and `create`, keep it and let the runtime resolve against the
+    // real host. Dropping it here is the worse error: the mount is usually
+    // fine, and a false "missing" silently removes a working bind.
+    //
+    // `abort` does NOT get that benefit of the doubt. It means "the container
+    // cannot run without this" (TLS certs, required state), and a missing bind
+    // source is not reliably an error at create time -- Docker silently
+    // auto-creates an empty directory for it, verified against a real daemon;
+    // podman errors. Optimistically keeping a required source would therefore
+    // mount an empty directory in place of the certs on Docker and start the
+    // container anyway, which is exactly the outcome the policy exists to
+    // prevent. Failing closed keeps the guarantee the caller asked for.
     if (state === "unknown") {
-      unverified.push({ containerPath, source });
-      kept[containerPath] = source;
+      if (policy === "abort") {
+        aborted.push({ containerPath, source });
+      } else {
+        unverified.push({ containerPath, source });
+        kept[containerPath] = source;
+      }
       continue;
     }
 
