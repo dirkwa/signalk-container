@@ -188,7 +188,6 @@ describe("classifyVolumeSources — relative paths (dot prefix)", () => {
 });
 
 describe("classifyVolumeSources — unverifiable host source", () => {
-  /** A probe that cannot see the host filesystem at all. */
   const blind = () => "unknown" as const;
 
   // The reported bug: signalk-container runs inside a container, existsSync
@@ -207,14 +206,27 @@ describe("classifyVolumeSources — unverifiable host source", () => {
     ]);
   });
 
-  // "Required" means required, not "fail whenever the check is inconclusive".
-  // Aborting on unknown would take down every consumer using ifMissing:abort
-  // the moment the manager is containerized.
-  it("does not abort on a source it merely cannot verify", () => {
+  // `abort` fails closed, unlike skip/create. A missing bind source is not
+  // reliably an error at create time -- Docker silently auto-creates an empty
+  // directory (verified against a real daemon), podman errors -- so keeping an
+  // unverifiable required source would mount an empty directory in place of
+  // the certs and start anyway, exactly what the policy exists to prevent.
+  it("aborts on a required source it cannot verify", () => {
     const r = classifyVolumeSources(
-      { "/data": { source: "/host/data", ifMissing: "abort" } },
+      { "/certs": { source: "/host/certs", ifMissing: "abort" } },
       blind,
     );
+    assert.deepEqual(r.kept, {});
+    assert.deepEqual(r.aborted, [
+      { containerPath: "/certs", source: "/host/certs" },
+    ]);
+    // Aborted, not "kept but unverified" -- the two lists are exclusive.
+    assert.deepEqual(r.unverified, []);
+  });
+
+  // The optimistic keep is for the optional and default policies only.
+  it("keeps an unverifiable create-policy source", () => {
+    const r = classifyVolumeSources({ "/data": "/host/data" }, blind);
     assert.deepEqual(r.kept, { "/data": "/host/data" });
     assert.deepEqual(r.aborted, []);
     assert.equal(r.unverified.length, 1);
@@ -255,6 +267,7 @@ describe("classifyVolumeSources — unverifiable host source", () => {
         "/a": { source: "/host/seen", ifMissing: "skip" },
         "/b": { source: "/host/blind", ifMissing: "skip" },
         "/c": { source: "/host/gone", ifMissing: "skip" },
+        "/d": { source: "/host/blind-required", ifMissing: "abort" },
       },
       (path) =>
         path === "/host/seen" ? true : path === "/host/gone" ? false : "unknown",
@@ -265,6 +278,9 @@ describe("classifyVolumeSources — unverifiable host source", () => {
     });
     assert.deepEqual(r.skipped, [
       { containerPath: "/c", source: "/host/gone" },
+    ]);
+    assert.deepEqual(r.aborted, [
+      { containerPath: "/d", source: "/host/blind-required" },
     ]);
     assert.deepEqual(r.unverified, [
       { containerPath: "/b", source: "/host/blind" },
