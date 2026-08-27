@@ -263,20 +263,22 @@ export function classifyVolumeSources(
       continue;
     }
 
-    // Could not tell whether the source exists.
+    // Could not tell whether the source exists. Each policy keeps the
+    // guarantee it promised, because the runtimes disagree about what a
+    // missing bind source does -- verified against both: Docker silently
+    // auto-creates an empty directory, podman refuses to start the container
+    // (`statfs: no such file or directory`).
     //
-    // For `skip` and `create`, keep it and let the runtime resolve against the
-    // real host. Dropping it here is the worse error: the mount is usually
-    // fine, and a false "missing" silently removes a working bind.
+    // `abort` means "cannot run without this" (TLS certs, required state).
+    // Keeping it would mount an empty directory where the certs belong and
+    // start anyway on Docker -- the exact outcome the policy prevents.
     //
-    // `abort` does NOT get that benefit of the doubt. It means "the container
-    // cannot run without this" (TLS certs, required state), and a missing bind
-    // source is not reliably an error at create time -- Docker silently
-    // auto-creates an empty directory for it, verified against a real daemon;
-    // podman errors. Optimistically keeping a required source would therefore
-    // mount an empty directory in place of the certs on Docker and start the
-    // container anyway, which is exactly the outcome the policy exists to
-    // prevent. Failing closed keeps the guarantee the caller asked for.
+    // `skip` and `create` are kept. Dropping a skip source here is what #245
+    // reports: the mount is real and working, and omitting it is the silent
+    // failure the caller cannot see. The residual risk -- a source that is
+    // genuinely absent AND unverifiable -- is bounded by the probe above,
+    // which returns "unknown" only when this process has no bind mount
+    // covering the path and therefore cannot be the one to judge.
     if (state === "unknown") {
       if (policy === "abort") {
         aborted.push({ containerPath, source });
