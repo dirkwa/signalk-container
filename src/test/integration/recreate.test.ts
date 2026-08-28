@@ -81,9 +81,15 @@ describe("containers.recreate() — public API", () => {
   let api: ContainerManagerApi;
   let stopPlugin: () => Promise<void>;
 
+  /**
+   * Resolved once in `before()` and read by every test. Re-probing per test
+   * would let a test proceed on a runtime `before()` never saw, calling
+   * through an `api` that was consequently never booted.
+   */
+  let runtimeInfo: ContainerRuntimeInfo | null = null;
   before(async () => {
-    const runtime = await hasContainerRuntime();
-    if (!runtime) return;
+    runtimeInfo = await hasContainerRuntime();
+    if (!runtimeInfo) return;
     const booted = await bootPlugin();
     api = booted.api;
     stopPlugin = booted.stop;
@@ -101,7 +107,7 @@ describe("containers.recreate() — public API", () => {
   });
 
   it("replaces a running container's image with the new tag", async (t) => {
-    const runtime = await hasContainerRuntime();
+    const runtime = runtimeInfo;
     if (!runtime) {
       t.skip("no container runtime available");
       return;
@@ -142,7 +148,7 @@ describe("containers.recreate() — public API", () => {
   });
 
   it("recreate is idempotent when no container exists", async (t) => {
-    const runtime = await hasContainerRuntime();
+    const runtime = runtimeInfo;
     if (!runtime) {
       t.skip("no container runtime available");
       return;
