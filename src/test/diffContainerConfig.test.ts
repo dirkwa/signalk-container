@@ -926,3 +926,144 @@ describe("diffContainerConfig — groupAdd", () => {
     assert.ok(changed.drifted.includes("groupAdd"));
   });
 });
+
+describe("diffContainerConfig — unset detection via create-time label", () => {
+  // The in-memory `prior` cache is empty after a Signal K restart. The
+  // provenance label buildCreateOptions stamps at create time fills that
+  // gap, so a key the consumer dropped while the server was down is still
+  // detected. Before this label existed, cold-start detected only
+  // POSITIVE drift and a removed key silently persisted.
+  const labelKey = "sk-requested-config";
+
+  it("detects a removed env key with no in-memory prior", () => {
+    const { drifted } = diffContainerConfig(
+      reqBase({ env: { KEEP: "1" } }),
+      liveBase({
+        env: new Map([
+          ["KEEP", "1"],
+          ["DROPPED", "2"],
+        ]),
+        labels: { [labelKey]: '{"envKeys":["KEEP","DROPPED"]}' },
+      }),
+      docker,
+    );
+    assert.ok(drifted.includes("env"));
+  });
+
+  it("detects an unset command with no in-memory prior", () => {
+    const { drifted } = diffContainerConfig(
+      reqBase(),
+      liveBase({
+        command: ["serve"],
+        labels: { [labelKey]: '{"command":["serve"]}' },
+      }),
+      docker,
+    );
+    assert.ok(drifted.includes("command"));
+  });
+
+  it("does not flag image-baked env absent from the label", () => {
+    // Keys the image bakes in were never ours. Flagging them would
+    // recreate the container on every single startup.
+    const { drifted } = diffContainerConfig(
+      reqBase({ env: { MINE: "1" } }),
+      liveBase({
+        env: new Map([
+          ["MINE", "1"],
+          ["PATH", "/usr/bin"],
+          ["LANG", "C.UTF-8"],
+        ]),
+        labels: { [labelKey]: '{"envKeys":["MINE"]}' },
+      }),
+      docker,
+    );
+    assert.ok(!drifted.includes("env"));
+  });
+
+  it("prefers an in-memory prior over the label", () => {
+    // The warm cache is authoritative within one server lifetime; the
+    // label only fills the cold slot.
+    const { drifted } = diffContainerConfig(
+      reqBase({ env: { KEEP: "1" } }),
+      liveBase({
+        env: new Map([["KEEP", "1"]]),
+        labels: { [labelKey]: '{"envKeys":["KEEP","GHOST"]}' },
+      }),
+      docker,
+      reqBase({ env: { KEEP: "1" } }),
+    );
+    assert.ok(!drifted.includes("env"));
+  });
+
+  it("falls back to positive-only drift on a malformed or absent label", () => {
+    const cases: Record<string, string>[] = [
+      {},
+      { [labelKey]: "{nope" },
+      { [labelKey]: "[]" },
+    ];
+    for (const labels of cases) {
+      const { drifted } = diffContainerConfig(
+        reqBase({ env: { KEEP: "1" } }),
+        liveBase({
+          env: new Map([
+            ["KEEP", "1"],
+            ["DROPPED", "2"],
+          ]),
+          labels,
+        }),
+        docker,
+      );
+      assert.ok(
+        !drifted.includes("env"),
+        `unexpected drift for ${JSON.stringify(labels)}`,
+      );
+    }
+  });
+});
+
+describe("diffContainerConfig — cold-start device provenance on podman", () => {
+  // Podman applies HostConfig.Devices but reports an empty list back
+  // through inspect, so device drift there compares against the prior
+  // rather than live state. These mirror the warm-prior cases above with
+  // the create-time label standing in for the in-memory prior.
+  const labelKey = "sk-requested-config";
+
+  it("flags drift when the label had devices and requested unsets them", () => {
+    const { drifted } = diffContainerConfig(
+      reqBase(),
+      liveBase({ labels: { [labelKey]: '{"devices":["/dev/ttyUSB0"]}' } }),
+      podman,
+    );
+    assert.ok(drifted.includes("devices"));
+  });
+
+  it("flags drift when the node list changed vs the label", () => {
+    const { drifted } = diffContainerConfig(
+      reqBase({ devices: ["/dev/ttyACM0"] }),
+      liveBase({ labels: { [labelKey]: '{"devices":["/dev/ttyUSB0"]}' } }),
+      podman,
+    );
+    assert.ok(drifted.includes("devices"));
+  });
+
+  it("no drift when requested devices match the label", () => {
+    // The upgrade-safety case: an unchanged config must not recreate the
+    // container on the first ensureRunning after a restart.
+    const { drifted } = diffContainerConfig(
+      reqBase({ devices: ["/dev/ttyUSB0"] }),
+      liveBase({ labels: { [labelKey]: '{"devices":["/dev/ttyUSB0"]}' } }),
+      podman,
+    );
+    assert.ok(!drifted.includes("devices"));
+  });
+
+  it("prefers an in-memory prior over the label for devices", () => {
+    const { drifted } = diffContainerConfig(
+      reqBase({ devices: ["/dev/ttyUSB0"] }),
+      liveBase({ labels: { [labelKey]: '{"devices":["/dev/ttyACM0"]}' } }),
+      podman,
+      reqBase({ devices: ["/dev/ttyUSB0"] }),
+    );
+    assert.ok(!drifted.includes("devices"));
+  });
+});

@@ -514,6 +514,25 @@ export interface ContainerConfig {
 }
 
 /**
+ * Durable unset-drift provenance, stamped into a container label at
+ * create time and read back by `diffContainerConfig` when the
+ * in-memory prior-config cache is cold (a fresh server process).
+ *
+ * Only the three fields the diff actually reads from a prior config
+ * are recorded. Env is stored as key NAMES alone: the unset check is
+ * `key in requested.env`, so values are never consulted — and a value
+ * can be a credential, which must not reach a label.
+ */
+export interface RequestedConfigProvenance {
+  /** Env key names requested at create time, sorted. */
+  envKeys?: string[];
+  /** `command` override requested at create time. */
+  command?: string[];
+  /** `devices` entries requested at create time (host paths, not secrets). */
+  devices?: ContainerConfig["devices"];
+}
+
+/**
  * Explicit healthcheck for a managed container. `false` disables the
  * healthcheck entirely (`--no-healthcheck`); the object form supplies a
  * probe command plus optional timing. Durations are passed to the runtime

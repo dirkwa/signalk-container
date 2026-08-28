@@ -5,7 +5,7 @@ import {
   safeInvokeContainerWedged,
   _clearAnnouncedWedgedForTesting,
 } from "../containers.js";
-import { requestedResourcesLabel } from "../namespace.js";
+import { requestedConfigLabel, requestedResourcesLabel } from "../namespace.js";
 import { _setCurrentHostIdsForTesting } from "../runtime.js";
 import type {
   ContainerConfig,
@@ -58,6 +58,7 @@ function buildLiveInspect(parts: {
   portBindings?: Record<string, unknown> | null;
   extraHosts?: string[] | null;
   user?: string;
+  labels?: Record<string, string> | null;
 }): Json {
   const st = parts.state ?? { status: "running", running: true, pid: LIVE_PID };
   return {
@@ -70,6 +71,7 @@ function buildLiveInspect(parts: {
       // existing "no drift" fixtures stay no-drift without each call
       // having to set user explicitly.
       User: parts.user ?? "1000:1000",
+      Labels: parts.labels ?? null,
     },
     HostConfig: {
       NetworkMode: parts.networkMode ?? "bridge",
@@ -939,7 +941,7 @@ describe("ensureRunning — buildCreateOptions ownership", () => {
     );
   });
 
-  it("emits only the provenance label when config.labels is unset", async () => {
+  it("emits only the provenance labels when config.labels is unset", async () => {
     const cap = captureCreateOnMissing({
       image: "questdb/questdb",
       tag: "9.0.0",
@@ -947,10 +949,12 @@ describe("ensureRunning — buildCreateOptions ownership", () => {
     await cap.run();
     const payload = cap.payload();
     assert.ok(payload);
-    // The requested-resources provenance label is always stamped; no
-    // consumer labels means nothing else.
+    // Both provenance labels are always stamped; no consumer labels
+    // means nothing else. The config one is empty here because the
+    // request carries no env, command or devices.
     assert.deepEqual(payload.Labels, {
       [requestedResourcesLabel()]: "{}",
+      [requestedConfigLabel()]: "{}",
     });
   });
 });
@@ -993,6 +997,55 @@ describe("safeInvokeContainerWedged — handler isolation", () => {
       safeInvokeContainerWedged(undefined, event, () => {
         throw new Error("reportError must not run");
       }),
+    );
+  });
+});
+
+describe("ensureRunning — cold-start unset drift recreates", () => {
+  it("removes and recreates when a key was dropped while SK was down", async () => {
+    // No `prior` argument: the state after a Signal K restart. The live
+    // container still carries FOO, which the consumer no longer requests.
+    // Only the create-time provenance label can tell that FOO was ours
+    // rather than baked into the image — without it this is a silent
+    // no-op and the container keeps the stale variable.
+    const calls = new Map<string, unknown[]>();
+    const inspect = (): Promise<Json> => {
+      if ((calls.get("remove") ?? []).length > 0) {
+        return Promise.reject(notFound("no such object"));
+      }
+      return Promise.resolve(
+        buildLiveInspect({
+          image: "questdb/questdb:9.0.0",
+          env: ["FOO=1", "PATH=/usr/bin"],
+          labels: { "sk-requested-config": '{"envKeys":["FOO"]}' },
+        }),
+      );
+    };
+    const client = makeMockClient({
+      containers: { "sk-questdb": { inspect } },
+      images: { "questdb/questdb:9.0.0": { Id: "sha256:abc" } },
+      calls,
+    });
+    const debugLines: string[] = [];
+    await ensureRunning(
+      docker,
+      "questdb",
+      { image: "questdb/questdb", tag: "9.0.0" },
+      (m) => debugLines.push(m),
+      undefined,
+      client,
+    );
+    assert.ok(
+      (calls.get("remove") ?? []).length > 0,
+      "remove should be called for the dropped env key",
+    );
+    assert.ok(
+      (calls.get("createContainer") ?? []).length > 0,
+      "createContainer should be called",
+    );
+    assert.ok(
+      debugLines.some((l) => l.includes("config drift detected")),
+      `expected drift in debug, got: ${debugLines.join(" | ")}`,
     );
   });
 });

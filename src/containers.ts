@@ -16,6 +16,7 @@ import {
   ManagedImageRef,
   NofileLimits,
   PruneResult,
+  RequestedConfigProvenance,
   ContainerWedged,
   ResourceClamp,
   UlimitClamp,
@@ -55,7 +56,11 @@ import {
   type DeviceNodeSpec,
 } from "./devices.js";
 import { parseResourceLimits, resourcePayloadForRun } from "./resources.js";
-import { containerPrefix, requestedResourcesLabel } from "./namespace.js";
+import {
+  containerPrefix,
+  requestedConfigLabel,
+  requestedResourcesLabel,
+} from "./namespace.js";
 import { classifyTag } from "./updates/tagClassifier.js";
 import { compareVersions } from "./updates/semver.js";
 import { isOfflineError } from "./updates/offline.js";
@@ -1164,6 +1169,62 @@ export async function getRequestedResources(
 }
 
 /**
+ * Parse the requested-config provenance label written at create time.
+ *
+ * Returns `undefined` — meaning "no provenance", so the caller keeps
+ * today's positive-only drift behaviour — when the label is absent,
+ * unparseable, or not an object. It must never return `{}` for a
+ * missing label: an empty provenance reads as "the container was
+ * created with no env at all", which would mask a genuine unset.
+ *
+ * Never throws. A hand-edited or truncated label degrades to
+ * `undefined` rather than breaking `ensureRunning`.
+ */
+export function parseRequestedConfigLabel(
+  raw: string | undefined,
+): RequestedConfigProvenance | undefined {
+  if (typeof raw !== "string") return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return undefined;
+  }
+  const src = parsed as Record<string, unknown>;
+  const out: RequestedConfigProvenance = {};
+  if (isStringArray(src.envKeys)) out.envKeys = src.envKeys;
+  if (isStringArray(src.command)) out.command = src.command;
+  if (isStringArray(src.devices)) out.devices = src.devices;
+  return out;
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((v) => typeof v === "string");
+}
+
+/**
+ * Re-shape label provenance into the `ContainerConfig` slice that
+ * `diffContainerConfig`'s unset checks read. Env values are not
+ * retained in the label, so each key maps to `""` — the unset check
+ * only asks whether a key is present, never what it held.
+ */
+function labelProvenanceAsPrior(
+  provenance: RequestedConfigProvenance | undefined,
+): ContainerConfig | undefined {
+  if (!provenance) return undefined;
+  return {
+    env: provenance.envKeys
+      ? Object.fromEntries(provenance.envKeys.map((k) => [k, ""]))
+      : undefined,
+    command: provenance.command,
+    devices: provenance.devices,
+  } as ContainerConfig;
+}
+
+/**
  * Convert a byte count back into the human form consumer plugins
  * use ("512m", "2g"). Picks the largest unit that produces an
  * integer result, falling back to bytes ("536870912b") if no clean
@@ -1664,18 +1725,20 @@ function sortedStringArraysEqual(a: string[], b: string[]): boolean {
  *     for floating tags (`:latest` digest drift) is the update service's job.
  *   - command: explicit drift when `requested.command` is set and differs
  *     from `live.command`. When `requested.command` is undefined, drift is
- *     reported only if a `prior.command` was set (i.e. the user is now
- *     unsetting it). Without a `prior`, an undefined `requested.command`
- *     can't be told apart from "image's baked CMD" so we skip — the
- *     wrapper's prior-config cache (`lastConfigs`) closes that loop on the
- *     second-and-later calls within a single signalk-container lifetime.
+ *     reported only if a prior `command` was set (i.e. the user is now
+ *     unsetting it). The prior comes from the wrapper's `lastConfigs`
+ *     cache when warm, and otherwise from the create-time provenance
+ *     label; with neither, an undefined `requested.command` can't be
+ *     told apart from "image's baked CMD" so we skip.
  *   - networkMode: runtime defaults (`bridge`, `slirp4netns`, etc.) are
  *     normalized to `""` and compared as equivalent to requested undefined.
  *   - env: requested keys must match live values. Additionally, any key
- *     present in `prior.env` but absent from `requested.env` is treated
- *     as drift (the user is unsetting it). Image-baked env keys not in
- *     either `requested.env` or `prior.env` are ignored — they were never
- *     ours.
+ *     present in the prior env but absent from `requested.env` is treated
+ *     as drift (the user is unsetting it). Image-baked env keys in neither
+ *     `requested.env` nor the prior are ignored — they were never ours.
+ *     The prior is the warm `lastConfigs` entry, falling back to the env
+ *     KEY NAMES recorded in the create-time provenance label; values are
+ *     never recorded there because this check reads only key presence.
  *   - volumes: trailing slashes stripped on both sides; `(host, container)`
  *     tuples compared as a Map keyed by container path. Live binds have
  *     their `:Z`/`:ro` flags already stripped by `getLiveContainerConfig`.
@@ -1705,6 +1768,16 @@ export function diffContainerConfig(
 ): { drifted: string[] } {
   const drifted: string[] = [];
 
+  // Provenance ladder for the unset checks below: the warm in-memory
+  // prior wins, and the create-time label fills the cold slot after a
+  // Signal K restart. Without the label, a key the consumer dropped
+  // while the server was down would never be detected as drift.
+  const unsetPrior =
+    prior ??
+    labelProvenanceAsPrior(
+      parseRequestedConfigLabel(live.labels[requestedConfigLabel()]),
+    );
+
   const requestedImageRef = qualifyImage(
     requested.digest
       ? `${requested.image}@${requested.digest}`
@@ -1722,7 +1795,7 @@ export function diffContainerConfig(
     if (JSON.stringify(requested.command) !== JSON.stringify(liveCmd)) {
       drifted.push("command");
     }
-  } else if (prior?.command !== undefined) {
+  } else if (unsetPrior?.command !== undefined) {
     // Unset detection: the user previously set command and now wants the
     // image default back. Recreate so the runtime drops the override.
     drifted.push("command");
@@ -1747,8 +1820,8 @@ export function diffContainerConfig(
   // Unset detection: any key we previously set that the user is now
   // dropping should force a recreate so the runtime forgets the override.
   // Image-baked keys (in live.env but never in prior.env) stay ignored.
-  if (!envDrift && prior?.env) {
-    for (const key of Object.keys(prior.env)) {
+  if (!envDrift && unsetPrior?.env) {
+    for (const key of Object.keys(unsetPrior.env)) {
       if (!requested.env || !(key in requested.env)) {
         envDrift = true;
         break;
@@ -1781,7 +1854,10 @@ export function diffContainerConfig(
   // Keyed by container path; the value pairs host path with access mode.
   // Kept as separate fields rather than a `host:ro` string, which would make a
   // read-write mount of `/data:ro` indistinguishable from a read-only `/data`.
-  const requestedVolumes = new Map<string, { host: string; readOnly: boolean }>();
+  const requestedVolumes = new Map<
+    string,
+    { host: string; readOnly: boolean }
+  >();
   if (requested.volumes) {
     for (const [containerPath, raw] of Object.entries(requested.volumes)) {
       requestedVolumes.set(stripTrailingSlash(containerPath), {
@@ -1902,9 +1978,12 @@ export function diffContainerConfig(
         requestedDevices.cgroupRules,
         live.deviceCgroupRules,
       );
-  } else if (prior !== undefined) {
+  } else if (unsetPrior !== undefined) {
     const priorDevices = resolveDeviceRequests(
-      filterUnresolvedDeviceEntries(prior.devices ?? [], unresolvedDevices),
+      filterUnresolvedDeviceEntries(
+        unsetPrior.devices ?? [],
+        unresolvedDevices,
+      ),
       runtime,
     );
     devicesDrift =
@@ -2514,9 +2593,19 @@ function buildCreateOptions(
   // runtime-injected limit (rootless podman clamps a child's
   // oom_score_adj up to its parent's) is never misread as a user
   // unset. Stamped after the consumer labels so it can't be shadowed.
+  //
+  // The requested-config provenance label does the same job for the
+  // fields whose *unset* can only be detected against a prior config:
+  // env keys, `command` and `devices`. Env records key names only —
+  // the unset check never reads a value, and a value can be a secret.
   options.Labels = {
     ...config.labels,
     [requestedResourcesLabel()]: JSON.stringify(config.resources ?? {}),
+    [requestedConfigLabel()]: JSON.stringify({
+      ...(config.env ? { envKeys: Object.keys(config.env).sort() } : {}),
+      ...(config.command ? { command: [...config.command] } : {}),
+      ...(config.devices ? { devices: [...config.devices] } : {}),
+    } satisfies RequestedConfigProvenance),
   };
 
   // Healthcheck. An explicit override wins over the image's own
@@ -2555,8 +2644,10 @@ export async function ensureRunning(
    * this signalk-container lifetime, if any. Used to detect "unset" drift
    * — env keys removed, `command` previously set and now undefined. The
    * wrapper in `index.ts` reads from its `lastConfigs` cache before
-   * overwriting it; on the first call (or after a Signal K restart) this
-   * will be undefined and only positive drift is detected.
+   * overwriting it. On the first call (or after a Signal K restart) it
+   * is undefined and the diff falls back to the requested-config
+   * provenance label stamped at create time, so an unset is still
+   * detected across a restart.
    */
   prior?: ContainerConfig,
   _postRecreate: boolean = false,
