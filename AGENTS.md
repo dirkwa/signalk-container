@@ -42,6 +42,12 @@ Do not add error handling, fallbacks, or validation for scenarios that cannot ha
   - `npm test` — unit only (`dist/test/*.test.js`, no recursion). Safe to run anywhere.
   - `npm run test:integration` — integration only (`dist/test/integration/*.test.js`). Requires podman or docker; tests still self-skip on Windows and when no runtime is found.
   - `npm run test:all` — both. The pre-PR full sweep on a dev box.
+- `npm test` passes `--test-concurrency=1`. **Do not remove it.** `node --test`
+  runs one child process per file, concurrent at CPU count by default; on
+  Windows that races and reports a file as failed with a bare `'test failed'`
+  while every test inside it passed (nodejs/node#54534). The flag is
+  deliberately not on `test:integration`/`test:all` — those run on a Linux dev
+  box and serialising the full sweep doubles it for no benefit.
 - All new code requires tests. Test behavior at the function boundary, not internal control flow.
 - Inject `client: ContainerClient = getClient()` rather than calling dockerode directly. Tests stub via `makeMockClient(spec)` from `src/test/helpers/mockClient.ts`. See `src/test/getLiveResources.test.ts` for the canonical pattern: a mock whose `getContainer().inspect()` returns the JSON object under test, no real podman/docker invocations.
 - Container-integration tests (those that actually pull `alpine:3.19`) live under `src/test/integration/` and gate on `hasContainerRuntime()` which returns `null` on Windows. Do not add new tests that pull real Linux images without putting them under `src/test/integration/` AND gating on the helper.
