@@ -109,3 +109,15 @@ export function jobNameLabel(): string {
 export function requestedResourcesLabel(): string {
   return `${namespace}-requested-resources`;
 }
+
+/**
+ * Requested-config provenance label key on managed containers.
+ * Stamped at create time so a fresh server process can still detect
+ * config the consumer has since *unset* — an env key or `command`
+ * dropped while Signal K was down. Holds env key NAMES only, never
+ * their values (`diffContainerConfig` reads only key presence, and a
+ * value can be a credential).
+ */
+export function requestedConfigLabel(): string {
+  return `${namespace}-requested-config`;
+}
