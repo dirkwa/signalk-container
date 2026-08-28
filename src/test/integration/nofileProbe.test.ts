@@ -93,9 +93,15 @@ describe("getContainerNofile — live runtime probe", () => {
   let api: ContainerManagerApi;
   let stopPlugin: () => Promise<void>;
 
+  /**
+   * Resolved once in `before()` and read by every test. Re-probing per test
+   * would let a test proceed on a runtime `before()` never saw, calling
+   * through an `api` that was consequently never booted.
+   */
+  let runtimeInfo: ContainerRuntimeInfo | null = null;
   before(async () => {
-    const runtime = await hasContainerRuntime();
-    if (!runtime) return;
+    runtimeInfo = await hasContainerRuntime();
+    if (!runtimeInfo) return;
     const booted = await bootPlugin();
     api = booted.api;
     stopPlugin = booted.stop;
@@ -113,7 +119,7 @@ describe("getContainerNofile — live runtime probe", () => {
   });
 
   it("agrees with /proc, echoes when stopped, and never recreates a satisfied container", async (t) => {
-    const runtime = await hasContainerRuntime();
+    const runtime = runtimeInfo;
     if (!runtime) {
       t.skip("no container runtime available");
       return;

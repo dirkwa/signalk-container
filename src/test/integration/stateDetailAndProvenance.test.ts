@@ -94,9 +94,15 @@ describe("state detail and config provenance — real runtime", () => {
   let api: ContainerManagerApi;
   let stopPlugin: () => Promise<void>;
 
+  /**
+   * Resolved once in `before()` and read by every test. Re-probing per test
+   * would let a test proceed on a runtime `before()` never saw, calling
+   * through an `api` that was consequently never booted.
+   */
+  let runtimeInfo: ContainerRuntimeInfo | null = null;
   before(async () => {
-    const runtime = await hasContainerRuntime();
-    if (!runtime) return;
+    runtimeInfo = await hasContainerRuntime();
+    if (!runtimeInfo) return;
     const booted = await bootPlugin();
     api = booted.api;
     stopPlugin = booted.stop;
@@ -114,7 +120,7 @@ describe("state detail and config provenance — real runtime", () => {
   });
 
   it("round-trips the provenance label through a real create and inspect", async (t) => {
-    const runtime = await hasContainerRuntime();
+    const runtime = runtimeInfo;
     if (!runtime) {
       t.skip("no container runtime available");
       return;
@@ -154,7 +160,7 @@ describe("state detail and config provenance — real runtime", () => {
   });
 
   it("recreates on cold-start unset drift with no in-memory prior", async (t) => {
-    const runtime = await hasContainerRuntime();
+    const runtime = runtimeInfo;
     if (!runtime) {
       t.skip("no container runtime available");
       return;
@@ -210,7 +216,7 @@ describe("state detail and config provenance — real runtime", () => {
   });
 
   it("reports the real exit code and restart count of a stopped container", async (t) => {
-    const runtime = await hasContainerRuntime();
+    const runtime = runtimeInfo;
     if (!runtime) {
       t.skip("no container runtime available");
       return;
@@ -254,7 +260,7 @@ describe("state detail and config provenance — real runtime", () => {
   });
 
   it("reports missing for a container that does not exist", async (t) => {
-    const runtime = await hasContainerRuntime();
+    const runtime = runtimeInfo;
     if (!runtime) {
       t.skip("no container runtime available");
       return;
