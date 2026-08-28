@@ -31,7 +31,11 @@ import type {
  * fact.
  */
 
-/** Device class directories worth probing when the host has them. */
+/**
+ * The three paths `devices.ts` carries a built-in class-major entry for, so
+ * they exercise the directory branch of the probe rather than the generic
+ * node path. Any the host lacks are skipped.
+ */
 const DEVICE_DIRS = ["/dev/snd", "/dev/input", "/dev/dri"];
 
 async function hasContainerRuntime(): Promise<ContainerRuntimeInfo | null> {
