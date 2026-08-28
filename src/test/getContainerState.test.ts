@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { getContainerState } from "../containers.js";
+import { getContainerState, getContainerStateDetail } from "../containers.js";
 import type { ContainerRuntimeInfo } from "../types.js";
 import { makeMockClient, storageCorrupt500 } from "./helpers/mockClient.js";
 
@@ -212,5 +212,174 @@ describe("getContainerState", () => {
     });
     const result = await getContainerState(dummyRuntime, "x", client);
     assert.equal(result, "stopped");
+  });
+});
+
+describe("getContainerStateDetail", () => {
+  // The coarse state alone cannot tell a container that crashlooped 200
+  // times from one the operator stopped. All of this detail was already
+  // in the inspect payload getContainerState fetches; it was discarded.
+
+  it("reports 'missing' with no detail when the container is gone", async () => {
+    const client = makeMockClient({});
+    const detail = await getContainerStateDetail("ghost", client);
+    assert.deepEqual(detail, { state: "missing" });
+  });
+
+  it("surfaces exit code, OOM kill and restart count on a dead container", async () => {
+    const client = makeMockClient({
+      containers: {
+        "sk-x": {
+          inspect: {
+            State: {
+              Status: "exited",
+              Running: false,
+              Pid: 0,
+              ExitCode: 137,
+              OOMKilled: true,
+              RestartCount: 42,
+            },
+          },
+        },
+      },
+    });
+    const detail = await getContainerStateDetail("x", client);
+    assert.equal(detail.state, "stopped");
+    assert.equal(detail.exitCode, 137);
+    assert.equal(detail.oomKilled, true);
+    assert.equal(detail.restartCount, 42);
+  });
+
+  it("distinguishes a clean stop from a crash", async () => {
+    // The whole point: both are `state: "stopped"`, and only the exit
+    // code separates a deliberate stop from a failure.
+    const stopped = makeMockClient({
+      containers: {
+        "sk-x": {
+          inspect: {
+            State: { Status: "exited", ExitCode: 0, RestartCount: 0 },
+          },
+        },
+      },
+    });
+    const crashed = makeMockClient({
+      containers: {
+        "sk-x": {
+          inspect: {
+            State: { Status: "exited", ExitCode: 1, RestartCount: 87 },
+          },
+        },
+      },
+    });
+    const a = await getContainerStateDetail("x", stopped);
+    const b = await getContainerStateDetail("x", crashed);
+    assert.equal(a.state, b.state);
+    assert.equal(a.exitCode, 0);
+    assert.equal(b.exitCode, 1);
+    assert.equal(b.restartCount, 87);
+  });
+
+  it("surfaces the healthcheck verdict when the image defines one", async () => {
+    const client = makeMockClient({
+      containers: {
+        "sk-x": {
+          inspect: {
+            State: {
+              Status: "running",
+              Running: true,
+              Pid: 99,
+              Health: { Status: "unhealthy" },
+            },
+          },
+        },
+      },
+    });
+    const detail = await getContainerStateDetail("x", client);
+    assert.equal(detail.state, "running");
+    assert.equal(detail.health, "unhealthy");
+  });
+
+  it("leaves fields undefined rather than inventing zeros", async () => {
+    // A runtime that omits a field must not be reported as exit code 0
+    // and zero restarts — that reads as a clean stop that never happened.
+    const client = makeMockClient({
+      containers: {
+        "sk-x": { inspect: { State: { Status: "running", Running: true } } },
+      },
+    });
+    const detail = await getContainerStateDetail("x", client);
+    assert.equal(detail.exitCode, undefined);
+    assert.equal(detail.oomKilled, undefined);
+    assert.equal(detail.restartCount, undefined);
+    assert.equal(detail.health, undefined);
+  });
+
+  it("treats a null exit code as absent, not as a clean exit", async () => {
+    // dockerode types ExitCode as `number | null`. `Number(null)` is a
+    // finite 0, so a naive coercion reports a successful exit for a
+    // container that never reported one at all.
+    const client = makeMockClient({
+      containers: {
+        "sk-x": {
+          inspect: {
+            State: {
+              Status: "exited",
+              ExitCode: null,
+              RestartCount: null,
+            },
+          },
+        },
+      },
+    });
+    const detail = await getContainerStateDetail("x", client);
+    assert.equal(detail.exitCode, undefined);
+    assert.equal(detail.restartCount, undefined);
+  });
+
+  it("ignores non-numeric exit code and restart count values", async () => {
+    // "" and [] also coerce to a finite 0 through Number().
+    const client = makeMockClient({
+      containers: {
+        "sk-x": {
+          inspect: {
+            State: { Status: "exited", ExitCode: "", RestartCount: [] },
+          },
+        },
+      },
+    });
+    const detail = await getContainerStateDetail("x", client);
+    assert.equal(detail.exitCode, undefined);
+    assert.equal(detail.restartCount, undefined);
+  });
+
+  it("ignores an unrecognised health status", async () => {
+    const client = makeMockClient({
+      containers: {
+        "sk-x": {
+          inspect: {
+            State: { Status: "running", Health: { Status: "weird" } },
+          },
+        },
+      },
+    });
+    assert.equal(
+      (await getContainerStateDetail("x", client)).health,
+      undefined,
+    );
+  });
+
+  it("agrees with getContainerState on the podman inconsistent-Status flake", async () => {
+    // Status is momentarily stale but Pid is live: both functions must
+    // say running, or a caller asking for detail would see a different
+    // answer than one asking for the coarse state.
+    const client = makeMockClient({
+      containers: {
+        "sk-x": {
+          inspect: { State: { Status: "", Running: false, Pid: 4242 } },
+        },
+      },
+    });
+    assert.equal(await getContainerState(dummyRuntime, "x", client), "running");
+    assert.equal((await getContainerStateDetail("x", client)).state, "running");
   });
 });
