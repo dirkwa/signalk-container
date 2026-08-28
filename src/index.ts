@@ -12,6 +12,7 @@ import {
   ContainerResourceLimits,
   ContainerRuntimeInfo,
   ContainerState,
+  ContainerStateDetail,
   CpuPriority,
   DoctorApi,
   EnsureRunningOptions,
@@ -62,6 +63,7 @@ import {
   getContainerLastError,
   getContainerLogs,
   getContainerState,
+  getContainerStateDetail,
   getImageDigest,
   getLiveContainerDigest,
   getLiveResources,
@@ -1839,6 +1841,11 @@ export default (app: App) => {
       return getContainerState(runtimeInfo, name);
     },
 
+    async getStateDetail(name: string): Promise<ContainerStateDetail> {
+      if (!runtimeInfo) return { state: "no-runtime" };
+      return getContainerStateDetail(name);
+    },
+
     async getContainerNofile(
       name: string,
     ): Promise<{ soft: number; hard: number } | null> {
@@ -2772,10 +2779,15 @@ export default (app: App) => {
         }
       });
 
+      // Single-container route, so the extra detail costs nothing — it
+      // comes out of the same inspect the coarse state already needed.
+      // The list route deliberately does NOT carry these fields: it is
+      // built from list summaries that omit them, and the config panel
+      // polls it every 5 seconds.
       router.get("/api/containers/:name/state", async (req, res) => {
         try {
-          const state = await api.getState(String(req.params.name));
-          res.json({ name: req.params.name, state });
+          const detail = await api.getStateDetail(String(req.params.name));
+          res.json({ name: req.params.name, ...detail });
         } catch (err) {
           res.status(500).json({
             error: err instanceof Error ? err.message : "Unknown error",

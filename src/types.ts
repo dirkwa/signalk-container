@@ -119,6 +119,40 @@ export interface ContainerRuntimeInfo {
 export type ContainerState = "running" | "stopped" | "missing" | "no-runtime";
 
 /**
+ * Why a container is in the state it is in — the detail `inspect`
+ * already carries but `getContainerState` discards.
+ *
+ * Without this a container that has crashlooped 200 times reports the
+ * same bare `"stopped"` as one the operator stopped deliberately.
+ *
+ * Every field is optional: a runtime that does not report it, or a
+ * container that no longer exists, leaves it undefined rather than
+ * inventing a zero.
+ */
+export interface ContainerStateDetail {
+  /** Coarse state, identical to `getContainerState`. */
+  state: ContainerState;
+  /**
+   * Exit status the runtime last recorded. Undefined when the runtime
+   * does not report one — never defaulted to 0, which would read as a
+   * clean exit that never happened. Runtimes may still carry the
+   * previous run's code while a container is running, so read it
+   * against `state` rather than on its own.
+   */
+  exitCode?: number;
+  /** True when the kernel OOM killer ended the last run. */
+  oomKilled?: boolean;
+  /**
+   * Restarts the runtime has performed. Legitimately non-zero on a
+   * healthy long-lived container under `--restart=unless-stopped`
+   * after a host reboot, so treat it as a rate, never a fault count.
+   */
+  restartCount?: number;
+  /** The container's own HEALTHCHECK verdict, when one is configured. */
+  health?: "starting" | "healthy" | "unhealthy" | "none";
+}
+
+/**
  * Create-payload fragment that carries the UID-mapping decision from
  * `userMappingFlags` into a dockerode `createContainer` call. Exactly one of
  * the shapes applies per runtime (see `userMappingFlags` for the matrix):
@@ -1409,6 +1443,12 @@ export interface ContainerManagerApi {
     options?: { ownerPluginId?: string },
   ): Promise<void>;
   getState(name: string): Promise<ContainerState>;
+  /**
+   * Coarse state plus why: exit code, OOM kill, restart count and the
+   * container's own healthcheck verdict. `getState` alone cannot tell a
+   * crashlooping container from one the operator stopped.
+   */
+  getStateDetail(name: string): Promise<ContainerStateDetail>;
   /**
    * Read the nofile (`RLIMIT_NOFILE`) limits a managed container is
    * ACTUALLY running with — as opposed to the value requested at create

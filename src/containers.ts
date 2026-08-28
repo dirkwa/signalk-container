@@ -16,6 +16,7 @@ import {
   ManagedImageRef,
   NofileLimits,
   PruneResult,
+  ContainerStateDetail,
   RequestedConfigProvenance,
   ContainerWedged,
   ResourceClamp,
@@ -993,20 +994,100 @@ export async function getContainerState(
   const info = await safeInspect(() => client.getContainer(fullName).inspect());
   if (info === null) return "missing";
 
-  const state = info.State ?? {};
-  const status = (state.Status ?? "").toLowerCase().trim();
+  return coarseStateFrom(info.State ?? {});
+}
+
+/**
+ * The defensive OR shared by `getContainerState` and
+ * `getContainerStateDetail`, so a caller asking for detail can never
+ * be told something different about running than a caller asking for
+ * the coarse state alone.
+ *
+ * Running if ANY source says so. We'd rather report "running" when the
+ * container is actually stopped (worst case: ensureRunning's "already
+ * running" fast path skips a start call, which would then fail the
+ * subsequent health check and recover) than report "stopped" when it's
+ * running (worst case: update service skips legit checks, user sees
+ * flap).
+ */
+function coarseStateFrom(state: {
+  Status?: unknown;
+  Running?: unknown;
+  Pid?: unknown;
+}): ContainerState {
+  const status = String(state.Status ?? "")
+    .toLowerCase()
+    .trim();
   const runningFlag = state.Running === true;
   const pid = Number(state.Pid ?? 0);
   const hasLivePid = Number.isFinite(pid) && pid > 0;
-
-  // Running if ANY source says so. This is the defensive OR — we'd
-  // rather report "running" when the container is actually stopped
-  // (worst case: ensureRunning's "already running" fast path skips
-  // a start call, which would then fail the subsequent health check
-  // and recover) than report "stopped" when it's running (worst
-  // case: update service skips legit checks, user sees flap).
   if (status === "running" || runningFlag || hasLivePid) return "running";
   return "stopped";
+}
+
+/**
+ * Coarse state plus the detail that explains it — exit code, OOM kill,
+ * restart count and the container's own healthcheck verdict.
+ *
+ * `getContainerState` answers "can I talk to it"; this answers "why is
+ * it like that". Both read the same `State` block from one inspect, and
+ * share `coarseStateFrom` so the two can never disagree about running.
+ *
+ * Returns `state: "missing"` with no detail when the container is gone.
+ * Individual fields stay undefined when the runtime omits them rather
+ * than defaulting to a zero that would read as real data.
+ */
+export async function getContainerStateDetail(
+  name: string,
+  client: ContainerClient = getClient(),
+): Promise<ContainerStateDetail> {
+  const info = await safeInspect(() =>
+    client.getContainer(prefixedName(name)).inspect(),
+  );
+  if (info === null) return { state: "missing" };
+
+  const state = (info.State ?? {}) as {
+    Status?: unknown;
+    Running?: unknown;
+    Pid?: unknown;
+    ExitCode?: unknown;
+    OOMKilled?: unknown;
+    RestartCount?: unknown;
+    Health?: { Status?: unknown } | null;
+  };
+
+  const detail: ContainerStateDetail = { state: coarseStateFrom(state) };
+
+  // `typeof === "number"`, never `Number(...)`: dockerode types ExitCode
+  // as `number | null`, and `Number(null)` is a finite 0 — which would
+  // report a clean exit that never happened. Same for "" and [].
+  if (typeof state.ExitCode === "number" && Number.isFinite(state.ExitCode)) {
+    detail.exitCode = state.ExitCode;
+  }
+
+  if (typeof state.OOMKilled === "boolean") detail.oomKilled = state.OOMKilled;
+
+  if (
+    typeof state.RestartCount === "number" &&
+    Number.isFinite(state.RestartCount) &&
+    state.RestartCount >= 0
+  ) {
+    detail.restartCount = state.RestartCount;
+  }
+
+  const health = String(state.Health?.Status ?? "")
+    .toLowerCase()
+    .trim();
+  if (
+    health === "starting" ||
+    health === "healthy" ||
+    health === "unhealthy" ||
+    health === "none"
+  ) {
+    detail.health = health;
+  }
+
+  return detail;
 }
 
 /**
