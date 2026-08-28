@@ -90,6 +90,7 @@ describe("type contracts", () => {
       "stop",
       "remove",
       "getState",
+      "getStateDetail",
       "runJob",
       "prune",
       "listContainers",
@@ -97,7 +98,7 @@ describe("type contracts", () => {
       "resolveHostPath",
       "manifest",
     ];
-    assert.equal(methods.length, 14);
+    assert.equal(methods.length, 15);
   });
 
   it("ContainerConfig accepts digest and updateChannel", () => {

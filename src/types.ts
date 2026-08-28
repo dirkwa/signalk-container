@@ -143,9 +143,11 @@ export interface ContainerStateDetail {
   /** True when the kernel OOM killer ended the last run. */
   oomKilled?: boolean;
   /**
-   * Restarts the runtime has performed. Legitimately non-zero on a
-   * healthy long-lived container under `--restart=unless-stopped`
-   * after a host reboot, so treat it as a rate, never a fault count.
+   * Cumulative restarts the runtime has performed over the container's
+   * life. Legitimately non-zero on a healthy long-lived container under
+   * `--restart=unless-stopped` after a host reboot, so a raw value says
+   * nothing on its own — it is a historical count, not a fault count,
+   * and the API carries no interval to derive a rate from.
    */
   restartCount?: number;
   /** The container's own HEALTHCHECK verdict, when one is configured. */

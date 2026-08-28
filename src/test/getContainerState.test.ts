@@ -352,6 +352,37 @@ describe("getContainerStateDetail", () => {
     assert.equal(detail.restartCount, undefined);
   });
 
+  it("serializes to JSON with state alongside the diagnostics", async () => {
+    // The REST route spreads this object next to `name`, so every field
+    // has to survive JSON.stringify and `state` must stay top-level for
+    // existing consumers that read it there.
+    const client = makeMockClient({
+      containers: {
+        "sk-x": {
+          inspect: {
+            State: {
+              Status: "exited",
+              ExitCode: 137,
+              OOMKilled: true,
+              RestartCount: 3,
+              Health: { Status: "unhealthy" },
+            },
+          },
+        },
+      },
+    });
+    const detail = await getContainerStateDetail("x", client);
+    const body = JSON.parse(JSON.stringify({ name: "x", ...detail }));
+    assert.deepEqual(body, {
+      name: "x",
+      state: "stopped",
+      exitCode: 137,
+      oomKilled: true,
+      restartCount: 3,
+      health: "unhealthy",
+    });
+  });
+
   it("ignores an unrecognised health status", async () => {
     const client = makeMockClient({
       containers: {
