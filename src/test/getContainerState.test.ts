@@ -237,8 +237,8 @@ describe("getContainerStateDetail", () => {
               Pid: 0,
               ExitCode: 137,
               OOMKilled: true,
-              RestartCount: 42,
             },
+            RestartCount: 42,
           },
         },
       },
@@ -266,7 +266,8 @@ describe("getContainerStateDetail", () => {
       containers: {
         "sk-x": {
           inspect: {
-            State: { Status: "exited", ExitCode: 1, RestartCount: 87 },
+            State: { Status: "exited", ExitCode: 1 },
+            RestartCount: 87,
           },
         },
       },
@@ -322,11 +323,8 @@ describe("getContainerStateDetail", () => {
       containers: {
         "sk-x": {
           inspect: {
-            State: {
-              Status: "exited",
-              ExitCode: null,
-              RestartCount: null,
-            },
+            State: { Status: "exited", ExitCode: null },
+            RestartCount: null,
           },
         },
       },
@@ -342,7 +340,8 @@ describe("getContainerStateDetail", () => {
       containers: {
         "sk-x": {
           inspect: {
-            State: { Status: "exited", ExitCode: "", RestartCount: [] },
+            State: { Status: "exited", ExitCode: "" },
+            RestartCount: [],
           },
         },
       },
@@ -364,9 +363,9 @@ describe("getContainerStateDetail", () => {
               Status: "exited",
               ExitCode: 137,
               OOMKilled: true,
-              RestartCount: 3,
               Health: { Status: "unhealthy" },
             },
+            RestartCount: 3,
           },
         },
       },

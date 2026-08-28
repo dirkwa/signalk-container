@@ -1052,9 +1052,12 @@ export async function getContainerStateDetail(
     Pid?: unknown;
     ExitCode?: unknown;
     OOMKilled?: unknown;
-    RestartCount?: unknown;
     Health?: { Status?: unknown } | null;
   };
+  // RestartCount is a TOP-LEVEL inspect field on both runtimes, not part
+  // of the State block — verified against podman 5.4.2 (its native
+  // inspect has no State.RestartCount at all) and Docker.
+  const restartCount = (info as { RestartCount?: unknown }).RestartCount;
 
   const detail: ContainerStateDetail = { state: coarseStateFrom(state) };
 
@@ -1068,11 +1071,11 @@ export async function getContainerStateDetail(
   if (typeof state.OOMKilled === "boolean") detail.oomKilled = state.OOMKilled;
 
   if (
-    typeof state.RestartCount === "number" &&
-    Number.isFinite(state.RestartCount) &&
-    state.RestartCount >= 0
+    typeof restartCount === "number" &&
+    Number.isFinite(restartCount) &&
+    restartCount >= 0
   ) {
-    detail.restartCount = state.RestartCount;
+    detail.restartCount = restartCount;
   }
 
   const health = String(state.Health?.Status ?? "")
