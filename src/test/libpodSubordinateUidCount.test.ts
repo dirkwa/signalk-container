@@ -13,19 +13,25 @@ import type { ContainerClient } from "../client.js";
 const IDENTITY_ENTRY = { container_id: 0, host_id: 1000, size: 1 };
 const FULL_SUBUID_WIDTH = 65536;
 
+/**
+ * The slice of `ContainerClient` this probe touches. Typing the fixtures
+ * against it keeps TypeScript checking their shape — a double cast to the
+ * full interface would let a mock drift from what the probe actually calls.
+ */
+type DialOnlyClient = Pick<ContainerClient, "modem">;
+
 /** A client whose `dial` answers with `payload`, or errors when it is null. */
-function clientReturning(payload: unknown): ContainerClient {
+function clientReturning(payload: unknown): DialOnlyClient {
   return {
     modem: {
-      dial: (
-        _opts: unknown,
-        cb: (err: Error | null, data: unknown) => void,
-      ) => {
+      dial: (_opts, cb) => {
         if (payload === null) cb(new Error("socket gone"), null);
         else cb(null, payload);
       },
+      followProgress: () => {},
+      demuxStream: () => {},
     },
-  } as unknown as ContainerClient;
+  };
 }
 
 function infoWith(uidmap: unknown): unknown {
@@ -97,7 +103,9 @@ describe("libpodSubordinateUidCount", () => {
 
   it("returns null when the modem cannot dial", async () => {
     // Docker, and the test mocks that provide no `dial`.
-    const client = { modem: {} } as unknown as ContainerClient;
+    const client: DialOnlyClient = {
+      modem: { followProgress: () => {}, demuxStream: () => {} },
+    };
     assert.equal(await libpodSubordinateUidCount(client), null);
   });
 });
