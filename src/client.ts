@@ -159,7 +159,7 @@ export function libpodNetworkBackendInfo(
  * the modem cannot dial.
  */
 export function libpodSubordinateUidCount(
-  client: ContainerClient,
+  client: Pick<ContainerClient, "modem">,
 ): Promise<number | null> {
   return new Promise((resolve) => {
     const dial = client.modem.dial?.bind(client.modem);
