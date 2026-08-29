@@ -310,8 +310,8 @@ one. Ask signalk-container, which can see the host:
 ```js
 const gpu = await containers.probeHostDevice?.("/dev/dri");
 if (gpu?.exists) {
-  config.devices = ["/dev/dri"];      // hot-plug directory form
-  config.groupAdd = gpu.groups;       // names, resolved on the host
+  config.devices = ["/dev/dri"]; // hot-plug directory form
+  config.groupAdd = gpu.groups; // names, resolved on the host
 }
 ```
 
@@ -326,7 +326,7 @@ deliberately distinct from `{ exists: false }`, which means definitely absent.
 Assume no device, but do not tell the user there isn't one.
 
 Works the same on Docker and rootless podman, though by different routes: see
-the README's *Detecting host devices* for why rootless podman cannot report
+the README's _Detecting host devices_ for why rootless podman cannot report
 real gids and what the probe does instead.
 
 ### Optional and required volumes
@@ -586,6 +586,31 @@ await containers.removeManagedData("questdb", questdbDataDir, {
 
 Returns `'running'`, `'stopped'`, `'missing'`, or `'no-runtime'`.
 
+### `getStateDetail(name): Promise<ContainerStateDetail>`
+
+The same coarse `state`, plus why it is in that state. `getState()` alone
+cannot tell a container that has crashlooped from one the operator stopped —
+both report `'stopped'`.
+
+```ts
+const { state, exitCode, oomKilled } =
+  await containers.getStateDetail("questdb");
+// state 'stopped' either way; exitCode 137 + oomKilled true is the crash
+```
+
+See `ContainerStateDetail` in `signalk-container/types` for the full shape.
+Every field beyond `state` is optional: a runtime that does not report one
+leaves it `undefined` rather than defaulting to `0`, which would read as a
+clean exit that never happened.
+
+`restartCount` is cumulative over the container's life, not a fault count —
+it is legitimately non-zero on a healthy long-lived container under
+`restart: 'unless-stopped'` after a host reboot. Read it as a rate over time
+if you want to detect a crashloop, never as a raw threshold.
+
+`exitCode` may still carry the previous run's value while a container is
+running, so read it against `state` rather than on its own.
+
 ### `getContainerNofile(name): Promise<NofileLimits | null>`
 
 Reads the `nofile` (`RLIMIT_NOFILE`) limits the managed container is
@@ -729,6 +754,52 @@ Removes dangling images.
 ### `listContainers(): Promise<ContainerInfo[]>`
 
 Lists all `sk-` prefixed containers.
+
+### `resolveContainerAddress(name, port): Promise<string | null>`
+
+The `host:port` (or `container-name:port`) your plugin should connect to
+after `ensureRunning()`. Which form you get depends on how SignalK itself is
+deployed, so constructing the address yourself is unsafe.
+
+Pair it with `signalkAccessiblePorts` in your `ContainerConfig`: declare the
+ports SignalK needs to reach, then ask the resolver where to connect.
+
+### `ensureNetwork(name): Promise<void>`
+
+Creates a user-defined network if it does not exist. Idempotent — calling it
+for a network that is already there is a no-op, not an error.
+
+**Prefer `signalkAccessiblePorts`.** It declares intent ("SignalK needs to
+reach port 9000") and lets signalk-container choose the networking strategy.
+These four network methods are the manual escape hatch for topologies that
+need explicit control, such as several managed containers that must talk to
+each other but not to SignalK.
+
+### `removeNetwork(name): Promise<void>`
+
+Removes a network. Idempotent — removing one that does not exist is a no-op.
+A network still holding a container cannot be removed; remove the containers
+first.
+
+### `connectToNetwork(containerName, networkName): Promise<void>`
+
+Attaches a managed container to an additional network. Takes the unprefixed
+name; the namespace prefix is resolved for you.
+
+A container created on the default rootless network cannot be attached to a
+user-defined one; the runtime rejects it. Create it on a user-defined
+network via `networkMode` if you intend to attach more later.
+
+### `disconnectFromNetwork(containerName, networkName): Promise<void>`
+
+Detaches a managed container from a network. Idempotent.
+
+### `execInContainer(name, command): Promise<{ exitCode, stdout, stderr }>`
+
+Runs a command inside a running managed container and returns its exit code
+and output. Intended for probes and one-off queries; for real work that
+needs its own lifecycle use `runJob()` instead, which gets a fresh container
+and does not depend on the target being up.
 
 ### `getImageDigest(imageOrContainer): Promise<string | null>`
 
