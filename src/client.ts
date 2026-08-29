@@ -82,6 +82,13 @@ export interface LibpodNetworkBackendInfo {
   dns?: { version?: string; package?: string; path?: string };
 }
 
+/**
+ * Podman's native info endpoint. The version prefix is required —
+ * unversioned libpod paths 404 — and podman accepts any client version
+ * here. Shared by both probes so the two cannot drift apart.
+ */
+const LIBPOD_INFO_PATH = "/v4.0.0/libpod/info";
+
 /** One `container_id`/`host_id`/`size` triple from podman's `/info`. */
 export interface LibpodIdMapEntry {
   container_id?: number;
@@ -100,9 +107,8 @@ interface LibpodInfo {
  * Podman's native `/libpod/info` — the docker-compat `/info` the rest of the
  * plugin uses does NOT expose `networkBackendInfo`, so host-side network
  * facts (which DNS helper netavark resolved, if any) are only visible here.
- * The version prefix is required (unversioned libpod paths 404); Podman
- * accepts any client version for this endpoint. Returns `null` on Docker,
- * on any request failure, and when the modem can't dial (test mocks).
+ * Returns `null` on Docker, on any request failure, and when the modem
+ * can't dial (test mocks).
  */
 export function libpodNetworkBackendInfo(
   client: ContainerClient,
@@ -116,7 +122,7 @@ export function libpodNetworkBackendInfo(
     try {
       dial(
         {
-          path: "/v4.0.0/libpod/info",
+          path: LIBPOD_INFO_PATH,
           method: "GET",
           statusCodes: { 200: true, 500: "server error" },
         },
@@ -164,7 +170,7 @@ export function libpodSubordinateUidCount(
     try {
       dial(
         {
-          path: "/v4.0.0/libpod/info",
+          path: LIBPOD_INFO_PATH,
           method: "GET",
           statusCodes: { 200: true, 500: "server error" },
         },
