@@ -17,3 +17,6 @@ cr-review*
 cr-audit*
 # Disk-backed scratch dir for local spikes (not /tmp — that's RAM on trixie).
 .scratch/
+
+# node --test JUnit report; CI uploads it as an artifact
+test-results/

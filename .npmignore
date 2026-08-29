@@ -13,3 +13,6 @@ dist/scripts/
 eslint.config.js
 tsconfig.json
 vite.config.ts
+
+# node --test JUnit report; a local artifact, never published
+test-results/
