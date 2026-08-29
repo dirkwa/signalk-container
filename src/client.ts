@@ -99,7 +99,10 @@ export interface LibpodIdMapEntry {
 interface LibpodInfo {
   host?: {
     networkBackendInfo?: LibpodNetworkBackendInfo;
-    idMappings?: { uidmap?: LibpodIdMapEntry[] | null };
+    idMappings?: {
+      uidmap?: LibpodIdMapEntry[] | null;
+      gidmap?: LibpodIdMapEntry[] | null;
+    };
   };
 }
 
@@ -144,7 +147,29 @@ export function libpodNetworkBackendInfo(
 }
 
 /**
- * Subordinate UID range podman has for the calling user, from its own
+ * Total width of the subordinate entries in one mapping table, or `null`
+ * when the table is absent or contributes nothing usable.
+ *
+ * The identity entry maps the caller's own id and is not part of the
+ * subordinate block. Sizes must be positive safe integers: podman parses
+ * `size` as a uint and rejects `size=1.5` outright, and a negative would
+ * shrink the total below what the account actually has.
+ */
+function subordinateWidth(map: LibpodIdMapEntry[] | null | undefined) {
+  if (!Array.isArray(map)) return null;
+  const total = map
+    .filter((e) => (e?.container_id ?? 0) !== 0)
+    .reduce((n, e) => {
+      const size = e?.size;
+      return typeof size === "number" && Number.isSafeInteger(size) && size > 0
+        ? n + size
+        : n;
+    }, 0);
+  return total > 0 ? total : null;
+}
+
+/**
+ * Subordinate ID range podman has for the calling user, from its own
  * `/info` — the sum of every mapping entry beyond the identity one.
  *
  * `--userns=keep-id:uid=N` asks for a 65536-wide subordinate block. Where
@@ -179,27 +204,14 @@ export function libpodSubordinateUidCount(
             resolve(null);
             return;
           }
-          const uidmap = (data as LibpodInfo).host?.idMappings?.uidmap;
-          if (!Array.isArray(uidmap)) {
-            resolve(null);
-            return;
-          }
-          // The identity entry maps the caller's own uid and is not part of
-          // the subordinate block; everything else is.
-          // Positive safe integers only: podman parses `size` as a uint and
-          // rejects `size=1.5` outright, and a negative would shrink the
-          // total below what the account actually has.
-          const total = uidmap
-            .filter((e) => (e?.container_id ?? 0) !== 0)
-            .reduce((n, e) => {
-              const size = e?.size;
-              return typeof size === "number" &&
-                Number.isSafeInteger(size) &&
-                size > 0
-                ? n + size
-                : n;
-            }, 0);
-          resolve(total > 0 ? total : null);
+          const maps = (data as LibpodInfo).host?.idMappings;
+          const uid = subordinateWidth(maps?.uidmap);
+          const gid = subordinateWidth(maps?.gidmap);
+          // One `size` governs both the uid and gid mappings, so the usable
+          // width is the smaller of the two — asking for the uid width when
+          // fewer gids exist reproduces the very failure this bounds.
+          // Unknown on either side means no safe bound at all.
+          resolve(uid === null || gid === null ? null : Math.min(uid, gid));
         },
       );
     } catch {
