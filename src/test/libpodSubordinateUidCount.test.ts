@@ -34,8 +34,9 @@ function clientReturning(payload: unknown): DialOnlyClient {
   };
 }
 
-function infoWith(uidmap: unknown): unknown {
-  return { host: { idMappings: { uidmap } } };
+/** Both tables default to the same shape; pass `gidmap` to differ. */
+function infoWith(uidmap: unknown, gidmap: unknown = uidmap): unknown {
+  return { host: { idMappings: { uidmap, gidmap } } };
 }
 
 describe("libpodSubordinateUidCount", () => {
@@ -93,6 +94,36 @@ describe("libpodSubordinateUidCount", () => {
         await libpodSubordinateUidCount(clientReturning(payload)),
         null,
         `expected null for ${JSON.stringify(payload)}`,
+      );
+    }
+  });
+
+  it("takes the smaller of the uid and gid widths", async () => {
+    // Podman applies one `size` to both mappings, so asking for the uid
+    // width when fewer gids exist reproduces the failure this bounds.
+    const client = clientReturning(
+      infoWith(
+        [IDENTITY_ENTRY, { container_id: 1, host_id: 100000, size: 65536 }],
+        [IDENTITY_ENTRY, { container_id: 1, host_id: 100000, size: 200 }],
+      ),
+    );
+    assert.equal(await libpodSubordinateUidCount(client), 200);
+  });
+
+  it("returns null when only one of the two tables is usable", async () => {
+    // No safe bound exists if either side is unknown.
+    const usable = [
+      IDENTITY_ENTRY,
+      { container_id: 1, host_id: 100000, size: 200 },
+    ];
+    for (const [uid, gid] of [
+      [usable, null],
+      [null, usable],
+      [usable, [IDENTITY_ENTRY]],
+    ]) {
+      assert.equal(
+        await libpodSubordinateUidCount(clientReturning(infoWith(uid, gid))),
+        null,
       );
     }
   });
