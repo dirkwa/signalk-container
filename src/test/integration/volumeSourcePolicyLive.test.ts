@@ -3,7 +3,10 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getLiveContainerConfig } from "../../containers.js";
+import {
+  getContainerStateDetail,
+  getLiveContainerConfig,
+} from "../../containers.js";
 import { detectRuntime } from "../../runtime.js";
 import containerManagerPlugin from "../../index.js";
 import type {
@@ -147,11 +150,10 @@ describe("volume ifMissing policy — real runtime", () => {
     // The bind string alone is not proof the data is reachable: where the
     // manager and the runtime see different filesystems, the daemon can
     // bind a different, empty directory of the same path and the config
-    // looks identical. Read the marker from inside to settle it.
-    // The container itself decides: exit 0 only when the marker is present
-    // with the expected content. Reading stdout back would depend on the
-    // job's uid mapping being able to read the file too; the grep exit
-    // status answers the reachability question without that coupling.
+    // looks identical. Let the container decide — exit 0 only when the
+    // marker is present with the expected content. The grep exit status
+    // answers that without depending on the job's uid mapping being able
+    // to read the file back over stdout.
     const readBack = await api.runJob({
       image: `${IMAGE}:${TAG}`,
       command: [
@@ -195,7 +197,15 @@ describe("volume ifMissing policy — real runtime", () => {
     );
 
     const live = await getLiveContainerConfig(runtime, CONTAINER_NAME);
-    assert.ok(live, "container should still be running without the mount");
+    assert.ok(live, "container should exist without the optional mount");
+    // Existence is not enough: the claim is that dropping an optional
+    // mount still lets the container START, and a created-but-stopped
+    // container would satisfy an existence check.
+    assert.equal(
+      (await getContainerStateDetail(CONTAINER_NAME)).state,
+      "running",
+      "the container should be running after the optional mount was skipped",
+    );
     assert.ok(
       !live.binds.some((b) => b.container === "/mnt/usb"),
       "the missing optional source should not have been mounted",
