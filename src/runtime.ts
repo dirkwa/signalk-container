@@ -376,13 +376,19 @@ export async function probeCgroupControllers(
  * are treated as too old — the bound is an optimisation, and going without
  * it is the long-standing behaviour.
  */
+/** First Podman release accepting `--userns=keep-id:size=` (#24387). */
+const KEEP_ID_SIZE_MIN = { major: 5, minor: 4 };
+
 export function supportsKeepIdSize(version: string | null): boolean {
   if (!version) return false;
   const m = /^(\d+)\.(\d+)/.exec(version.trim());
   if (!m) return false;
   const major = Number(m[1]);
   const minor = Number(m[2]);
-  return major > 5 || (major === 5 && minor >= 4);
+  return (
+    major > KEEP_ID_SIZE_MIN.major ||
+    (major === KEEP_ID_SIZE_MIN.major && minor >= KEEP_ID_SIZE_MIN.minor)
+  );
 }
 
 export async function detectRuntime(

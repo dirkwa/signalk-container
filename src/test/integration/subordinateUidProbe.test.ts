@@ -1,6 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { detectRuntime } from "../../runtime.js";
+import {
+  detectRuntime,
+  supportsKeepIdSize,
+  userMappingFlags,
+} from "../../runtime.js";
+import { getClient } from "../../client.js";
 import type { ContainerRuntimeInfo } from "../../types.js";
 
 /**
@@ -10,6 +15,22 @@ import type { ContainerRuntimeInfo } from "../../types.js";
  * `libpodSubordinateUidCount.test.ts`; what this covers is that
  * `detectRuntime` actually runs it, and only where it makes sense.
  */
+
+const IMAGE = "alpine";
+const TAG = "3.19";
+const CONTAINER_NAME = "subuid-probe-test";
+
+/** Strip the 8-byte stream headers docker/podman prefix each log frame with. */
+function demuxFrames(buf: Buffer): string {
+  let out = "";
+  let i = 0;
+  while (i + 8 <= buf.length) {
+    const len = buf.readUInt32BE(4);
+    out += buf.subarray(i + 8, i + 8 + len).toString("utf8");
+    i += 8 + len;
+  }
+  return out;
+}
 
 async function hasContainerRuntime(): Promise<ContainerRuntimeInfo | null> {
   if (process.platform === "win32") return null;
@@ -26,7 +47,13 @@ describe("detectRuntime — subordinate uid probe", () => {
 
     const width = runtime.subordinateUidCount;
 
-    if (runtime.runtime === "podman" && runtime.isRootless === true) {
+    // Rootless podman older than 5.4 runs containers fine but cannot take
+    // `keep-id:size=`, so the probe is deliberately skipped there too.
+    if (
+      runtime.runtime === "podman" &&
+      runtime.isRootless === true &&
+      supportsKeepIdSize(runtime.version)
+    ) {
       // A rootless account without a subordinate range cannot run
       // containers at all, so a reachable rootless daemon must report one.
       assert.equal(
@@ -44,25 +71,73 @@ describe("detectRuntime — subordinate uid probe", () => {
       assert.equal(
         width ?? null,
         null,
-        `${runtime.runtime} (rootless=${runtime.isRootless}) should not probe`,
+        `${runtime.runtime} ${runtime.version} (rootless=${runtime.isRootless}) should not probe`,
       );
     }
   });
 
-  it("agrees with the mapping the daemon actually applies", async (t) => {
+  it("produces a mapping the daemon accepts and applies", async (t) => {
     const runtime = await hasContainerRuntime();
     if (!runtime) {
       t.skip("no container runtime available");
       return;
     }
-    if (runtime.runtime !== "podman" || runtime.isRootless !== true) {
-      t.skip("keep-id sizing only applies to rootless podman");
+    if (
+      runtime.runtime !== "podman" ||
+      runtime.isRootless !== true ||
+      runtime.subordinateUidCount == null
+    ) {
+      t.skip("keep-id sizing only applies to rootless podman 5.4+");
       return;
     }
 
-    // The width is only useful if podman would accept it as a `size`.
-    // Anything larger is what triggers the clamp this bounds against.
-    const width = runtime.subordinateUidCount as number;
-    assert.ok(width > 0);
+    // Arithmetic that merely looks plausible still fails at create time, so
+    // run the flag the plugin would actually emit and read the map back
+    // from inside the container.
+    const flags = userMappingFlags(runtime, { inImageUid: 0, inImageGid: 0 });
+    const usernsMode = flags.HostConfig?.UsernsMode;
+    assert.ok(
+      usernsMode?.includes(`size=${runtime.subordinateUidCount}`),
+      `expected a size-bounded keep-id, got ${usernsMode}`,
+    );
+
+    const container = await getClient().createContainer({
+      Image: `${IMAGE}:${TAG}`,
+      name: CONTAINER_NAME,
+      Cmd: ["cat", "/proc/self/uid_map"],
+      HostConfig: { UsernsMode: usernsMode, AutoRemove: false },
+    });
+    try {
+      await container.start();
+      await container.wait();
+      const logs = (await container.logs({
+        stdout: true,
+        stderr: false,
+      })) as unknown as Buffer;
+      // Log frames carry an 8-byte multiplex header each; strip them rather
+      // than parse around them, or the first field of every line is
+      // corrupted.
+      const uidMap = demuxFrames(logs);
+
+      // The bound has to reach the kernel, not just the command line: the
+      // subordinate entry must be the width asked for, never 0 — a
+      // zero-length entry is what the kernel refuses outright.
+      const subordinate = uidMap
+        .split("\n")
+        .map((l) => l.trim().split(/\s+/))
+        .filter((p) => p.length === 3 && p[0] !== "0");
+      assert.ok(
+        subordinate.length > 0,
+        `no subordinate entry in uid_map: ${JSON.stringify(uidMap)}`,
+      );
+      for (const [, , length] of subordinate) {
+        assert.ok(
+          Number(length) > 0,
+          `zero-length mapping entry, the failure this guards: ${uidMap}`,
+        );
+      }
+    } finally {
+      await container.remove({ force: true }).catch(() => {});
+    }
   });
 });

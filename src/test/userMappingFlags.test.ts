@@ -377,8 +377,6 @@ describe("userMappingFlags — subordinate range bound", () => {
   // account whose /etc/subuid allocation is narrower makes podman clamp the
   // mapping length, and at the limit clamp it to zero — which the kernel
   // rejects with `writing file /proc/<pid>/gid_map: Invalid argument`.
-  const linuxIds = () => ({ uid: 1000, gid: 1000 });
-
   it("bounds the request to the width podman reports", () => {
     assert.deepEqual(
       userMappingFlags(
