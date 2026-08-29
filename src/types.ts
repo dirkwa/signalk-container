@@ -107,6 +107,14 @@ export interface ContainerRuntimeInfo {
    */
   isContainerized?: boolean;
   /**
+   * Width of the subordinate UID block podman has for the calling user, or
+   * `null` when unknown (Docker, or the probe failed). Bounds the
+   * `--userns=keep-id` request: asking for more than the account was
+   * allocated makes podman clamp the mapping length, and at the limit clamp
+   * it to zero, which the kernel refuses.
+   */
+  subordinateUidCount?: number | null;
+  /**
    * @deprecated Superseded by `socketPath`. Never populated since the
    * dockerode socket port (the `--remote --url` CLI fallback it described
    * no longer exists). Kept as an optional field for one release so

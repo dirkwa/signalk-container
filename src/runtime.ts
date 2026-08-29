@@ -6,7 +6,7 @@ import {
   RuntimePreference,
   UserMappingPayload,
 } from "./types.js";
-import { resolveClient, safe } from "./client.js";
+import { libpodSubordinateUidCount, resolveClient, safe } from "./client.js";
 
 /**
  * Detect if the Signal K server is itself running inside a container.
@@ -181,8 +181,19 @@ export function userMappingFlags(
     if (usernsRemapDisabled) {
       return {};
     }
+    // `keep-id:uid=N` asks podman for a 65536-wide subordinate block. On an
+    // account whose /etc/subuid allocation is narrower, podman clamps the
+    // length — and at the limit clamps it to zero, which the kernel rejects
+    // with `writing file /proc/<pid>/gid_map: Invalid argument`. Bounding
+    // the request to the width podman reports keeps the mapping valid.
+    // `size` is omitted when the width is unknown (Docker, older podman, a
+    // failed probe) so the default behaviour is untouched.
+    const size = runtime.subordinateUidCount;
+    const bound = typeof size === "number" && size > 0 ? `size=${size},` : "";
     return {
-      HostConfig: { UsernsMode: `keep-id:uid=${inImageUid},gid=${inImageGid}` },
+      HostConfig: {
+        UsernsMode: `keep-id:${bound}uid=${inImageUid},gid=${inImageGid}`,
+      },
     };
   }
   // Docker / rootful Podman: no user-namespace remap, so `User` is a
@@ -386,6 +397,10 @@ export async function detectRuntime(
     version: version.Version ?? "unknown",
     isPodmanDockerShim: false,
     cgroupControllers: await probeCgroupControllers(runtime, isRootless),
+    subordinateUidCount:
+      runtime === "podman" && isRootless
+        ? await libpodSubordinateUidCount(client)
+        : null,
     hostCpus: hostCpusFromInfo(info),
     isRootless,
     hostUser: probeHostUser(),
