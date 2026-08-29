@@ -1,7 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { userMappingFlags } from "../jobs.js";
-import { isDisableUserns, setDisableUserns } from "../runtime.js";
+import {
+  isDisableUserns,
+  setDisableUserns,
+  supportsKeepIdSize,
+} from "../runtime.js";
 import type { ContainerRuntimeInfo } from "../types.js";
 
 const dockerRuntime: ContainerRuntimeInfo = {
@@ -432,5 +436,30 @@ describe("userMappingFlags — subordinate range bound", () => {
         },
       },
     );
+  });
+});
+
+describe("supportsKeepIdSize", () => {
+  // `keep-id:size=` landed in Podman 5.4.0 (containers/podman#24387).
+  // Emitting it on 5.3 breaks container creation on an install that works,
+  // so the gate has to fail closed.
+  it("accepts 5.4 and newer", () => {
+    for (const v of ["5.4.0", "5.4.2", "5.5.0", "6.0.0", "5.4.2-dev"]) {
+      assert.equal(supportsKeepIdSize(v), true, v);
+    }
+  });
+
+  it("rejects anything older", () => {
+    for (const v of ["5.3.0", "5.3.9", "4.9.4", "3.0.0"]) {
+      assert.equal(supportsKeepIdSize(v), false, v);
+    }
+  });
+
+  it("rejects an absent or unparseable version", () => {
+    // Going without the bound is the long-standing behaviour; guessing
+    // would risk breaking creation outright.
+    for (const v of [null, "", "unknown", "v5.4.2"]) {
+      assert.equal(supportsKeepIdSize(v), false, JSON.stringify(v));
+    }
   });
 });

@@ -369,6 +369,22 @@ export async function probeCgroupControllers(
  * endpoint via `DOCKER_HOST`/`CONTAINER_HOST` always wins (see
  * `client.ts`).
  */
+/**
+ * `--userns=keep-id:size=` landed in Podman 5.4.0 (containers/podman#24387);
+ * 5.3 and earlier reject the whole option, so emitting it there would break
+ * container creation on an install that works today. Unparseable versions
+ * are treated as too old — the bound is an optimisation, and going without
+ * it is the long-standing behaviour.
+ */
+export function supportsKeepIdSize(version: string | null): boolean {
+  if (!version) return false;
+  const m = /^(\d+)\.(\d+)/.exec(version.trim());
+  if (!m) return false;
+  const major = Number(m[1]);
+  const minor = Number(m[2]);
+  return major > 5 || (major === 5 && minor >= 4);
+}
+
 export async function detectRuntime(
   preference: RuntimePreference,
 ): Promise<ContainerRuntimeInfo | null> {
@@ -398,7 +414,9 @@ export async function detectRuntime(
     isPodmanDockerShim: false,
     cgroupControllers: await probeCgroupControllers(runtime, isRootless),
     subordinateUidCount:
-      runtime === "podman" && isRootless
+      runtime === "podman" &&
+      isRootless &&
+      supportsKeepIdSize(version.Version ?? null)
         ? await libpodSubordinateUidCount(client)
         : null,
     hostCpus: hostCpusFromInfo(info),
