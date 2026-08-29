@@ -82,8 +82,18 @@ export interface LibpodNetworkBackendInfo {
   dns?: { version?: string; package?: string; path?: string };
 }
 
+/** One `container_id`/`host_id`/`size` triple from podman's `/info`. */
+export interface LibpodIdMapEntry {
+  container_id?: number;
+  host_id?: number;
+  size?: number;
+}
+
 interface LibpodInfo {
-  host?: { networkBackendInfo?: LibpodNetworkBackendInfo };
+  host?: {
+    networkBackendInfo?: LibpodNetworkBackendInfo;
+    idMappings?: { uidmap?: LibpodIdMapEntry[] | null };
+  };
 }
 
 /**
@@ -119,6 +129,71 @@ export function libpodNetworkBackendInfo(
             return;
           }
           resolve((data as LibpodInfo).host?.networkBackendInfo ?? null);
+        },
+      );
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+/**
+ * Subordinate UID range podman has for the calling user, from its own
+ * `/info` — the sum of every mapping entry beyond the identity one.
+ *
+ * `--userns=keep-id:uid=N` asks for a 65536-wide subordinate block. Where
+ * the account's `/etc/subuid` allocation is narrower, podman clamps the
+ * length, and at the limit clamps it to zero — which the kernel rejects
+ * with `writing file /proc/<pid>/gid_map: Invalid argument`. Reading the
+ * real width lets the caller bound the request to what exists.
+ *
+ * Asked of podman rather than read from `/etc/subuid` because the plugin
+ * usually runs inside a container, where that file is absent while the
+ * socket still answers. Returns `null` on Docker, on any failure, and when
+ * the modem cannot dial.
+ */
+export function libpodSubordinateUidCount(
+  client: ContainerClient,
+): Promise<number | null> {
+  return new Promise((resolve) => {
+    const dial = client.modem.dial?.bind(client.modem);
+    if (!dial) {
+      resolve(null);
+      return;
+    }
+    try {
+      dial(
+        {
+          path: "/v4.0.0/libpod/info",
+          method: "GET",
+          statusCodes: { 200: true, 500: "server error" },
+        },
+        (err, data) => {
+          if (err || typeof data !== "object" || data === null) {
+            resolve(null);
+            return;
+          }
+          const uidmap = (data as LibpodInfo).host?.idMappings?.uidmap;
+          if (!Array.isArray(uidmap)) {
+            resolve(null);
+            return;
+          }
+          // The identity entry maps the caller's own uid and is not part of
+          // the subordinate block; everything else is.
+          // Positive safe integers only: podman parses `size` as a uint and
+          // rejects `size=1.5` outright, and a negative would shrink the
+          // total below what the account actually has.
+          const total = uidmap
+            .filter((e) => (e?.container_id ?? 0) !== 0)
+            .reduce((n, e) => {
+              const size = e?.size;
+              return typeof size === "number" &&
+                Number.isSafeInteger(size) &&
+                size > 0
+                ? n + size
+                : n;
+            }, 0);
+          resolve(total > 0 ? total : null);
         },
       );
     } catch {

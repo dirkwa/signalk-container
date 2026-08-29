@@ -358,3 +358,79 @@ describe("userMappingFlags", () => {
     });
   });
 });
+
+/** A full /etc/subuid allocation — the width `keep-id` assumes by default. */
+const FULL_SUBUID_WIDTH = 65536;
+/** Narrower than keep-id's default request; the case that triggers the clamp. */
+const NARROW_SUBUID_WIDTH = 300;
+/** Widths the kernel would refuse, so no `size=` should be emitted for them. */
+const UNUSABLE_SUBUID_WIDTHS = [0, -1];
+/** In-image uid/gid for an image that declares a non-root USER. */
+const NON_ROOT_IN_IMAGE_ID = 1000;
+
+describe("userMappingFlags — subordinate range bound", () => {
+  // `keep-id:uid=N` asks podman for a 65536-wide subordinate block. An
+  // account whose /etc/subuid allocation is narrower makes podman clamp the
+  // mapping length, and at the limit clamp it to zero — which the kernel
+  // rejects with `writing file /proc/<pid>/gid_map: Invalid argument`.
+  const linuxIds = () => ({ uid: 1000, gid: 1000 });
+
+  it("bounds the request to the width podman reports", () => {
+    assert.deepEqual(
+      userMappingFlags(
+        { ...podmanRootlessRuntime, subordinateUidCount: NARROW_SUBUID_WIDTH },
+        undefined,
+        linuxIds,
+      ),
+      {
+        HostConfig: {
+          UsernsMode: `keep-id:size=${NARROW_SUBUID_WIDTH},uid=0,gid=0`,
+        },
+      },
+    );
+  });
+
+  it("omits the bound when the width is unknown", () => {
+    // Docker, an older podman, or a failed probe. Asking without a size is
+    // the long-standing behaviour and must stay the fallback.
+    assert.deepEqual(
+      userMappingFlags(
+        { ...podmanRootlessRuntime, subordinateUidCount: null },
+        undefined,
+        linuxIds,
+      ),
+      { HostConfig: { UsernsMode: "keep-id:uid=0,gid=0" } },
+    );
+  });
+
+  it("omits the bound for a nonsensical width", () => {
+    // A zero or negative width is what the kernel refuses; asking without a
+    // size at least lets podman decide rather than emitting `size=0`.
+    for (const subordinateUidCount of UNUSABLE_SUBUID_WIDTHS) {
+      assert.deepEqual(
+        userMappingFlags(
+          { ...podmanRootlessRuntime, subordinateUidCount },
+          undefined,
+          linuxIds,
+        ),
+        { HostConfig: { UsernsMode: "keep-id:uid=0,gid=0" } },
+        `width ${subordinateUidCount} should not produce a size bound`,
+      );
+    }
+  });
+
+  it("keeps the in-image uid alongside the bound", () => {
+    assert.deepEqual(
+      userMappingFlags(
+        { ...podmanRootlessRuntime, subordinateUidCount: FULL_SUBUID_WIDTH },
+        { inImageUid: NON_ROOT_IN_IMAGE_ID, inImageGid: NON_ROOT_IN_IMAGE_ID },
+        linuxIds,
+      ),
+      {
+        HostConfig: {
+          UsernsMode: `keep-id:size=${FULL_SUBUID_WIDTH},uid=${NON_ROOT_IN_IMAGE_ID},gid=${NON_ROOT_IN_IMAGE_ID}`,
+        },
+      },
+    );
+  });
+});
