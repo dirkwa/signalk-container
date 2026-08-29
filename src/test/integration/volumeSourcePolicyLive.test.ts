@@ -83,6 +83,11 @@ describe("volume ifMissing policy — real runtime", () => {
   let tmp: string;
   let api: ContainerManagerApi;
   let stopPlugin: () => Promise<void>;
+  /**
+   * Resolved once in `before()` and read by every test. Re-probing per test
+   * would let a test proceed on a runtime `before()` never saw, calling
+   * through an `api` that was consequently never booted.
+   */
   let runtimeInfo: ContainerRuntimeInfo | null = null;
 
   before(async () => {
@@ -107,9 +112,6 @@ describe("volume ifMissing policy — real runtime", () => {
   });
 
   it("mounts a source that exists", async (t) => {
-    // Use the runtime the suite resolved: `before()` only boots the plugin
-    // when detection succeeded, so re-probing here could pass while `api`
-    // is still undefined.
     const runtime = runtimeInfo;
     if (!runtime) {
       t.skip("no container runtime available");
@@ -167,9 +169,6 @@ describe("volume ifMissing policy — real runtime", () => {
   });
 
   it("skips a missing optional source and still starts", async (t) => {
-    // Use the runtime the suite resolved: `before()` only boots the plugin
-    // when detection succeeded, so re-probing here could pass while `api`
-    // is still undefined.
     const runtime = runtimeInfo;
     if (!runtime) {
       t.skip("no container runtime available");
@@ -217,9 +216,6 @@ describe("volume ifMissing policy — real runtime", () => {
   });
 
   it("refuses to start when a required source is missing", async (t) => {
-    // Use the runtime the suite resolved: `before()` only boots the plugin
-    // when detection succeeded, so re-probing here could pass while `api`
-    // is still undefined.
     const runtime = runtimeInfo;
     if (!runtime) {
       t.skip("no container runtime available");
