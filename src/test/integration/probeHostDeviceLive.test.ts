@@ -43,7 +43,6 @@ async function hasContainerRuntime(): Promise<ContainerRuntimeInfo | null> {
   return detectRuntime("auto");
 }
 
-/** The gid the kernel reports for the first real node in `dir`, or null. */
 function firstNodeGid(dir: string): number | null {
   if (!existsSync(dir)) return null;
   for (const name of readdirSync(dir).sort()) {
@@ -58,7 +57,6 @@ function firstNodeGid(dir: string): number | null {
   return null;
 }
 
-/** Device node names the kernel reports directly under `dir`. */
 function kernelNodes(dir: string): string[] {
   if (!existsSync(dir)) return [];
   return readdirSync(dir)
