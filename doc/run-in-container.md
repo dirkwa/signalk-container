@@ -114,7 +114,7 @@ Three distinct APIs sit on top of that, and they expose different trees:
 
 | API                                      | Resolves to                                                                                                                                                                                                    |
 | ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ContainerConfig.signalkDataMount`       | signalk-container's own plugin data directory, shared by every managed container. Namespace a subdirectory. A named volume is mounted whole.                                                                   |
+| `ContainerConfig.signalkDataMount`       | signalk-container's own plugin data directory, shared by every managed container. Namespace a subdirectory. A named volume attached above that directory is refused, not mounted whole.                        |
 | `ContainerConfig.signalkConfigRootMount` | The SignalK config root (`~/.signalk`) — the whole installation config.                                                                                                                                        |
 | `ContainerManagerApi.resolveHostPath(p)` | The host source behind any absolute path the SK container can see, including the caller's _own_ plugin directory. This is the one that translates `/home/node/.signalk/...` back to `/home/dirk/.signalk/...`. |
 
