@@ -150,10 +150,10 @@ Everything except `/libpod/info` goes through Podman's **Docker-compat** API via
 
 Docker Engine honours the volume subpath on its own API (29.7.2 / API 1.55), so that one was never a Docker gap at all.
 
-Two procedural lessons, both learned the expensive way:
+Two rules follow:
 
 - **A runtime's changelog or man page describes its CLI, not this endpoint.** Measure through dockerode against the socket before writing a capability claim into a comment, an error message, or the docs. `src/test/integration/` is where such a probe belongs.
-- **Measure more than one version before generalising.** The subpath discard read as "podman cannot do this" until 6.1 was tested and did. `honoursVolumeSubpath` in `src/runtime.ts` carries that bound, mirroring `supportsKeepIdSize`; both fail closed on an unparseable version.
+- **A single version does not establish a property of podman.** Any capability that differs across the table above needs a version bound, not a blanket claim. `honoursVolumeSubpath` in `src/runtime.ts` carries this one, mirroring `supportsKeepIdSize`; both fail closed on an unparseable version.
 
 An operator-facing error must also name the mechanism precisely. Telling someone "named volumes cannot be subpath-mounted" sends them to the podman docs, which say otherwise, and they conclude the plugin is broken.
 
