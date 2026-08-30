@@ -266,18 +266,15 @@ export interface ContainerConfig {
    * expect anything the calling plugin wrote under its own
    * `getDataDirPath()` to appear here.
    *
-   * **How much is exposed depends on the deployment.** On bare metal or a
-   * bind mount, the source is
-   * `<configRoot>/plugin-config-data/signalk-container/` and that is all
-   * the container sees. Where the directory is backed by a **named
-   * volume**, Docker and Podman cannot mount a subpath, so the *entire
-   * backing volume* is mounted — how much that is depends on where the
-   * volume is attached: a volume mounted directly on
-   * `plugin-config-data/signalk-container` exposes only that, while one
-   * covering the config root exposes the whole SignalK tree. The mount
-   * point corresponds to wherever the volume is attached, so a consumer
-   * may have to append the relative suffix to reach the same files.
-   * Namespacing matters in every case.
+   * **The container never sees more than that directory.** A bind mount is
+   * narrowed to the exact host path. A **named volume** cannot be
+   * subpath-mounted, so it is accepted only when the volume is attached to
+   * the directory itself; a volume covering a parent would hand the
+   * container the whole SignalK config tree, `security.json` included, and
+   * `ensureRunning` therefore rejects it with an error naming the volume
+   * and the remedy. Callers who do want a parent-backed volume can use
+   * `ContainerManagerApi.resolveHostPath`, which reports `subPath` so the
+   * wider scope is an explicit choice.
    *
    * Use it for state a managed container must keep across recreates, which
    * is what it reliably provides. For the SignalK config root, see
@@ -310,8 +307,7 @@ export interface ContainerConfig {
    *     `<configRoot>/plugin-config-data/signalk-container/` — shared by
    *     every managed container, not the caller's own directory. Useful
    *     for state a container must keep across recreates; namespace a
-   *     subdirectory. (A named volume is mounted whole, since subpath
-   *     mounts are unsupported there.)
+   *     subdirectory.
    *   - `signalkConfigRootMount` resolves to `app.config.configPath`,
    *     i.e. the top of the tree (typically `~/.signalk/`) — the entire
    *     SignalK installation config.
@@ -324,6 +320,10 @@ export interface ContainerConfig {
    *
    * `app.config` is provided by the SignalK server runtime; if the
    * caller's `app` object lacks `config.configPath`, an error is thrown.
+   *
+   * The named-volume rule applies here too: volumes cannot be
+   * subpath-mounted, so a volume attached above the config root — rather
+   * than to it — is rejected instead of mounted wholesale.
    *
    * Example (a backup plugin):
    *   `signalkConfigRootMount: "/signalk-data"` → backup engine sees

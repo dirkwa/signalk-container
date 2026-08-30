@@ -4569,6 +4569,41 @@ function mountsFromInspect(info: {
 }
 
 /**
+ * Refuse a named volume that covers more than the requested directory.
+ *
+ * Neither runtime can subpath-mount a volume, so a volume attached to a
+ * PARENT of the requested directory would hand the managed container
+ * everything in it — for `signalkDataMount`, the whole SignalK config tree
+ * with `security.json` in it, when the container asked only for scratch
+ * space. Throwing gives the caller a clear failure instead of silent access
+ * to files it never requested.
+ *
+ * A volume attached to the requested directory itself is exactly what was
+ * asked for and passes. Callers who genuinely want a parent-backed volume
+ * have `resolveHostPath`, which reports `subPath` so the choice is explicit.
+ *
+ * `field` names the API the consumer actually used, since one resolver
+ * serves both `signalkDataMount` and `signalkConfigRootMount`.
+ */
+export function assertVolumeIsNotBroaderThanRequested(
+  volumeName: string,
+  volumeDest: string,
+  requestedDir: string,
+  field: string,
+): void {
+  if (volumeDest === requestedDir) return;
+  throw new Error(
+    `${field} cannot be resolved safely: the requested directory ` +
+      `(${requestedDir}) is backed by named volume '${volumeName}' mounted ` +
+      `at ${volumeDest}. Named volumes cannot be subpath-mounted, so ` +
+      `mounting it would expose the whole volume — everything outside the ` +
+      `requested directory included. Mount the volume directly on ` +
+      `${requestedDir}, or use resolveHostPath() and handle the returned ` +
+      `subPath explicitly.`,
+  );
+}
+
+/**
  * Resolve what to mount in a managed container to give it access to
  * the SignalK data directory, regardless of how SignalK itself is deployed.
  *
@@ -4581,14 +4616,18 @@ function mountsFromInspect(info: {
  *     fail gracefully at container-create time with a clear Docker error.
  *
  * The result can be used directly as `volumes: { [mountPoint]: source }` in
- * a ContainerConfig.  The content visible at mountPoint inside the managed
- * container will always correspond to the root of dataDir.
+ * a ContainerConfig.  The content visible at mountPoint corresponds to the
+ * root of dataDir: a bind is narrowed to the exact host path, and a named
+ * volume is only accepted when it is mounted on dataDir itself.  A volume
+ * covering a parent throws rather than over-sharing, since the runtime
+ * cannot subpath-mount it.
  */
 export async function resolveSignalkDataSource(
   dataDir: string,
   runtime: ContainerRuntimeInfo,
   debug: (msg: string) => void = () => {},
   client: ContainerClient = getClient(),
+  field = "signalkDataMount",
 ): Promise<string> {
   if (!isContainerized()) {
     // Running bare-metal: dataDir is already a host filesystem path.
@@ -4636,12 +4675,21 @@ export async function resolveSignalkDataSource(
   }
 
   if (best.type === "volume") {
-    // Named volume. Docker doesn't support subpath mounts on volumes,
-    // so we return the volume name as-is. The consumer's mount point
-    // will correspond to best.dest; if that equals dataDir (the common
-    // case) the consumer can use mountPoint directly. If best.dest is a
-    // parent of dataDir, the consumer must append the relative suffix —
-    // signalk-container surfaces this via ContainerManagerApi if needed.
+    // Named volume. Neither runtime supports subpath-mounting a volume, so
+    // the whole volume is what a consumer would get.
+    //
+    // That is fine when the volume IS the data directory: the container
+    // sees exactly what it asked for. It is not fine when the volume
+    // covers a PARENT — a container asking for scratch space would receive
+    // the entire SignalK config tree, `security.json` included, because the
+    // runtime cannot narrow it. Refuse rather than over-share: the caller
+    // gets a clear failure instead of silent access to credentials it never
+    // requested.
+    //
+    // `resolveHostPath` remains available for callers that genuinely want a
+    // parent-backed volume; it reports `subPath` so the decision is theirs
+    // and explicit.
+    assertVolumeIsNotBroaderThanRequested(best.name, best.dest, dataDir, field);
     return best.name;
   }
 

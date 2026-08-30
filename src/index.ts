@@ -550,6 +550,8 @@ export default (app: App) => {
       configPath,
       runtimeInfo,
       app.debug,
+      undefined,
+      "signalkConfigRootMount",
     );
     pendingConfigRootSource = inflight;
     try {
