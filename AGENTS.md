@@ -138,6 +138,20 @@ See `src/client.ts`, `src/containers.ts`, `src/log-stream-broker.ts`, and the te
 
 `qualifyImage("foo/bar:tag", podmanRuntime)` prefixes `docker.io/` when needed (podman requires fully qualified names unless `unqualified-search-registries` is set; this holds over the API too). Docker passes through. Use this everywhere we feed an image string to a dockerode call.
 
+### The compat endpoint silently drops what the CLI honours
+
+Everything except `/libpod/info` goes through Podman's **Docker-compat** API via dockerode. That endpoint accepts several fields the CLI supports, returns 201, and then ignores them. Three are known and each cost real debugging time:
+
+| Field                            | CLI                      | Compat endpoint                                      |
+| -------------------------------- | ------------------------ | ---------------------------------------------------- |
+| `HostConfig.Ulimits` (nofile)    | honoured                 | dropped below podman 5.5.0 (containers/podman#25881) |
+| `HostConfig.UsernsMode`          | honoured                 | accepted, stored as `private`                        |
+| `Mounts[].VolumeOptions.Subpath` | `--mount subpath=` works | accepted, ignored (measured on 5.4.2)                |
+
+The lesson is procedural: **a runtime's changelog or man page describes its CLI, not this endpoint.** "Podman 5.4 supports volume subpaths" is true and irrelevant — the plugin cannot use it. Before writing a capability claim into a comment, an error message, or the docs, measure it through dockerode against the socket. `src/test/integration/` is where such a probe belongs.
+
+This also means an operator-facing error must name the mechanism precisely. Telling someone "named volumes cannot be subpath-mounted" sends them to the podman docs, which say otherwise, and they conclude the plugin is broken.
+
 ### Inspect-format diff pattern
 
 When we need to read live container state, call `getContainer(name).inspect()` once (through `safeInspect`, which returns `null` on a 404 instead of throwing) and read the JSON fields directly. dockerode returns the same field shapes on podman and docker (verified live: `HostConfig.NanoCpus`, `HostConfig.Memory`, `NetworkSettings.Ports`, `Mounts[].{Type,Source,Destination}`, `Config.{Image,Cmd,Env,Healthcheck}`, etc.), so there's no Go-template parsing and no podman-vs-docker text divergence to guard against. `getLiveResources` and `getLiveContainerConfig` are the canonical examples. `diffContainerConfig` is a pure function over those inspect-derived values — keep new live-state probes reading inspect JSON directly so the diff stays uniform across runtimes.
