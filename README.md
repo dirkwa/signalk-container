@@ -18,7 +18,7 @@ Instead of each plugin implementing its own container orchestration, they delega
 - **CPU caps that fit the host** -- a `cpus` limit above the daemon's core count is lowered to it instead of failing the container create (Docker rejects `--cpus 1.5` on a 1-vCPU host outright); the consumer plugin can surface it via the optional `onResourceClamped` callback (otherwise it is a debug-log line). See the [developer guide](doc/plugin-developer-guide.md#resource-limits).
 - **Per-process ulimits** -- `ContainerConfig.ulimits` pins per-process limits (`nofile`, `nproc`, …) on a container. A containerized process inherits these from the runtime, not the host sysctl, so raising the host `fs.file-max` alone does not lift a database's open-files limit; setting `ulimits` does. A `nofile` request over the host ceiling is clamped (not rejected) so the container still starts. See the [developer guide](doc/plugin-developer-guide.md#per-process-ulimits-nofile-) and, for raising the host limit, [Raising the open-files limit](#raising-the-open-files-limit-nofile).
 - **Image management** -- scheduled pruning of dangling images (weekly/monthly), plus optional cleanup of superseded versions of managed-container images
-- **Zero-config data dir sharing** -- `signalkDataMount` mounts the SignalK data directory into any managed container automatically, whether Signal K runs bare-metal, in Docker (named volume), or in Podman (named volume or bind mount). No host paths to configure.
+- **Zero-config persistent storage** -- `signalkDataMount` mounts signalk-container's own data directory into any managed container automatically, whether Signal K runs on bare metal, in Docker (named volume), or in Podman (named volume or bind mount). No host paths to configure; namespace a subdirectory, since every managed container shares it.
 - **Zero-config config root sharing** -- `signalkConfigRootMount` mounts the entire SignalK installation config (`~/.signalk/`) — for backup, audit, or config-sync tools that need the whole tree, not the per-plugin subdirectory.
 - **Zero-config container service connectivity** -- `signalkAccessiblePorts` lets the SignalK process connect back to a service running inside a managed container (e.g. an HTTP or TCP server). signalk-container picks the right networking strategy automatically — port binding on the host loopback for bare-metal deployments, or a shared Docker network with DNS for containerised ones. No host ports are exposed unnecessarily.
 - **Host timezone propagation** -- managed containers and one-shot jobs get `TZ=<host zone>` injected automatically, so time-based logic inside them (cron-style Node-RED flows, Grafana/QuestDB time rendering, log timestamps) agrees with the host clock instead of defaulting to UTC. Consumer plugins that set `env.TZ` themselves keep full control; shell-level tools inside minimal images may additionally need the image's `tzdata` package to interpret the zone name. See the [developer guide](doc/plugin-developer-guide.md#host-timezone).
@@ -644,9 +644,25 @@ The plugin developer guide has a detailed walk-through in [doc/plugin-developer-
 > appears to be ignored, the host's cgroup controller delegation is
 > almost certainly the cause — see [Cgroup controller delegation](#cgroup-controller-delegation) above.
 
-## Mounting the SignalK data directory (`signalkDataMount`)
+## Persistent storage for managed containers (`signalkDataMount`)
 
-When a managed container needs to read or write files that Signal K also accesses (e.g. HLS segments, exports, caches), use `signalkDataMount` instead of computing and hardcoding a host path or volume name.
+When a managed container needs somewhere durable to read and write (e.g. HLS segments, exports, caches), use `signalkDataMount` instead of computing and hardcoding a host path or volume name.
+
+It mounts **signalk-container's own plugin data directory** —
+`<configRoot>/plugin-config-data/signalk-container/`. Signal K rewrites
+`getDataDirPath()` per plugin and this resolves it against signalk-container's
+app, so the source is the same for every managed container whichever plugin
+asked — never the caller's own directory, since a cross-plugin API reached
+through `globalThis` never learns who called it.
+
+How much is exposed depends on the deployment: on bare metal or a bind mount
+the container sees only that subdirectory, but where the data dir is backed
+by a **named volume** the entire volume is mounted (subpath mounts are
+unsupported there) — see the note below.
+
+**Namespace a subdirectory** (as the example below does) so two consumers
+cannot collide. For the SignalK config root see `signalkConfigRootMount`; to
+mount your own plugin's data dir, translate it with `resolveHostPath`.
 
 ```typescript
 const SK_MOUNT = "/signalk-data";
@@ -654,7 +670,7 @@ const SK_MOUNT = "/signalk-data";
 await containers.ensureRunning("my-worker", {
   image: "myorg/myworker",
   tag: "latest",
-  signalkDataMount: SK_MOUNT, // ← mount the SignalK data dir here
+  signalkDataMount: SK_MOUNT, // ← shared managed-container storage
   command: ["--output", path.join(SK_MOUNT, "my-plugin/output/result.bin")],
 });
 ```
@@ -668,15 +684,18 @@ signalk-container resolves the correct source automatically:
 | Docker, bind-backed data dir   | the exact host path, even when a parent directory is bind-mounted |
 | Podman (rootless or root)      | same logic; named volumes receive no `:Z` flag                    |
 
-The content at `SK_MOUNT` inside the managed container always corresponds to the root of `app.getDataDirPath()`. Build paths using `path.join`:
+On bare metal or a bind mount, `SK_MOUNT` corresponds to the root of the
+resolved directory, so paths compose with `path.join`:
 
 ```typescript
-// Path inside managed container that corresponds to an absolute SignalK path:
-const containerPath = path.join(
-  SK_MOUNT,
-  path.relative(app.getDataDirPath(), absSignalkPath),
-);
+// Path inside the managed container, for a path under the resolved dir:
+const containerPath = path.join(SK_MOUNT, "my-plugin", "output", "result.bin");
 ```
+
+Where a **named volume** backs it, `SK_MOUNT` is the root of that volume
+rather than of the resolved directory — see the note below — so a hardcoded
+relative path can address the wrong tree. Call
+`containers.resolveSignalkDataMount()` if you need to know which you got.
 
 > [!note]
 > Docker/Podman do not support subpath mounts on named volumes. If your data directory
@@ -902,7 +921,7 @@ See [doc/plugin-developer-guide.md](doc/plugin-developer-guide.md) for the full 
 | `updateResources(name, limits)`                 | Apply new resource limits live, fall back to recreate                                                                                                                                                                                                                                                                |
 | `getResources(name)`                            | Currently effective limits (plugin defaults ⊕ user override)                                                                                                                                                                                                                                                         |
 | `resolveSignalkDataMount()`                     | Resolve the volume name or host path that backs `app.getDataDirPath()` in the current deployment; returns `null` if the runtime is not yet initialised                                                                                                                                                               |
-| `probeHostDevice(path)`                         | Ask whether a device path exists **on the host** and which groups own its nodes — a plugin cannot `stat()` this itself once SignalK is containerized. Returns `null` for "unknown", which is not the same as `{exists:false}`. 1.30.0+                                                                                |
+| `probeHostDevice(path)`                         | Ask whether a device path exists **on the host** and which groups own its nodes — a plugin cannot `stat()` this itself once SignalK is containerized. Returns `null` for "unknown", which is not the same as `{exists:false}`. 1.30.0+                                                                               |
 | `resolveHostPath(absPath)`                      | Translate an arbitrary absolute path into the `{ source, subPath }` pair the runtime needs to mount it; handles bare-metal, bind, and named-volume topologies                                                                                                                                                        |
 | `resolveContainerAddress(name, port)`           | Return the `host:port` string to reach `port` on a managed container from the SignalK process; call after `ensureRunning()` with `signalkAccessiblePorts` set                                                                                                                                                        |
 | `doctor.imageRunsAsUser(image, user?)`          | Probe whether `image` runs cleanly under the host-UID mapping signalk-container will emit (1.8.0+). Never throws — returns `{ ok, output, error? }`                                                                                                                                                                  |
@@ -955,10 +974,10 @@ All mounted at `/plugins/signalk-container/api/`:
 device you might pass through — from a plugin that cannot see the host:
 
 ```js
-const gpu = await containers.probeHostDevice?.('/dev/dri')
+const gpu = await containers.probeHostDevice?.("/dev/dri");
 if (gpu?.exists) {
-  config.devices = ['/dev/dri']
-  config.groupAdd = gpu.groups   // names, resolved per host
+  config.devices = ["/dev/dri"];
+  config.groupAdd = gpu.groups; // names, resolved per host
 }
 ```
 
@@ -973,10 +992,10 @@ number loses access on someone else's machine.
 
 Three results, and the difference matters:
 
-| Result                          | Meaning                                                |
-| ------------------------------- | ------------------------------------------------------ |
-| `{exists: true, nodes, groups}` | Device is there; pass `groups` to `groupAdd`            |
-| `{exists: false, …}`            | Definitely absent                                       |
+| Result                          | Meaning                                                                                                                                               |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `{exists: true, nodes, groups}` | Device is there; pass `groups` to `groupAdd`                                                                                                          |
+| `{exists: false, …}`            | Definitely absent                                                                                                                                     |
 | `null`                          | **Unknown** — no runtime, the path could not be read (a permission error, say), or the nodes are there but their owning group could not be determined |
 
 Treat `null` as "assume no device, but do not report it as absent".
