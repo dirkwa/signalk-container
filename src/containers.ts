@@ -4620,8 +4620,8 @@ export function assertVolumeIsNotBroaderThanRequested(
  * a ContainerConfig.  The content visible at mountPoint corresponds to the
  * root of dataDir: a bind is narrowed to the exact host path, and a named
  * volume is only accepted when it is mounted on dataDir itself.  A volume
- * covering a parent throws rather than over-sharing, since the runtime
- * cannot subpath-mount it.
+ * covering a parent throws rather than over-sharing: the plugin sends no
+ * subpath, and podman's compat endpoint would ignore one.
  */
 export async function resolveSignalkDataSource(
   dataDir: string,
