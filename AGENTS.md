@@ -138,19 +138,24 @@ See `src/client.ts`, `src/containers.ts`, `src/log-stream-broker.ts`, and the te
 
 `qualifyImage("foo/bar:tag", podmanRuntime)` prefixes `docker.io/` when needed (podman requires fully qualified names unless `unqualified-search-registries` is set; this holds over the API too). Docker passes through. Use this everywhere we feed an image string to a dockerode call.
 
-### The compat endpoint silently drops what the CLI honours
+### The compat endpoint drops what the CLI honours — per version
 
-Everything except `/libpod/info` goes through Podman's **Docker-compat** API via dockerode. That endpoint accepts several fields the CLI supports, returns 201, and then ignores them. Three are known and each cost real debugging time:
+Everything except `/libpod/info` goes through Podman's **Docker-compat** API via dockerode. That endpoint accepts several fields the CLI supports, returns 201, and then ignores them — but _which_ ones depends on the podman version, so a claim measured once is not a claim about podman generally:
 
-| Field                            | CLI                      | Compat endpoint                                                                   |
-| -------------------------------- | ------------------------ | --------------------------------------------------------------------------------- |
-| `HostConfig.Ulimits` (nofile)    | honoured                 | dropped below podman 5.5.0 (containers/podman#25881)                              |
-| `HostConfig.UsernsMode`          | honoured                 | accepted, stored as `private`                                                     |
-| `Mounts[].VolumeOptions.Subpath` | `--mount subpath=` works | accepted, ignored (measured on 5.4.2; Docker Engine honours it — 29.7.2/API 1.55) |
+| Field                            | podman 5.4.2                  | podman 6.1.0                             |
+| -------------------------------- | ----------------------------- | ---------------------------------------- |
+| `HostConfig.Ulimits` (nofile)    | dropped (fixed 5.5.0, #25881) | honoured — asked 4242, got 4242          |
+| `Mounts[].VolumeOptions.Subpath` | accepted, ignored             | honoured, echoed by inspect as `SubPath` |
+| `HostConfig.UsernsMode`          | stored as `private`           | still stored as `private`                |
 
-The lesson is procedural: **a runtime's changelog or man page describes its CLI, not this endpoint.** "Podman 5.4 supports volume subpaths" is true and irrelevant — the plugin cannot use it. Before writing a capability claim into a comment, an error message, or the docs, measure it through dockerode against the socket. `src/test/integration/` is where such a probe belongs.
+Docker Engine honours the volume subpath on its own API (29.7.2 / API 1.55), so that one was never a Docker gap at all.
 
-This also means an operator-facing error must name the mechanism precisely. Telling someone "named volumes cannot be subpath-mounted" sends them to the podman docs, which say otherwise, and they conclude the plugin is broken.
+Two procedural lessons, both learned the expensive way:
+
+- **A runtime's changelog or man page describes its CLI, not this endpoint.** Measure through dockerode against the socket before writing a capability claim into a comment, an error message, or the docs. `src/test/integration/` is where such a probe belongs.
+- **Measure more than one version before generalising.** The subpath discard read as "podman cannot do this" until 6.1 was tested and did. `honoursVolumeSubpath` in `src/runtime.ts` carries that bound, mirroring `supportsKeepIdSize`; both fail closed on an unparseable version.
+
+An operator-facing error must also name the mechanism precisely. Telling someone "named volumes cannot be subpath-mounted" sends them to the podman docs, which say otherwise, and they conclude the plugin is broken.
 
 ### Inspect-format diff pattern
 

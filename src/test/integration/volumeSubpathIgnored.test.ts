@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import Docker from "dockerode";
 import { resolveClient } from "../../client.js";
 import { pullImage } from "../../containers.js";
-import { detectRuntime } from "../../runtime.js";
+import { detectRuntime, honoursVolumeSubpath } from "../../runtime.js";
 import type { ContainerRuntimeInfo } from "../../types.js";
 
 /**
@@ -16,15 +16,15 @@ import type { ContainerRuntimeInfo } from "../../types.js";
  * endpoint, so the capability has to be measured rather than read.
  *
  * **Podman only.** Docker Engine honours the field on its own API (measured
- * on 29.7.2 / API 1.55: a subpath mount shows the subdirectory, a plain one
- * shows the volume root), so asserting the discard there would fail on a
- * correct daemon. The plugin does not send the field on either runtime, so
- * the refusal stays right for both — but only podman's endpoint makes
- * narrowing impossible, and that is what this measures.
+ * on 29.7.2 / API 1.55), so asserting a discard there would fail on a correct
+ * daemon.
  *
- * If podman starts honouring it, this test fails — and the refusal can be
- * replaced with an actual narrowed mount. That is the outcome to want, so
- * the failure must be loud rather than a silently-skipped assertion.
+ * Podman's own answer is version-dependent — ignored on 5.4.2, honoured on
+ * 6.1.0 — so this asserts whichever behaviour the running version is expected
+ * to show rather than skipping. Either way the plugin sends no subpath, so
+ * `assertVolumeIsNotBroaderThanRequested` stays correct; what a change here
+ * would mean is that narrowing has become *possible*, and the refusal could
+ * become a real narrowed mount on new enough podman.
  */
 
 const IMAGE = "alpine";
@@ -104,7 +104,7 @@ async function listMount(
 }
 
 describe("compat API — volume subpath", () => {
-  it("is accepted and ignored, so a volume always arrives whole", async (t) => {
+  it("is applied only on versions known to support it", async (t) => {
     const runtime = await hasContainerRuntime();
     if (!runtime) {
       t.skip("no container runtime available");
@@ -154,19 +154,25 @@ describe("compat API — volume subpath", () => {
 
       const withSubpath = await listMount(docker, PROBE, "sub");
 
-      // The subpath asked for `sub`, whose only entry is `inner`. Seeing the
-      // volume root instead is the silent discard this guards.
-      assert.ok(
-        withSubpath.includes("root-file"),
-        `compat API appears to HONOUR VolumeOptions.Subpath now (saw ${JSON.stringify(
-          withSubpath,
-        )}). If so, resolveSignalkDataSource can narrow a parent-backed volume ` +
-          `instead of refusing it — revisit assertVolumeIsNotBroaderThanRequested.`,
-      );
-      assert.ok(
-        !withSubpath.includes("inner") || withSubpath.includes("sub"),
-        `unexpected listing ${JSON.stringify(withSubpath)}`,
-      );
+      // The subpath asks for `sub`, whose only entry is `inner`; the volume
+      // root holds `root-file` and `sub`. The listing says which happened.
+      if (honoursVolumeSubpath(runtime.version)) {
+        assert.ok(
+          withSubpath.includes("inner") && !withSubpath.includes("root-file"),
+          `podman ${runtime.version} was expected to apply the subpath but ` +
+            `returned the volume root (${JSON.stringify(withSubpath)}). If ` +
+            `the endpoint has regressed, VOLUME_SUBPATH_MIN is wrong.`,
+        );
+      } else {
+        assert.ok(
+          withSubpath.includes("root-file"),
+          `podman ${runtime.version} applied a compat-API volume subpath ` +
+            `(saw ${JSON.stringify(withSubpath)}), which it was not expected ` +
+            `to. Lower VOLUME_SUBPATH_MIN — and note that narrowing a ` +
+            `parent-backed volume is now possible here, so ` +
+            `assertVolumeIsNotBroaderThanRequested could become a real mount.`,
+        );
+      }
     } finally {
       // Container before volume: the volume cannot be removed while a
       // container still references it.
