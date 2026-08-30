@@ -408,7 +408,10 @@ const VOLUME_SUBPATH_MIN = { major: 6, minor: 1 };
 
 export function honoursVolumeSubpath(version: string | null): boolean {
   if (!version) return false;
-  const m = /^(\d+)\.(\d+)/.exec(version.trim());
+  // A trailing separator or nothing — so `6.1`, `6.1.0` and `6.1.0-rc.1`
+  // parse, while `6.1garbage` does not. Prereleases of a supported minor
+  // are credited: they carry the change this gates on.
+  const m = /^(\d+)\.(\d+)(?:[.\-+].*)?$/.exec(version.trim());
   if (!m) return false;
   const major = Number(m[1]);
   const minor = Number(m[2]);
