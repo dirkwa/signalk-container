@@ -253,24 +253,46 @@ export interface ContainerConfig {
    */
   volumes?: Record<string, string | VolumeSpec>;
   /**
-   * Mount the SignalK data directory at this container path, regardless
-   * of how SignalK itself is deployed (bare-metal, Docker with a named
-   * volume, Docker with a bind mount).
+   * Mount **signalk-container's own plugin data directory** at this
+   * container path, regardless of how SignalK itself is deployed
+   * (bare-metal, Docker with a named volume, Docker with a bind mount).
    *
-   * signalk-container resolves the appropriate source automatically:
-   *   - bare-metal: binds `app.getDataDirPath()` directly
+   * ⚠️ **Shared, not per-plugin.** Signal K rewrites `getDataDirPath()`
+   * per plugin, and this resolves it against *signalk-container's* app —
+   * so it is signalk-container's directory that is resolved, whichever
+   * plugin asked, never the caller's own. A cross-plugin API reached
+   * through `globalThis` never learns who called it. Namespace a
+   * subdirectory of the mount so two consumers cannot collide, and do not
+   * expect anything the calling plugin wrote under its own
+   * `getDataDirPath()` to appear here.
+   *
+   * **How much is exposed depends on the deployment.** On bare metal or a
+   * bind mount, the source is
+   * `<configRoot>/plugin-config-data/signalk-container/` and that is all
+   * the container sees. Where the directory is backed by a **named
+   * volume**, Docker and Podman cannot mount a subpath, so the *entire
+   * backing volume* is mounted — how much that is depends on where the
+   * volume is attached: a volume mounted directly on
+   * `plugin-config-data/signalk-container` exposes only that, while one
+   * covering the config root exposes the whole SignalK tree. The mount
+   * point corresponds to wherever the volume is attached, so a consumer
+   * may have to append the relative suffix to reach the same files.
+   * Namespacing matters in every case.
+   *
+   * Use it for state a managed container must keep across recreates, which
+   * is what it reliably provides. For the SignalK config root, see
+   * `signalkConfigRootMount`; for an arbitrary host path the runtime can
+   * actually reach, see `ContainerManagerApi.resolveHostPath`.
+   *
+   * signalk-container resolves the source automatically:
+   *   - bare-metal: binds the directory directly
    *   - in Docker:  inspects the current container to find the named
-   *     volume or host path backing `app.getDataDirPath()`, then
-   *     mounts that same source into the managed container
-   *
-   * The mounted path in the managed container will correspond to the
-   * root of `app.getDataDirPath()`.  Consumer plugins can compute paths
-   * inside the mount as:
-   *   `path.join(signalkDataMount, path.relative(app.getDataDirPath(), absPath))`
+   *     volume or host path backing it, then mounts that same source
    *
    * Example:
-   *   `signalkDataMount: "/signalk-data"` → FFmpeg can write to
-   *   `/signalk-data/node_modules/my-plugin/public/out/stream.m3u8`
+   *   `signalkDataMount: "/signalk-data"` → a managed container writes to
+   *   `/signalk-data/my-plugin/out/stream.m3u8`, with `my-plugin/` chosen
+   *   by the caller to avoid collisions.
    */
   signalkDataMount?: string;
   /**
@@ -283,13 +305,13 @@ export interface ContainerConfig {
    *
    * The difference vs `signalkDataMount`:
    *
-   *   - `signalkDataMount` resolves to `app.getDataDirPath()`, which
-   *     SignalK rewrites per-plugin to the *plugin-private* subdirectory
-   *     `<configRoot>/plugin-config-data/<pluginId>/`.  A consumer
-   *     plugin asking for `signalkDataMount` therefore gets only the
-   *     *signalk-container* plugin's own state subdirectory — useful
-   *     for tools that just need a private writable area inside the
-   *     SignalK data tree.
+   *   - `signalkDataMount` resolves `app.getDataDirPath()` against
+   *     *signalk-container's* app, so a consumer asking for it gets
+   *     `<configRoot>/plugin-config-data/signalk-container/` — shared by
+   *     every managed container, not the caller's own directory. Useful
+   *     for state a container must keep across recreates; namespace a
+   *     subdirectory. (A named volume is mounted whole, since subpath
+   *     mounts are unsupported there.)
    *   - `signalkConfigRootMount` resolves to `app.config.configPath`,
    *     i.e. the top of the tree (typically `~/.signalk/`) — the entire
    *     SignalK installation config.

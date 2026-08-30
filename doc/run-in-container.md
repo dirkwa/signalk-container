@@ -102,15 +102,23 @@ Environment=SIGNALK_CONTAINER_ID=signalk-master
 
 ### 4. Align the data-dir mount
 
-`signalkDataMount` is the source-of-truth for where consumer plugins read SK data. The destination inside sibling containers is fine as `/home/node/.signalk`, but the **host source path must exist on the host** — `resolveHostPath` rewrites the source via inspect of the SK container.
-
-The standard pattern (rootless podman quadlet):
+A managed container's mount source is resolved by the **host** daemon, not inside the Signal K container. For a bind mount that means the **host path must exist on the host**; where the data is backed by a named volume the source is the volume name instead, and no host path is involved. The standard bind pattern (rootless podman quadlet):
 
 ```ini
 Volume=%h/.signalk:/home/node/.signalk
 ```
 
-`%h` expands to the host user's home (`/home/dirk`). On the host the data lives at `/home/dirk/.signalk`; inside SK it appears as `/home/node/.signalk`; consumer plugins request `/home/node/.signalk` as the data mount and `resolveHostPath` translates back to `/home/dirk/.signalk` when calling the host daemon.
+`%h` expands to the host user's home (`/home/dirk`). On the host the data lives at `/home/dirk/.signalk`; inside SK it appears as `/home/node/.signalk`.
+
+Three distinct APIs sit on top of that, and they expose different trees:
+
+| API                                      | Resolves to                                                                                                                                                                                                    |
+| ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ContainerConfig.signalkDataMount`       | signalk-container's own plugin data directory, shared by every managed container. Namespace a subdirectory. A named volume is mounted whole.                                                                   |
+| `ContainerConfig.signalkConfigRootMount` | The SignalK config root (`~/.signalk`) — the whole installation config.                                                                                                                                        |
+| `ContainerManagerApi.resolveHostPath(p)` | The host source behind any absolute path the SK container can see, including the caller's _own_ plugin directory. This is the one that translates `/home/node/.signalk/...` back to `/home/dirk/.signalk/...`. |
+
+Reaching for `signalkDataMount` when what you wanted was your own plugin's directory mounts the wrong tree — use `resolveHostPath` for that.
 
 ## No in-container runtime needed
 
