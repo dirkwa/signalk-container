@@ -4595,9 +4595,10 @@ export function assertVolumeIsNotBroaderThanRequested(
   throw new Error(
     `${field} cannot be resolved safely: the requested directory ` +
       `(${requestedDir}) is backed by named volume '${volumeName}' mounted ` +
-      `at ${volumeDest}. The Docker-compat API silently ignores a volume ` +
-      `subpath, so mounting it would expose the whole volume — everything ` +
-      `outside the requested directory included. Mount the volume on ` +
+      `at ${volumeDest}. signalk-container mounts a volume whole — it sends ` +
+      `no subpath, and podman's Docker-compat endpoint ignores one anyway — ` +
+      `so mounting it would expose everything outside the requested ` +
+      `directory too. Mount the volume on ` +
       `${requestedDir}, or use resolveHostPath() and handle the returned ` +
       `subPath explicitly.`,
   );
@@ -4675,12 +4676,12 @@ export async function resolveSignalkDataSource(
   }
 
   if (best.type === "volume") {
-    // Named volume. Podman's CLI honours `--mount subpath=`, but the
-    // Docker-compat `/containers/create` endpoint this plugin posts to
-    // accepts `VolumeOptions.Subpath` and silently ignores it (measured on
-    // podman 5.4.2: identical output with and without it). So the whole
-    // volume is what a consumer would get, and narrowing is not available
-    // to us however the runtime's own docs read.
+    // Named volume, mounted whole: the plugin sends no
+    // `VolumeOptions.Subpath` on either runtime. Docker Engine would honour
+    // one (measured on 29.7.2 / API 1.55), but podman's Docker-compat
+    // endpoint accepts and silently ignores it (measured on 5.4.2), so
+    // narrowing cannot be made to work uniformly — whatever the runtimes'
+    // own docs say about subpath support.
     //
     // That is fine when the volume IS the requested directory: the
     // container sees exactly what it asked for. It is not fine when the
