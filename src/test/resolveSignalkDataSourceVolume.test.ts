@@ -5,21 +5,27 @@ import { makeMockClient } from "./helpers/mockClient.js";
 import type { ContainerRuntimeInfo } from "../types.js";
 
 /**
- * End-to-end coverage of the resolver, as opposed to
- * `signalkDataMountVolumeScope.test.ts`, which exercises the guard helper in
- * isolation.
+ * Drives `resolveSignalkDataSource` itself. `signalkDataMountVolumeScope`
+ * covers `assertVolumeIsNotBroaderThanRequested` as a pure function, which
+ * leaves the call site untested: deleting the guard from the resolver keeps
+ * that suite green.
  *
- * The distinction matters: `resolveSignalkDataSource` returns at its first
- * line unless `isContainerized()` is true, so on a bare-metal test host the
- * volume branch — and therefore the guard — is never reached. Every
- * assertion here would pass against a build where the guard call had been
- * deleted from the resolver, unless the resolver itself is driven.
+ * Reaching the volume branch takes two things a bare-metal test host does
+ * not give for free. `resolveSignalkDataSource` returns immediately unless
+ * `isContainerized()`, which consults `/.dockerenv`, `/run/.containerenv`
+ * and `process.env.container` — only the last is settable here. Then
+ * `findSelfContainerId` runs a four-step cascade whose later steps read the
+ * real `/proc/self/cgroup` and `/proc/self/mountinfo`; pinning step 1 with
+ * `SIGNALK_CONTAINER_ID` keeps it on the mock instead of this machine.
  *
- * `isContainerized()` reads `/.dockerenv`, `/run/.containerenv` and
- * `process.env.container`; only the last is settable from a test.
+ * Both are load-bearing, and failure is silent rather than loud: without
+ * them the resolver returns `dataDir` unchanged, so a test asserting a
+ * refusal would pass while never invoking the guard. `reaches the guard at
+ * all` pins that, so a regression in either surfaces as one obvious failure
+ * rather than four misleading passes.
  */
 
-const SELF = "signalk-server";
+const SELF = "mock-self-container-id";
 const DATA_DIR = "/var/lib/signalk/plugin-config-data/signalk-container";
 
 const RUNTIME = {
@@ -62,6 +68,34 @@ afterEach(() => {
 });
 
 describe("resolveSignalkDataSource — named volume backing", () => {
+  it("reaches the guard at all", async () => {
+    // The rest of this suite is meaningless if the resolver bails early:
+    // it returns dataDir unchanged, and a refusal assertion would pass
+    // without the guard ever running. Fail here, loudly, instead.
+    const client = makeMockClient(
+      selfWithMount({
+        Type: "volume",
+        Name: "sk-config",
+        Destination: "/var/lib/signalk",
+      }),
+    );
+    const source = await resolveSignalkDataSource(
+      DATA_DIR,
+      RUNTIME,
+      () => {},
+      client,
+    ).then(
+      (v) => v,
+      () => "threw",
+    );
+    assert.notEqual(
+      source,
+      DATA_DIR,
+      "resolver returned dataDir unchanged — it never entered the " +
+        "containerized path, so every other test here proves nothing",
+    );
+  });
+
   it("returns the volume when it is mounted on the data dir", async () => {
     const client = makeMockClient(
       selfWithMount({
