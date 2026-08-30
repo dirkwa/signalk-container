@@ -658,8 +658,10 @@ through `globalThis` never learns who called it.
 The container never sees more than that directory. A bind mount is narrowed
 to the exact host path; a **named volume** is accepted only when it is
 attached to the directory itself, because volumes cannot be subpath-mounted
-and one covering a parent would expose the whole SignalK config tree. That
-case fails with an error rather than over-sharing — see the note below.
+and one covering a parent would expose that volume's entire contents —
+sibling plugins' data, or the whole SignalK config tree when the volume sits
+on the config root. That case fails with an error rather than over-sharing —
+see the note below.
 
 **Namespace a subdirectory** (as the example below does) so two consumers
 cannot collide. For the SignalK config root see `signalkConfigRootMount`; to
