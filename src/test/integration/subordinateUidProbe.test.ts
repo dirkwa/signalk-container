@@ -20,14 +20,22 @@ const IMAGE = "alpine";
 const TAG = "3.19";
 const CONTAINER_NAME = "subuid-probe-test";
 
-/** Strip the 8-byte stream headers docker/podman prefix each log frame with. */
+/** Docker log-frame header: 1 stream byte, 3 reserved, then a big-endian length. */
+const FRAME_HEADER_BYTES = 8;
+const FRAME_LENGTH_OFFSET = 4;
+
+/** Strip the per-frame stream headers docker/podman prefix log output with. */
 function demuxFrames(buf: Buffer): string {
   let out = "";
   let i = 0;
-  while (i + 8 <= buf.length) {
-    const len = buf.readUInt32BE(4);
-    out += buf.subarray(i + 8, i + 8 + len).toString("utf8");
-    i += 8 + len;
+  while (i + FRAME_HEADER_BYTES <= buf.length) {
+    // Length is per frame, so read it at the frame's own offset — reading
+    // from the head of the buffer truncates every frame after the first
+    // whenever their lengths differ.
+    const len = buf.readUInt32BE(i + FRAME_LENGTH_OFFSET);
+    const start = i + FRAME_HEADER_BYTES;
+    out += buf.subarray(start, start + len).toString("utf8");
+    i = start + len;
   }
   return out;
 }
