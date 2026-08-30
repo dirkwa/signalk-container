@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import type Docker from "dockerode";
+import Docker from "dockerode";
 import { resolveClient } from "../../client.js";
 import { pullImage } from "../../containers.js";
 import { detectRuntime } from "../../runtime.js";
@@ -115,16 +115,16 @@ describe("compat API — volume subpath", () => {
       return;
     }
 
-    // ContainerClient is deliberately narrowed and exposes no volume API,
-    // so this reaches for dockerode directly rather than widening it.
     const resolved = await resolveClient();
     if (!resolved) {
       t.skip("no container runtime available");
       return;
     }
-    // resolveClient types its client as the narrowed ContainerClient, which
-    // exposes no volume API; the instance behind it is a real Docker.
-    const docker = resolved.client as unknown as Docker;
+    // `ContainerClient` is deliberately narrowed to the 12 methods the plugin
+    // uses and declares no volume API. Rather than widen that contract or
+    // cast past it for a test, build a dockerode client on the socket the
+    // plugin already resolved.
+    const docker = new Docker({ socketPath: resolved.socketPath });
 
     // Raw dockerode does not pull; a daemon without the image would 404 at
     // create and read as a failed canary rather than a missing image.
