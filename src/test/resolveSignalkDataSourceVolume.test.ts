@@ -22,13 +22,13 @@ import type { ContainerRuntimeInfo } from "../types.js";
 const SELF = "signalk-server";
 const DATA_DIR = "/var/lib/signalk/plugin-config-data/signalk-container";
 
-const RUNTIME: ContainerRuntimeInfo = {
+const RUNTIME = {
   runtime: "podman",
   version: "5.4.2",
+  isPodmanDockerShim: false,
   isRootless: true,
-} as ContainerRuntimeInfo;
+} satisfies ContainerRuntimeInfo;
 
-/** A self-inspect payload carrying one mount. */
 function selfWithMount(mount: {
   Type: string;
   Name?: string;
