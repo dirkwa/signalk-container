@@ -657,8 +657,9 @@ through `globalThis` never learns who called it.
 
 The container never sees more than that directory. A bind mount is narrowed
 to the exact host path; a **named volume** is accepted only when it is
-attached to the directory itself, because volumes cannot be subpath-mounted
-and one covering a parent would expose that volume's entire contents —
+attached to the directory itself, because the Docker-compat API silently
+ignores a volume subpath, and one covering a parent would expose that
+volume's entire contents —
 sibling plugins' data, or the whole SignalK config tree when the volume sits
 on the config root. That case fails with an error rather than over-sharing —
 see the note below.
@@ -701,7 +702,9 @@ only accepted when attached to that directory. Call
 host path or a volume name) at runtime.
 
 > [!note]
-> Docker/Podman do not support subpath mounts on named volumes. A volume attached to the
+> The Docker-compat API signalk-container speaks silently ignores a volume subpath
+> (podman's own CLI honours `--mount subpath=`; the endpoint does not, measured on
+> 5.4.2), so a named volume is always mounted whole. A volume attached to the
 > resolved directory is mounted whole, which is exactly that directory — fine. A volume
 > attached to a **parent** (the SignalK config root, say) would expose far more than was
 > asked for, so `ensureRunning` rejects it with an error naming the volume and the fix:
@@ -737,7 +740,7 @@ The deployment-mode resolution is identical to `signalkDataMount`: bare-metal re
 `app.config.configPath` is provided by the SignalK server runtime. If the caller's `app` object lacks it (a non-standard host), `ensureRunning()` throws.
 
 > [!note]
-> The same named-volume subpath caveat applies — Docker doesn't support subpath mounts on volumes. If `app.config.configPath` happens to live under a parent-directory bind, signalk-container computes the exact host path so the container sees the right tree.
+> The same named-volume subpath caveat applies — the compat API ignores a volume subpath, so the volume is mounted whole. If `app.config.configPath` happens to live under a parent-directory bind, signalk-container computes the exact host path so the container sees the right tree.
 
 ### When SignalK runs in a container: self-container detection
 

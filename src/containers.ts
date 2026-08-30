@@ -4595,9 +4595,9 @@ export function assertVolumeIsNotBroaderThanRequested(
   throw new Error(
     `${field} cannot be resolved safely: the requested directory ` +
       `(${requestedDir}) is backed by named volume '${volumeName}' mounted ` +
-      `at ${volumeDest}. Named volumes cannot be subpath-mounted, so ` +
-      `mounting it would expose the whole volume — everything outside the ` +
-      `requested directory included. Mount the volume directly on ` +
+      `at ${volumeDest}. The Docker-compat API silently ignores a volume ` +
+      `subpath, so mounting it would expose the whole volume — everything ` +
+      `outside the requested directory included. Mount the volume on ` +
       `${requestedDir}, or use resolveHostPath() and handle the returned ` +
       `subPath explicitly.`,
   );
@@ -4675,16 +4675,19 @@ export async function resolveSignalkDataSource(
   }
 
   if (best.type === "volume") {
-    // Named volume. Neither runtime supports subpath-mounting a volume, so
-    // the whole volume is what a consumer would get.
+    // Named volume. Podman's CLI honours `--mount subpath=`, but the
+    // Docker-compat `/containers/create` endpoint this plugin posts to
+    // accepts `VolumeOptions.Subpath` and silently ignores it (measured on
+    // podman 5.4.2: identical output with and without it). So the whole
+    // volume is what a consumer would get, and narrowing is not available
+    // to us however the runtime's own docs read.
     //
-    // That is fine when the volume IS the data directory: the container
-    // sees exactly what it asked for. It is not fine when the volume
-    // covers a PARENT — a container asking for scratch space would receive
-    // the entire SignalK config tree, `security.json` included, because the
-    // runtime cannot narrow it. Refuse rather than over-share: the caller
-    // gets a clear failure instead of silent access to credentials it never
-    // requested.
+    // That is fine when the volume IS the requested directory: the
+    // container sees exactly what it asked for. It is not fine when the
+    // volume covers a PARENT — the container receives that volume's entire
+    // contents, which is sibling plugins' data for a volume on
+    // `plugin-config-data`, and the whole config tree with `security.json`
+    // for one on the config root. Refuse rather than over-share.
     //
     // `resolveHostPath` remains available for callers that genuinely want a
     // parent-backed volume; it reports `subPath` so the decision is theirs

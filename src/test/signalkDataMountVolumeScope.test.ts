@@ -52,6 +52,27 @@ describe("assertVolumeIsNotBroaderThanRequested", () => {
     );
   });
 
+  it("blames the compat API, not the runtime", () => {
+    // Podman's CLI DOES support `--mount subpath=`; the Docker-compat
+    // endpoint we post to accepts VolumeOptions.Subpath and ignores it
+    // (measured on 5.4.2). An operator told "volumes cannot be
+    // subpath-mounted" checks the podman docs, finds otherwise, and
+    // concludes the plugin is wrong.
+    try {
+      assertVolumeIsNotBroaderThanRequested(
+        VOLUME,
+        "/var/lib/signalk",
+        DATA_DIR,
+        "signalkDataMount",
+      );
+      assert.fail("should have thrown");
+    } catch (err) {
+      const msg = (err as Error).message;
+      assert.match(msg, /compat API/);
+      assert.doesNotMatch(msg, /cannot be subpath-mounted/);
+    }
+  });
+
   it("names the API the consumer actually used", () => {
     // One resolver serves both mount fields; an error naming the wrong one
     // sends the operator to the wrong part of their config.
