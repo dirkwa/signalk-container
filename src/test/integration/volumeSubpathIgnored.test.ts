@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type Docker from "dockerode";
 import { resolveClient } from "../../client.js";
+import { pullImage } from "../../containers.js";
 import { detectRuntime } from "../../runtime.js";
 import type { ContainerRuntimeInfo } from "../../types.js";
 
@@ -15,8 +16,15 @@ import type { ContainerRuntimeInfo } from "../../types.js";
  * how a false claim ("named volumes cannot be subpath-mounted") reached an
  * operator-facing error message.
  *
- * If a future runtime honours it here, this test fails — and the refusal can
- * be replaced with an actual narrowed mount. That is the outcome to want, so
+ * **Podman only.** Docker Engine honours the field on its own API (measured
+ * on 29.7.2 / API 1.55: a subpath mount shows the subdirectory, a plain one
+ * shows the volume root), so asserting the discard there would fail on a
+ * correct daemon. The plugin does not send the field on either runtime, so
+ * the refusal stays right for both — but only podman's endpoint makes
+ * narrowing impossible, and that is what this measures.
+ *
+ * If podman starts honouring it, this test fails — and the refusal can be
+ * replaced with an actual narrowed mount. That is the outcome to want, so
  * the failure must be loud rather than a silently-skipped assertion.
  */
 
@@ -88,6 +96,10 @@ describe("compat API — volume subpath", () => {
       t.skip("no container runtime available");
       return;
     }
+    if (runtime.runtime !== "podman") {
+      t.skip(`Docker honours VolumeOptions.Subpath; canary is podman-only`);
+      return;
+    }
 
     // ContainerClient is deliberately narrowed and exposes no volume API,
     // so this reaches for dockerode directly rather than widening it.
@@ -99,6 +111,10 @@ describe("compat API — volume subpath", () => {
     // resolveClient types its client as the narrowed ContainerClient, which
     // exposes no volume API; the instance behind it is a real Docker.
     const docker = resolved.client as unknown as Docker;
+
+    // Raw dockerode does not pull; a daemon without the image would 404 at
+    // create and read as a failed canary rather than a missing image.
+    await pullImage(runtime, `${IMAGE}:${TAG}`);
     await docker
       .getVolume(VOLUME)
       .remove({ force: true })

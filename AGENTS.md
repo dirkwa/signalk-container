@@ -142,11 +142,11 @@ See `src/client.ts`, `src/containers.ts`, `src/log-stream-broker.ts`, and the te
 
 Everything except `/libpod/info` goes through Podman's **Docker-compat** API via dockerode. That endpoint accepts several fields the CLI supports, returns 201, and then ignores them. Three are known and each cost real debugging time:
 
-| Field                            | CLI                      | Compat endpoint                                      |
-| -------------------------------- | ------------------------ | ---------------------------------------------------- |
-| `HostConfig.Ulimits` (nofile)    | honoured                 | dropped below podman 5.5.0 (containers/podman#25881) |
-| `HostConfig.UsernsMode`          | honoured                 | accepted, stored as `private`                        |
-| `Mounts[].VolumeOptions.Subpath` | `--mount subpath=` works | accepted, ignored (measured on 5.4.2)                |
+| Field                            | CLI                      | Compat endpoint                                                                   |
+| -------------------------------- | ------------------------ | --------------------------------------------------------------------------------- |
+| `HostConfig.Ulimits` (nofile)    | honoured                 | dropped below podman 5.5.0 (containers/podman#25881)                              |
+| `HostConfig.UsernsMode`          | honoured                 | accepted, stored as `private`                                                     |
+| `Mounts[].VolumeOptions.Subpath` | `--mount subpath=` works | accepted, ignored (measured on 5.4.2; Docker Engine honours it — 29.7.2/API 1.55) |
 
 The lesson is procedural: **a runtime's changelog or man page describes its CLI, not this endpoint.** "Podman 5.4 supports volume subpaths" is true and irrelevant — the plugin cannot use it. Before writing a capability claim into a comment, an error message, or the docs, measure it through dockerode against the socket. `src/test/integration/` is where such a probe belongs.
 
