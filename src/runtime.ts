@@ -391,6 +391,33 @@ export function supportsKeepIdSize(version: string | null): boolean {
   );
 }
 
+/**
+ * Podman's Docker-compat `/containers/create` accepts
+ * `Mounts[].VolumeOptions.Subpath` on every version, but only applies it on
+ * newer ones: measured ignored on 5.4.2 and honoured on 6.1.0, where inspect
+ * also echoes it back as `SubPath`.
+ *
+ * The exact release in between is unverified, so this is deliberately a
+ * "known to honour" bound rather than a precise one — it gates a test's
+ * expectation, not plugin behaviour. The plugin never sends a subpath on any
+ * version, so `assertVolumeIsNotBroaderThanRequested` stays correct either
+ * way; what changes is only whether narrowing *could* work.
+ */
+/** First Podman release measured to apply a compat-API volume subpath. */
+const VOLUME_SUBPATH_MIN = { major: 6, minor: 1 };
+
+export function honoursVolumeSubpath(version: string | null): boolean {
+  if (!version) return false;
+  const m = /^(\d+)\.(\d+)/.exec(version.trim());
+  if (!m) return false;
+  const major = Number(m[1]);
+  const minor = Number(m[2]);
+  return (
+    major > VOLUME_SUBPATH_MIN.major ||
+    (major === VOLUME_SUBPATH_MIN.major && minor >= VOLUME_SUBPATH_MIN.minor)
+  );
+}
+
 export async function detectRuntime(
   preference: RuntimePreference,
 ): Promise<ContainerRuntimeInfo | null> {
