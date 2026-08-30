@@ -655,10 +655,11 @@ app, so the source is the same for every managed container whichever plugin
 asked — never the caller's own directory, since a cross-plugin API reached
 through `globalThis` never learns who called it.
 
-How much is exposed depends on the deployment: on bare metal or a bind mount
-the container sees only that subdirectory, but where the data dir is backed
-by a **named volume** the entire volume is mounted (subpath mounts are
-unsupported there) — see the note below.
+The container never sees more than that directory. A bind mount is narrowed
+to the exact host path; a **named volume** is accepted only when it is
+attached to the directory itself, because volumes cannot be subpath-mounted
+and one covering a parent would expose the whole SignalK config tree. That
+case fails with an error rather than over-sharing — see the note below.
 
 **Namespace a subdirectory** (as the example below does) so two consumers
 cannot collide. For the SignalK config root see `signalkConfigRootMount`; to
@@ -692,17 +693,20 @@ resolved directory, so paths compose with `path.join`:
 const containerPath = path.join(SK_MOUNT, "my-plugin", "output", "result.bin");
 ```
 
-Where a **named volume** backs it, `SK_MOUNT` is the root of that volume
-rather than of the resolved directory — see the note below — so a hardcoded
-relative path can address the wrong tree. Call
-`containers.resolveSignalkDataMount()` if you need to know which you got.
+A **named volume** backing the directory works the same way, since it is
+only accepted when attached to that directory. Call
+`containers.resolveSignalkDataMount()` if you need the resolved source (a
+host path or a volume name) at runtime.
 
 > [!note]
-> Docker/Podman do not support subpath mounts on named volumes. If your data directory
-> is backed by a named volume, the entire volume is mounted at `SK_MOUNT`. Avoid writing
-> to paths inside `SK_MOUNT` that are also bind-mounted in the Signal K container (e.g.
-> a plugin's own directory if mounted with `./:/home/node/.signalk/node_modules/my-plugin`)
-> — those paths are not visible from inside the managed container.
+> Docker/Podman do not support subpath mounts on named volumes. A volume attached to the
+> resolved directory is mounted whole, which is exactly that directory — fine. A volume
+> attached to a **parent** (the SignalK config root, say) would expose far more than was
+> asked for, so `ensureRunning` rejects it with an error naming the volume and the fix:
+> attach the volume to the data directory, or use `resolveHostPath()` and handle the
+> returned `subPath` deliberately. Also avoid writing to paths inside `SK_MOUNT` that are
+> separately bind-mounted in the Signal K container — those are not visible from inside
+> the managed container.
 
 You can also call `containers.resolveSignalkDataMount()` if you need to inspect the resolved source at runtime (e.g. for logging).
 
