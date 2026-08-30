@@ -148,7 +148,7 @@ Everything except `/libpod/info` goes through Podman's **Docker-compat** API via
 | `Mounts[].VolumeOptions.Subpath` | accepted, ignored             | honoured, echoed by inspect as `SubPath` |
 | `HostConfig.UsernsMode`          | stored as `private`           | still stored as `private`                |
 
-Docker Engine honours the volume subpath on its own API (29.7.2 / API 1.55), so that one was never a Docker gap at all.
+Docker Engine honours the volume subpath on its own API (29.7.2 / API 1.55), so that one was never a Docker gap at all. All measurements are x86_64; arm64 is untested (the endpoint is architecture-independent Go, so it is expected to match).
 
 Two rules follow:
 
