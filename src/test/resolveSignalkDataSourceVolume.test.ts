@@ -18,11 +18,9 @@ import type { ContainerRuntimeInfo } from "../types.js";
  * real `/proc/self/cgroup` and `/proc/self/mountinfo`; pinning step 1 with
  * `SIGNALK_CONTAINER_ID` keeps it on the mock instead of this machine.
  *
- * Both are load-bearing, and failure is silent rather than loud: without
- * them the resolver returns `dataDir` unchanged, so a test asserting a
- * refusal would pass while never invoking the guard. `reaches the guard at
- * all` pins that, so a regression in either surfaces as one obvious failure
- * rather than four misleading passes.
+ * Both are load-bearing: without them the resolver returns `dataDir`
+ * unchanged. The refusal cases assert through `assert.rejects`, so that
+ * shows up as a failure rather than a false pass.
  */
 
 const SELF = "mock-self-container-id";
@@ -68,34 +66,6 @@ afterEach(() => {
 });
 
 describe("resolveSignalkDataSource — named volume backing", () => {
-  it("reaches the guard at all", async () => {
-    // The rest of this suite is meaningless if the resolver bails early:
-    // it returns dataDir unchanged, and a refusal assertion would pass
-    // without the guard ever running. Fail here, loudly, instead.
-    const client = makeMockClient(
-      selfWithMount({
-        Type: "volume",
-        Name: "sk-config",
-        Destination: "/var/lib/signalk",
-      }),
-    );
-    const source = await resolveSignalkDataSource(
-      DATA_DIR,
-      RUNTIME,
-      () => {},
-      client,
-    ).then(
-      (v) => v,
-      () => "threw",
-    );
-    assert.notEqual(
-      source,
-      DATA_DIR,
-      "resolver returned dataDir unchanged — it never entered the " +
-        "containerized path, so every other test here proves nothing",
-    );
-  });
-
   it("returns the volume when it is mounted on the data dir", async () => {
     const client = makeMockClient(
       selfWithMount({
