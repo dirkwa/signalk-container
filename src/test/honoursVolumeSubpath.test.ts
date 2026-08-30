@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { honoursVolumeSubpath } from "../runtime.js";
+import { honoursVolumeSubpath, supportsKeepIdSize } from "../runtime.js";
 
 /**
  * The bound is measured, not read from a changelog: podman 5.4.2 accepts a
@@ -30,6 +30,30 @@ describe("honoursVolumeSubpath", () => {
     // change this gates on.
     assert.equal(honoursVolumeSubpath("6.1"), true);
     assert.equal(honoursVolumeSubpath("6.1.0-rc.1"), true);
+  });
+
+  it("accepts a SemVer prerelease or build suffix", () => {
+    assert.equal(honoursVolumeSubpath("6.1.0-rc.1"), true);
+    assert.equal(honoursVolumeSubpath("6.1.0+build.5"), true);
+  });
+
+  it("rejects a malformed suffix rather than reading the prefix", () => {
+    // Each of these starts with a supported version, so a loose parser
+    // credits the capability on a string the daemon never produced.
+    for (const v of ["6.1.0garbage", "6.1.0-", "6.1.0+", "6.1.0.1"]) {
+      assert.equal(honoursVolumeSubpath(v), false, `for ${JSON.stringify(v)}`);
+    }
+  });
+
+  it("holds supportsKeepIdSize to the same parsing", () => {
+    // The two helpers share one parser, and this one gates real plugin
+    // behaviour rather than a test expectation — a version it misreads
+    // emits `keep-id:size=` to a daemon that may reject the whole option.
+    assert.equal(supportsKeepIdSize("5.4.2"), true);
+    assert.equal(supportsKeepIdSize("5.4.2-rc.1"), true);
+    for (const v of ["5.4garbage", "5.4.2garbage", "5.4.2-", "garbage"]) {
+      assert.equal(supportsKeepIdSize(v), false, `for ${JSON.stringify(v)}`);
+    }
   });
 
   it("fails closed on an unreadable version", () => {

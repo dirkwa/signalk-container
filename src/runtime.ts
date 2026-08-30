@@ -379,16 +379,37 @@ export async function probeCgroupControllers(
 /** First Podman release accepting `--userns=keep-id:size=` (#24387). */
 const KEEP_ID_SIZE_MIN = { major: 5, minor: 4 };
 
-export function supportsKeepIdSize(version: string | null): boolean {
-  if (!version) return false;
-  const m = /^(\d+)\.(\d+)/.exec(version.trim());
-  if (!m) return false;
-  const major = Number(m[1]);
-  const minor = Number(m[2]);
-  return (
-    major > KEEP_ID_SIZE_MIN.major ||
-    (major === KEEP_ID_SIZE_MIN.major && minor >= KEEP_ID_SIZE_MIN.minor)
+/**
+ * `major.minor` of a runtime version string, or null when it is not one.
+ *
+ * Podman reports SemVer (`6.1.0`, `6.1.0-rc.1`, occasionally two components),
+ * so a prerelease or build suffix parses and trailing junk does not:
+ * `6.1.0garbage`, `6.1.0-` and `6.1.0+` are rejected rather than read as
+ * 6.1. Every caller treats null as "too old", so an unreadable version costs
+ * a capability rather than wrongly claiming one.
+ */
+function parseMajorMinor(
+  version: string | null,
+): { major: number; minor: number } | null {
+  if (!version) return null;
+  const m = /^(\d+)\.(\d+)(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?$/.exec(
+    version.trim(),
   );
+  if (!m) return null;
+  return { major: Number(m[1]), minor: Number(m[2]) };
+}
+
+function atLeast(
+  version: string | null,
+  min: { major: number; minor: number },
+): boolean {
+  const v = parseMajorMinor(version);
+  if (!v) return false;
+  return v.major > min.major || (v.major === min.major && v.minor >= min.minor);
+}
+
+export function supportsKeepIdSize(version: string | null): boolean {
+  return atLeast(version, KEEP_ID_SIZE_MIN);
 }
 
 /**
@@ -409,18 +430,7 @@ export function supportsKeepIdSize(version: string | null): boolean {
 const VOLUME_SUBPATH_MIN = { major: 6, minor: 1 };
 
 export function honoursVolumeSubpath(version: string | null): boolean {
-  if (!version) return false;
-  // A trailing separator or nothing — so `6.1`, `6.1.0` and `6.1.0-rc.1`
-  // parse, while `6.1garbage` does not. Prereleases of a supported minor
-  // are credited: they carry the change this gates on.
-  const m = /^(\d+)\.(\d+)(?:[.\-+].*)?$/.exec(version.trim());
-  if (!m) return false;
-  const major = Number(m[1]);
-  const minor = Number(m[2]);
-  return (
-    major > VOLUME_SUBPATH_MIN.major ||
-    (major === VOLUME_SUBPATH_MIN.major && minor >= VOLUME_SUBPATH_MIN.minor)
-  );
+  return atLeast(version, VOLUME_SUBPATH_MIN);
 }
 
 export async function detectRuntime(
