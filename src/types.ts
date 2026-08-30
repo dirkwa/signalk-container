@@ -270,9 +270,10 @@ export interface ContainerConfig {
    * narrowed to the exact host path. A **named volume** cannot be
    * subpath-mounted, so it is accepted only when the volume is attached to
    * the directory itself; a volume covering a parent would hand the
-   * container the whole SignalK config tree, `security.json` included, and
-   * `ensureRunning` therefore rejects it with an error naming the volume
-   * and the remedy. Callers who do want a parent-backed volume can use
+   * container that volume's entire contents — sibling plugins' data for a
+   * volume on `plugin-config-data`, and the whole SignalK config tree with
+   * `security.json` in it for one on the config root — and `ensureRunning`
+   * therefore rejects it with an error naming the volume and the remedy. Callers who do want a parent-backed volume can use
    * `ContainerManagerApi.resolveHostPath`, which reports `subPath` so the
    * wider scope is an explicit choice.
    *
@@ -1350,9 +1351,12 @@ export interface ContainerManagerApi {
    * download cache, or any user-configured location.
    *
    *     const r = await containers.resolveHostPath("/opt/signalk/charts");
+   *     // subPath is "" whenever the source already IS the requested path
+   *     // (bare metal, exact bind), so join instead of interpolating.
+   *     const inDir = r.subPath ? `/in/${r.subPath}` : "/in";
    *     await containers.runJob({
    *       inputs: { "/in": r.source },
-   *       command: ["tool", `/in/${r.subPath}/foo`],
+   *       command: ["tool", `${inDir}/foo`],
    *     });
    *
    * `source` plugs straight into ContainerJobConfig.inputs / outputs;
