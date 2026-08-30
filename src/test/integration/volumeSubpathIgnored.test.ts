@@ -12,9 +12,8 @@ import type { ContainerRuntimeInfo } from "../../types.js";
  * Podman's CLI supports `--mount type=volume,...,subpath=`, and its release
  * notes say so. The Docker-compat `/containers/create` endpoint this plugin
  * posts to through dockerode accepts `VolumeOptions.Subpath`, returns 201,
- * and ignores it. Reading the changelog instead of measuring the endpoint is
- * how a false claim ("named volumes cannot be subpath-mounted") reached an
- * operator-facing error message.
+ * and ignores it. A runtime's changelog describes its CLI, not this
+ * endpoint, so the capability has to be measured rather than read.
  *
  * **Podman only.** Docker Engine honours the field on its own API (measured
  * on 29.7.2 / API 1.55: a subpath mount shows the subdirectory, a plain one
@@ -35,6 +34,26 @@ const SEED = "sk-subpath-probe-seed";
 const PROBE = "sk-subpath-probe-read";
 const FRAME_HEADER_BYTES = 8;
 const FRAME_LENGTH_OFFSET = 4;
+
+type CreateOptions = Parameters<Docker["createContainer"]>[0];
+type MountSettings = NonNullable<
+  NonNullable<CreateOptions["HostConfig"]>["Mounts"]
+>[number];
+type VolumeOptions = NonNullable<MountSettings["VolumeOptions"]>;
+
+/**
+ * dockerode types `Subpath` as optional but its siblings as required, so the
+ * probe supplies their neutral values rather than casting past the type and
+ * losing every other check on the payload.
+ */
+function volumeOptionsWithSubpath(subpath: string): VolumeOptions {
+  return {
+    NoCopy: false,
+    Labels: {},
+    DriverConfig: { Name: "", Options: {} },
+    Subpath: subpath,
+  };
+}
 
 function demuxFrames(buf: Buffer): string {
   let out = "";
@@ -57,25 +76,20 @@ async function hasContainerRuntime(): Promise<ContainerRuntimeInfo | null> {
 async function listMount(
   docker: Docker,
   name: string,
-  volumeOptions?: { Subpath: string },
+  subpath?: string,
 ): Promise<string> {
-  // dockerode's MountSettings type predates VolumeOptions.Subpath — the
-  // field goes on the wire regardless, which is the whole point of the probe.
+  const mount: MountSettings = {
+    Type: "volume",
+    Source: VOLUME,
+    Target: "/y",
+    ...(subpath ? { VolumeOptions: volumeOptionsWithSubpath(subpath) } : {}),
+  };
   const container = await docker.createContainer({
     Image: `${IMAGE}:${TAG}`,
     name,
     Cmd: ["ls", "/y"],
-    HostConfig: {
-      Mounts: [
-        {
-          Type: "volume",
-          Source: VOLUME,
-          Target: "/y",
-          ...(volumeOptions ? { VolumeOptions: volumeOptions } : {}),
-        },
-      ],
-    },
-  } as unknown as Parameters<Docker["createContainer"]>[0]);
+    HostConfig: { Mounts: [mount] },
+  });
   try {
     await container.start();
     await container.wait();
@@ -121,10 +135,13 @@ describe("compat API — volume subpath", () => {
       .catch(() => {});
     await docker.createVolume({ Name: VOLUME });
 
+    // Declared outside the try: a seed that fails to start still holds the
+    // volume, so leaving it behind breaks the NEXT run on its fixed name.
+    let seed: Awaited<ReturnType<Docker["createContainer"]>> | null = null;
     try {
       // Seed a volume with a file at its root and one in a subdirectory, so
       // "whole volume" and "subpath only" produce different listings.
-      const seed = await docker.createContainer({
+      seed = await docker.createContainer({
         Image: `${IMAGE}:${TAG}`,
         name: SEED,
         Cmd: ["sh", "-c", "mkdir -p /y/sub && touch /y/root-file /y/sub/inner"],
@@ -134,9 +151,8 @@ describe("compat API — volume subpath", () => {
       });
       await seed.start();
       await seed.wait();
-      await seed.remove({ force: true }).catch(() => {});
 
-      const withSubpath = await listMount(docker, PROBE, { Subpath: "sub" });
+      const withSubpath = await listMount(docker, PROBE, "sub");
 
       // The subpath asked for `sub`, whose only entry is `inner`. Seeing the
       // volume root instead is the silent discard this guards.
@@ -152,6 +168,9 @@ describe("compat API — volume subpath", () => {
         `unexpected listing ${JSON.stringify(withSubpath)}`,
       );
     } finally {
+      // Container before volume: the volume cannot be removed while a
+      // container still references it.
+      await seed?.remove({ force: true }).catch(() => {});
       await docker
         .getVolume(VOLUME)
         .remove({ force: true })
