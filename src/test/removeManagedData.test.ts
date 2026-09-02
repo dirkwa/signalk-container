@@ -55,6 +55,14 @@ const failIfCalled = (): Promise<WipeJobOutcome> => {
   throw new Error("runWipeJob should not have been invoked");
 };
 
+/**
+ * `chmod 0o555` denies only an unprivileged user, so the EACCES these tests
+ * depend on cannot be produced as root or on Windows.
+ */
+const SKIP_EACCES =
+  process.platform === "win32" ||
+  (typeof process.getuid === "function" && process.getuid() === 0);
+
 describe("removeManagedData", () => {
   describe("path safety", () => {
     it("refuses an empty path", async () => {
@@ -217,12 +225,16 @@ describe("removeManagedData", () => {
   });
 
   // These tests force EACCES via a read-only parent dir (`chmod 0o555`), which
-  // is POSIX-only — on Windows chmod doesn't make a dir undeletable, so fs.rm
-  // succeeds and the fallback never triggers. The rootless-Podman subuid
-  // scenario they cover is Linux-only anyway, so skip them on Windows.
+  // only denies an unprivileged user: root ignores directory permission bits,
+  // so fs.rm succeeds and the fallback never triggers. Windows has no such
+  // semantics either. The rootless-Podman subuid scenario they cover is
+  // Linux-and-unprivileged by nature, so skip where the condition cannot be
+  // created — including root sandboxes such as the plugin registry's harness,
+  // where an unskipped run reports these as genuine failures. Same guard as
+  // `pickSocketPermission.test.ts`, for the same reason.
   describe(
     "EACCES fallback (rootless-Podman subuid)",
-    { skip: process.platform === "win32" },
+    { skip: SKIP_EACCES },
     () => {
       it("invokes the wipe job, then drops the now-empty parent", async () => {
         // A read-only parent forces fs.rm of the child to throw EACCES,
