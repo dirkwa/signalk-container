@@ -81,16 +81,29 @@ describe("isPathUnderBindMount", () => {
 
 describe("ownBindMountCoverage", () => {
   // Bare metal: this filesystem IS the host's, so every path is judgeable and
-  // the predicate never withholds an answer. (isContainerized() is false in
-  // the test process, which is the branch this exercises.)
+  // the predicate never withholds an answer.
+  //
+  // The branch is selected by `isContainerized()`, which reads
+  // `process.env.container` among other things — so the ambient environment
+  // decides it unless the test does. Firejail sets `container=firejail`
+  // (the plugin registry runs the suite under it), which would otherwise take
+  // the containerized branch and fail here for reasons having nothing to do
+  // with the code.
   it("covers everything when not containerized", async () => {
-    const covered = await ownBindMountCoverage(
-      runtime,
-      () => {},
-      makeMockClient({}),
-    );
-    assert.equal(covered("/anywhere/at/all"), true);
-    assert.equal(covered("/srv/sk-data/charts"), true);
+    const prior = process.env.container;
+    delete process.env.container;
+    try {
+      const covered = await ownBindMountCoverage(
+        runtime,
+        () => {},
+        makeMockClient({}),
+      );
+      assert.equal(covered("/anywhere/at/all"), true);
+      assert.equal(covered("/srv/sk-data/charts"), true);
+    } finally {
+      if (prior === undefined) delete process.env.container;
+      else process.env.container = prior;
+    }
   });
 });
 

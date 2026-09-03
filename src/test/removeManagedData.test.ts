@@ -3,10 +3,12 @@ import assert from "node:assert/strict";
 import {
   existsSync,
   mkdirSync,
+  mkdtempSync,
   rmSync,
   writeFileSync,
   chmodSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import * as path from "node:path";
 import {
   removeManagedData,
@@ -22,13 +24,34 @@ const runtime: ContainerRuntimeInfo = {
   isPodmanDockerShim: false,
 };
 
-// Disk-backed scratch root (the repo's gitignored `.scratch/` — NOT /tmp,
-// which is tmpfs/RAM on the maintainer's boxes). Each test gets a fresh subdir.
-const SCRATCH_ROOT = path.join(
-  process.cwd(),
-  ".scratch",
-  "remove-managed-data",
-);
+/**
+ * Disk-backed scratch root (the repo's gitignored `.scratch/` — NOT /tmp,
+ * which is tmpfs/RAM on the maintainer's boxes). Each test gets a fresh subdir.
+ *
+ * Falls back to the system temp dir when the repo is not writable. The plugin
+ * registry clones into /home and runs the suite under firejail
+ * `--read-only=/home`, where every one of these tests would otherwise fail on
+ * `mkdir` and be scored as a real failure. Preferring real disk is a
+ * performance choice, so trading it for a run that works is the right way
+ * round.
+ */
+function resolveScratchRoot(): string {
+  const preferred = path.join(process.cwd(), ".scratch", "remove-managed-data");
+  try {
+    mkdirSync(preferred, { recursive: true });
+    // `mkdirSync` on an existing directory succeeds even where the filesystem
+    // is read-only, and `.scratch/` survives earlier local runs — so probe by
+    // creating something, which is what every test then does.
+    const probe = path.join(preferred, ".writable-probe");
+    mkdirSync(probe, { recursive: true });
+    rmSync(probe, { recursive: true, force: true });
+    return preferred;
+  } catch {
+    return mkdtempSync(path.join(tmpdir(), "skc-remove-managed-data-"));
+  }
+}
+
+const SCRATCH_ROOT = resolveScratchRoot();
 
 let scratch: string;
 let counter = 0;
