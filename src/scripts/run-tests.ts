@@ -14,21 +14,28 @@
  * stdout is unchanged either way, and the process exit code continues to
  * reflect the tests alone.
  */
-import { mkdirSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 
 const JUNIT_DIR = "test-results";
 const JUNIT_FILE = `${JUNIT_DIR}/junit.xml`;
 
-function junitWritable() {
+function junitWritable(): boolean {
   try {
     mkdirSync(JUNIT_DIR, { recursive: true });
+    // `mkdirSync` on an existing directory succeeds even where the filesystem
+    // is read-only, so writing is what has to be proven — otherwise the
+    // reporter itself fails later with EACCES and takes the whole run with it.
+    const probe = `${JUNIT_DIR}/.writable-probe`;
+    writeFileSync(probe, "");
+    rmSync(probe, { force: true });
     return true;
   } catch (err) {
     // A read-only checkout is a legitimate way to run the suite, so this is
     // reported and stepped over rather than failing the run.
+    const code = (err as NodeJS.ErrnoException).code ?? String(err);
     console.error(
-      `[test] JUnit report disabled: cannot create ${JUNIT_DIR}/ (${err.code ?? err.message})`,
+      `[test] JUnit report disabled: ${JUNIT_DIR}/ is not writable (${code})`,
     );
     return false;
   }

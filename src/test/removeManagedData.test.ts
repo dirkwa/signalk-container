@@ -1,4 +1,4 @@
-import { describe, it, beforeEach, afterEach } from "node:test";
+import { describe, it, beforeEach, afterEach, after } from "node:test";
 import assert from "node:assert/strict";
 import {
   existsSync,
@@ -52,6 +52,8 @@ function resolveScratchRoot(): string {
 }
 
 const SCRATCH_ROOT = resolveScratchRoot();
+/** True when the repo was unwritable and a temp dir stood in for it. */
+const SCRATCH_IS_TEMPORARY = !SCRATCH_ROOT.startsWith(process.cwd());
 
 let scratch: string;
 let counter = 0;
@@ -71,6 +73,14 @@ afterEach(() => {
     // already gone / never narrowed
   }
   rmSync(scratch, { recursive: true, force: true });
+});
+
+after(() => {
+  // The repo-local `.scratch/` is gitignored and deliberately kept between
+  // runs; a temp-dir stand-in has no such role, so it is not left behind.
+  if (SCRATCH_IS_TEMPORARY) {
+    rmSync(SCRATCH_ROOT, { recursive: true, force: true });
+  }
 });
 
 /** A wipe runner that must never be called (host-side delete should suffice). */

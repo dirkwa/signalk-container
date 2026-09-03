@@ -35,7 +35,7 @@
     "lint": "eslint --fix",
     "format": "npm run prettier && npm run lint",
     "ci-lint": "eslint && prettier --check .",
-    "test": "node scripts/run-tests.mjs",
+    "test": "node dist/scripts/run-tests.js",
     "test:integration": "node --test \"dist/test/integration/*.test.js\"",
     "test:all": "node --test \"dist/test/**/*.test.js\"",
     "build:all": "npm run build && npm test",
