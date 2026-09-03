@@ -20,9 +20,16 @@ import { junitWritable, testArgs } from "../scripts/run-tests.js";
  * bits, so `chmod` cannot create the condition (same guard as
  * `pickSocketPermission.test.ts`).
  */
+/** Root ignores directory permission bits, so `chmod` cannot deny it. */
+const ROOT_UID = 0;
+/** Owner may write: the state a JUnit destination has to be in. */
+const MODE_WRITABLE = 0o755;
+/** Read+execute only: what makes `junitWritable` report false. */
+const MODE_READ_ONLY = 0o555;
+
 const CANNOT_DENY_WRITES =
   process.platform === "win32" ||
-  (typeof process.getuid === "function" && process.getuid() === 0);
+  (typeof process.getuid === "function" && process.getuid() === ROOT_UID);
 
 let scratch: string;
 
@@ -32,7 +39,7 @@ beforeEach(() => {
 
 afterEach(() => {
   try {
-    chmodSync(scratch, 0o755);
+    chmodSync(scratch, MODE_WRITABLE);
   } catch {
     // already gone / never narrowed
   }
@@ -59,7 +66,7 @@ describe("junitWritable", () => {
       // it. Reporting `true` here makes the reporter fail with EACCES later.
       const dir = path.join(scratch, "readonly");
       mkdirSync(dir);
-      chmodSync(dir, 0o555);
+      chmodSync(dir, MODE_READ_ONLY);
       assert.equal(junitWritable(dir), false);
     },
   );
@@ -68,7 +75,7 @@ describe("junitWritable", () => {
     "rejects a directory that cannot be created",
     { skip: CANNOT_DENY_WRITES },
     () => {
-      chmodSync(scratch, 0o555);
+      chmodSync(scratch, MODE_READ_ONLY);
       assert.equal(junitWritable(path.join(scratch, "nope")), false);
     },
   );
