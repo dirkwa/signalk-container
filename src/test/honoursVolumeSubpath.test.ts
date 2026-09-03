@@ -5,7 +5,8 @@ import { honoursVolumeSubpath, supportsKeepIdSize } from "../runtime.js";
 /**
  * The bound is measured, not read from a changelog: podman 5.4.2 accepts a
  * compat-API volume subpath and ignores it, 6.1.0 applies it and echoes it
- * back through inspect. Those two points are what pin this.
+ * back through inspect. Confirmed on x86_64 and aarch64, which agree — so the
+ * boundary is a property of the podman version, not of the architecture.
  */
 describe("honoursVolumeSubpath", () => {
   it("is false for versions measured to ignore the subpath", () => {
