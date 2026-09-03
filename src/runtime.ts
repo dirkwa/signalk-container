@@ -420,9 +420,9 @@ export function supportsKeepIdSize(version: string | null): boolean {
  *
  * The exact release in between is unverified, so this is deliberately a
  * "known to honour" bound rather than a precise one — it gates a test's
- * expectation, not plugin behaviour. Both measurements are x86_64; arm64 is
- * assumed to match (the endpoint is architecture-independent Go) but has not
- * been measured, and the canary reports the truth wherever it runs. The plugin never sends a subpath on any
+ * expectation, not plugin behaviour. Measured on both x86_64 and aarch64, and
+ * the two agree: 5.4.2 accepts the field and silently ignores it, 6.1.0
+ * applies it and echoes it back through inspect. The plugin never sends a subpath on any
  * version, so `assertVolumeIsNotBroaderThanRequested` stays correct either
  * way; what changes is only whether narrowing *could* work.
  */
