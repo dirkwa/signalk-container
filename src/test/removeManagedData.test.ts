@@ -35,7 +35,7 @@ const runtime: ContainerRuntimeInfo = {
  * performance choice, so trading it for a run that works is the right way
  * round.
  */
-function resolveScratchRoot(): string {
+function resolveScratchRoot(): { root: string; isTemporary: boolean } {
   const preferred = path.join(process.cwd(), ".scratch", "remove-managed-data");
   try {
     mkdirSync(preferred, { recursive: true });
@@ -45,15 +45,20 @@ function resolveScratchRoot(): string {
     const probe = path.join(preferred, ".writable-probe");
     mkdirSync(probe, { recursive: true });
     rmSync(probe, { recursive: true, force: true });
-    return preferred;
+    return { root: preferred, isTemporary: false };
   } catch {
-    return mkdtempSync(path.join(tmpdir(), "skc-remove-managed-data-"));
+    // Reported by the branch that took it rather than inferred from the path:
+    // a prefix test misreads a sibling TMPDIR (`/work/plugin-temp` against a
+    // `/work/plugin` checkout) as repo-local and then never cleans it up.
+    return {
+      root: mkdtempSync(path.join(tmpdir(), "skc-remove-managed-data-")),
+      isTemporary: true,
+    };
   }
 }
 
-const SCRATCH_ROOT = resolveScratchRoot();
-/** True when the repo was unwritable and a temp dir stood in for it. */
-const SCRATCH_IS_TEMPORARY = !SCRATCH_ROOT.startsWith(process.cwd());
+const { root: SCRATCH_ROOT, isTemporary: SCRATCH_IS_TEMPORARY } =
+  resolveScratchRoot();
 
 let scratch: string;
 let counter = 0;
