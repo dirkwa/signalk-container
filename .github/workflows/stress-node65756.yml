@@ -1,0 +1,112 @@
+# ─────────────────────────────────────────────────────────────
+# Stress harness for nodejs/node#65756 — the intermittent
+# Windows child-process crash (0xC0000005) that marks a whole
+# test file failed after all of its tests passed.
+#
+# Manually dispatched only; not part of regular CI. Repeats the
+# suite N times per matrix leg and classifies each run:
+#   - main-process exit status captured raw (32-bit) via a
+#     spawnSync driver, because bash truncates NTSTATUS codes
+#   - child crashes show up as `exitCode:` inside the JUnit
+#     failure blob (testCodeFailure), which plain assertion
+#     failures (ERR_ASSERTION) never carry
+#
+# The isolation=none legs run everything in one process, so the
+# suite's known cross-file assertion failures make exit status 1
+# the expected outcome there; only a status outside {0,1} — the
+# main process itself dying — counts as a hit.
+# ─────────────────────────────────────────────────────────────
+name: stress-node65756
+
+on:
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: Test-suite repetitions per matrix leg
+        required: false
+        default: "30"
+        type: string
+
+jobs:
+  stress:
+    name: node ${{ matrix.node }} / isolation ${{ matrix.isolation }}
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["24.19.0", "24.20.0", "26.8.1"]
+        isolation: ["default", "none"]
+    runs-on: windows-latest
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - run: npm install
+
+      - run: npm run build:server
+
+      - name: Write spawnSync driver
+        run: |
+          cat > stress-driver.mjs <<'EOF'
+          import { spawnSync } from "node:child_process";
+          const [iter, isolation] = process.argv.slice(2);
+          const args = [
+            "--test",
+            "--test-concurrency=1",
+            "--test-reporter=spec",
+            `--test-reporter-destination=stress-logs/run-${iter}.log`,
+            "--test-reporter=junit",
+            `--test-reporter-destination=stress-logs/run-${iter}.junit.xml`,
+          ];
+          if (isolation === "none") args.push("--test-isolation=none");
+          args.push("dist/test/*.test.js");
+          const r = spawnSync(process.execPath, args, { stdio: ["inherit", "inherit", "pipe"] });
+          if (r.stderr && r.stderr.length) process.stderr.write(r.stderr);
+          console.log(`STRESS_RESULT ${JSON.stringify({ iter: Number(iter), status: r.status, signal: r.signal })}`);
+          EOF
+
+      - name: Run suite repeatedly
+        id: loop
+        run: |
+          ITER="${{ inputs.iterations }}"
+          ISOLATION="${{ matrix.isolation }}"
+          mkdir -p stress-logs
+          hits=0
+          for i in $(seq 1 "$ITER"); do
+            set +e
+            out=$(node stress-driver.mjs "$i" "$ISOLATION" 2> "stress-logs/run-$i.stderr.log")
+            set -e
+            status=$(printf '%s\n' "$out" | grep -o 'STRESS_RESULT {.*}' | sed 's/STRESS_RESULT //' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).status))")
+            childcodes=$(grep -o 'exitCode: [0-9-]*' "stress-logs/run-$i.junit.xml" 2>/dev/null | sort -u | tr '\n' ' ' || true)
+            echo "iteration $i: main-status=$status child-exitCodes=[${childcodes}]"
+            hit=0
+            if [ "$status" != "0" ] && [ "$status" != "1" ]; then hit=1; fi
+            if [ -n "$childcodes" ]; then hit=1; fi
+            if [ "$hit" = "1" ]; then
+              hits=$((hits+1))
+              cp "stress-logs/run-$i.log" "stress-logs/HIT-run-$i.spec.log" 2>/dev/null || true
+              cp "stress-logs/run-$i.junit.xml" "stress-logs/HIT-run-$i.junit.xml" 2>/dev/null || true
+              echo "  ^^ HIT (abnormal main status or child exitCode in junit)"
+            fi
+          done
+          echo "== $hits hit(s) in $ITER runs — node ${{ matrix.node }}, isolation $ISOLATION =="
+          {
+            echo "### node ${{ matrix.node }} / isolation $ISOLATION"
+            echo ""
+            echo "**$hits** hit(s) in **$ITER** runs"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stress-${{ matrix.node }}-isolation-${{ matrix.isolation }}
+          path: stress-logs/
+          retention-days: 30
+          if-no-files-found: warn
