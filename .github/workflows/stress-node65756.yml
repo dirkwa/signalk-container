@@ -19,6 +19,10 @@
 name: stress-node65756
 
 on:
+  # workflow_dispatch only registers on the default branch, so this
+  # runs on pushes to its own branch instead.
+  push:
+    branches: ["stress-node65756"]
   workflow_dispatch:
     inputs:
       iterations:
@@ -74,7 +78,7 @@ jobs:
       - name: Run suite repeatedly
         id: loop
         run: |
-          ITER="${{ inputs.iterations }}"
+          ITER="${{ inputs.iterations || '30' }}"
           ISOLATION="${{ matrix.isolation }}"
           mkdir -p stress-logs
           hits=0
