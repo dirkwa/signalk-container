@@ -47,9 +47,9 @@ import {
 } from "./notifications.js";
 import {
   getClient,
+  inspectForHealthSchedule,
   libpodRunHealthcheck,
   resetClient,
-  safeInspect,
 } from "./client.js";
 import {
   classifyVolumeSources,
@@ -209,6 +209,8 @@ const HEALTH_POLL_MS = 60_000;
  */
 const SELF_HEALTHCHECK_POLL_MS = 60_000;
 
+const MILLISECONDS_PER_SECOND = 1000;
+
 // `DEFAULT_KEEP_IMAGE_VERSIONS` and `normalizeKeepImageVersions` live in
 // `./configNormalize.js` so the backend and the React config panel share
 // one contract — a browser-safe module with no node-only imports.
@@ -227,6 +229,9 @@ export default (app: App) => {
   // `options.healthCheck` callback — a different mechanism entirely.
   const selfHealthTimers = new Map<string, NodeJS.Timeout>();
   const selfHealthInFlight = new Set<string>();
+  // Claimed for the span of the async scheduling probe, so concurrent
+  // ensureRunning calls cannot both install a timer for one container.
+  const selfHealthSetup = new Set<string>();
   let updateService: UpdateService | null = null;
   let manifestStore: ManifestStore | null = null;
 
@@ -644,6 +649,7 @@ export default (app: App) => {
       selfHealthTimers.delete(name);
     }
     selfHealthInFlight.delete(name);
+    selfHealthSetup.delete(name);
     // A removed container's degradation alerts must not linger.
     degradation.clear("unhealthy", name);
     degradation.clear("deviceUnresolved", name);
@@ -1632,24 +1638,44 @@ export default (app: App) => {
       // has had time to produce a first result on its own.
       void (async () => {
         if (runtimeInfo?.runtime !== "podman") return;
-        if (selfHealthTimers.has(name)) return;
-        const live = await safeInspect(() =>
-          getClient().getContainer(prefixedName(name)).inspect(),
-        );
-        if (!live || !healthcheckIsUnscheduled(live)) return;
-        app.debug(
-          `ensureRunning(${name}): no daemon healthcheck scheduling detected; running it here every ${
-            SELF_HEALTHCHECK_POLL_MS / 1000
-          }s`,
-        );
-        const timer = setInterval(() => {
-          if (selfHealthInFlight.has(name)) return;
-          selfHealthInFlight.add(name);
-          void libpodRunHealthcheck(getClient(), prefixedName(name))
-            .catch(() => null)
-            .finally(() => selfHealthInFlight.delete(name));
-        }, SELF_HEALTHCHECK_POLL_MS);
-        selfHealthTimers.set(name, timer);
+        // Claim the slot BEFORE the await. The timer map is only written
+        // after it, so two concurrent ensureRunning calls would otherwise
+        // both pass the check and install an interval — the second write
+        // orphaning the first, which neither remove() nor stop() can clear.
+        if (selfHealthTimers.has(name) || selfHealthSetup.has(name)) return;
+        selfHealthSetup.add(name);
+        try {
+          const live = await inspectForHealthSchedule(
+            getClient(),
+            prefixedName(name),
+          );
+          if (!live || !healthcheckIsUnscheduled(live)) return;
+          // The container may have been removed while the inspect was in
+          // flight, which clears the map; re-check before installing.
+          if (selfHealthTimers.has(name)) return;
+          app.debug(
+            `ensureRunning(${name}): no daemon healthcheck scheduling detected; running it here every ${
+              SELF_HEALTHCHECK_POLL_MS / MILLISECONDS_PER_SECOND
+            }s`,
+          );
+          const timer = setInterval(() => {
+            if (selfHealthInFlight.has(name)) return;
+            selfHealthInFlight.add(name);
+            void libpodRunHealthcheck(getClient(), prefixedName(name))
+              .catch(() => null)
+              .finally(() => selfHealthInFlight.delete(name));
+          }, SELF_HEALTHCHECK_POLL_MS);
+          selfHealthTimers.set(name, timer);
+        } catch (err) {
+          // Detached task: an escaping rejection would be unhandled.
+          app.debug(
+            `ensureRunning(${name}): self-healthcheck setup failed: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        } finally {
+          selfHealthSetup.delete(name);
+        }
       })();
 
       if (options?.healthCheck) {
@@ -2768,6 +2794,7 @@ export default (app: App) => {
       }
       selfHealthTimers.clear();
       selfHealthInFlight.clear();
+      selfHealthSetup.clear();
       // Clear every outstanding degradation notification so a plugin stop
       // doesn't strand alerts on the bus, then drop the tracking state.
       degradation.reset();
