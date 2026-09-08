@@ -161,6 +161,27 @@ export function libpodNetworkBackendInfo(
  * creates the container, silently skips the timer, and leaves the container
  * reporting `starting` forever.
  */
+/**
+ * Inspect a container for the scheduling decision, returning `null` on any
+ * failure rather than throwing — a detached scheduling probe must not be able
+ * to reject into nothing.
+ */
+export async function inspectForHealthSchedule(
+  client: ContainerClient,
+  containerName: string,
+): Promise<Record<string, unknown> | null> {
+  try {
+    const info = await safeInspect(() =>
+      client.getContainer(containerName).inspect(),
+    );
+    return (info as Record<string, unknown> | null) ?? null;
+  } catch {
+    // safeInspect only swallows 404s; anything else (daemon gone, socket
+    // refused) would otherwise escape into a floating promise.
+    return null;
+  }
+}
+
 export function libpodRunHealthcheck(
   client: ContainerClient,
   containerName: string,

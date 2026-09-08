@@ -78,8 +78,14 @@ describe("healthcheckIsUnscheduled", () => {
   });
 
   it("uses podman's default interval when the image declares none", () => {
-    const justNow = new Date(Date.now() - 5_000).toISOString();
-    const old = new Date(Date.now() - 120_000).toISOString();
+    // Podman's default is 30s and the margin is 2 intervals, so 60s is the
+    // threshold: 5s is comfortably inside it, 120s comfortably past.
+    const WITHIN_DEFAULT_WINDOW_MS = 5_000;
+    const PAST_DEFAULT_WINDOW_MS = 120_000;
+    const justNow = new Date(
+      Date.now() - WITHIN_DEFAULT_WINDOW_MS,
+    ).toISOString();
+    const old = new Date(Date.now() - PAST_DEFAULT_WINDOW_MS).toISOString();
     const noInterval = { Test: ["CMD-SHELL", "true"] };
     assert.equal(
       healthcheckIsUnscheduled(
