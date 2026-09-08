@@ -976,6 +976,56 @@ export async function pullImage(
   }
 }
 
+/** Podman's default when an image declares no explicit interval. */
+const DEFAULT_HEALTH_INTERVAL_MS = 30_000;
+/** Intervals to wait before calling a check unscheduled rather than pending. */
+const UNSCHEDULED_INTERVAL_MARGIN = 2;
+
+/**
+ * Whether this container's own `HEALTHCHECK` is going unrun.
+ *
+ * Podman schedules healthchecks as systemd transient timers. On a host with
+ * no user systemd session — Venus OS, or any rootless install without
+ * lingering — it creates the container, silently skips the timer, and the
+ * container reports `starting` forever. Nothing is logged, and `podman info`
+ * exposes no capability flag to ask, so the only reliable signal is
+ * behavioural: a healthcheck defined, past its first interval, with no log
+ * entries means nothing ran it.
+ *
+ * `false` whenever the answer is not clearly yes — no healthcheck, already
+ * has results, too early to tell, or the inspect failed. Erring that way
+ * costs a stale `starting`; erring the other way runs checks against a
+ * daemon already running them.
+ */
+export function healthcheckIsUnscheduled(info: {
+  State?: { Health?: { Status?: unknown; Log?: unknown } | null } | null;
+  Config?: {
+    Healthcheck?: { Test?: unknown; Interval?: unknown } | null;
+  } | null;
+  Created?: unknown;
+}): boolean {
+  const test = info.Config?.Healthcheck?.Test;
+  // `["NONE"]` is how an image declares "no healthcheck"; treat it as none.
+  if (!Array.isArray(test) || test.length === 0 || test[0] === "NONE")
+    return false;
+
+  const log = info.State?.Health?.Log;
+  if (Array.isArray(log) && log.length > 0) return false;
+  if (String(info.State?.Health?.Status ?? "").toLowerCase() !== "starting")
+    return false;
+
+  // Wait out one full interval plus a margin before concluding, so a
+  // container inspected seconds after creation isn't misread as unscheduled.
+  const createdMs = Date.parse(String(info.Created ?? ""));
+  if (!Number.isFinite(createdMs)) return false;
+  const intervalNs = Number(info.Config?.Healthcheck?.Interval ?? 0);
+  const intervalMs =
+    Number.isFinite(intervalNs) && intervalNs > 0
+      ? intervalNs / 1_000_000
+      : DEFAULT_HEALTH_INTERVAL_MS;
+  return Date.now() - createdMs > intervalMs * UNSCHEDULED_INTERVAL_MARGIN;
+}
+
 export async function getContainerState(
   runtime: ContainerRuntimeInfo,
   name: string,
