@@ -45,7 +45,12 @@ import {
   makeDegradationEmitter,
   type NotificationApp,
 } from "./notifications.js";
-import { resetClient } from "./client.js";
+import {
+  getClient,
+  libpodRunHealthcheck,
+  resetClient,
+  safeInspect,
+} from "./client.js";
 import {
   classifyVolumeSources,
   ownBindMountCoverage,
@@ -97,6 +102,7 @@ import {
   stopContainer,
   tailContainerLogs,
   safeInvokeResourceClamped,
+  healthcheckIsUnscheduled,
 } from "./containers.js";
 import { createLogStreamBroker, LogStreamBroker } from "./log-stream-broker.js";
 import { runJob, cleanupOrphanedJobs } from "./jobs.js";
@@ -190,6 +196,19 @@ const SSE_HEARTBEAT_MS = 30_000;
 
 const HEALTH_POLL_MS = 60_000;
 
+/**
+ * How often to run a container's own `HEALTHCHECK` ourselves where nothing
+ * else will. Podman schedules healthchecks as systemd transient timers, so a
+ * host with no user systemd session (Venus OS, or any rootless install
+ * without lingering) creates the container, skips the timer silently, and
+ * leaves it reporting `starting` forever.
+ *
+ * Deliberately coarser than most declared intervals: this exists so
+ * `getStateDetail` reports a real verdict rather than a permanent
+ * `starting`, not to reproduce the daemon's scheduling fidelity.
+ */
+const SELF_HEALTHCHECK_POLL_MS = 60_000;
+
 // `DEFAULT_KEEP_IMAGE_VERSIONS` and `normalizeKeepImageVersions` live in
 // `./configNormalize.js` so the backend and the React config panel share
 // one contract — a browser-safe module with no node-only imports.
@@ -203,6 +222,11 @@ export default (app: App) => {
   // not race a later one and overwrite the emitter's edge-triggered health
   // state out of order.
   const healthPollsInFlight = new Set<string>();
+  // Timers running a container's OWN healthcheck where the daemon does not.
+  // Separate from `healthTimers`, which polls the consumer-supplied
+  // `options.healthCheck` callback — a different mechanism entirely.
+  const selfHealthTimers = new Map<string, NodeJS.Timeout>();
+  const selfHealthInFlight = new Set<string>();
   let updateService: UpdateService | null = null;
   let manifestStore: ManifestStore | null = null;
 
@@ -614,6 +638,12 @@ export default (app: App) => {
       healthTimers.delete(name);
     }
     healthPollsInFlight.delete(name);
+    const selfTimer = selfHealthTimers.get(name);
+    if (selfTimer) {
+      clearInterval(selfTimer);
+      selfHealthTimers.delete(name);
+    }
+    selfHealthInFlight.delete(name);
     // A removed container's degradation alerts must not linger.
     degradation.clear("unhealthy", name);
     degradation.clear("deviceUnresolved", name);
@@ -1595,6 +1625,32 @@ export default (app: App) => {
           logStreamBrokers.delete(name);
         }
       }
+
+      // Where the daemon is not running this container's own HEALTHCHECK,
+      // run it ourselves. Detection is behavioural — podman logs nothing and
+      // exposes no capability flag — so it is deferred until the container
+      // has had time to produce a first result on its own.
+      void (async () => {
+        if (runtimeInfo?.runtime !== "podman") return;
+        if (selfHealthTimers.has(name)) return;
+        const live = await safeInspect(() =>
+          getClient().getContainer(prefixedName(name)).inspect(),
+        );
+        if (!live || !healthcheckIsUnscheduled(live)) return;
+        app.debug(
+          `ensureRunning(${name}): no daemon healthcheck scheduling detected; running it here every ${
+            SELF_HEALTHCHECK_POLL_MS / 1000
+          }s`,
+        );
+        const timer = setInterval(() => {
+          if (selfHealthInFlight.has(name)) return;
+          selfHealthInFlight.add(name);
+          void libpodRunHealthcheck(getClient(), prefixedName(name))
+            .catch(() => null)
+            .finally(() => selfHealthInFlight.delete(name));
+        }, SELF_HEALTHCHECK_POLL_MS);
+        selfHealthTimers.set(name, timer);
+      })();
 
       if (options?.healthCheck) {
         const existing = healthTimers.get(name);
@@ -2707,6 +2763,11 @@ export default (app: App) => {
       }
       healthTimers.clear();
       healthPollsInFlight.clear();
+      for (const timer of selfHealthTimers.values()) {
+        clearInterval(timer);
+      }
+      selfHealthTimers.clear();
+      selfHealthInFlight.clear();
       // Clear every outstanding degradation notification so a plugin stop
       // doesn't strand alerts on the bus, then drop the tracking state.
       degradation.reset();

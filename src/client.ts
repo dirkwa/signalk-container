@@ -147,6 +147,61 @@ export function libpodNetworkBackendInfo(
 }
 
 /**
+ * Run a container's own `HEALTHCHECK` once, via Podman's native
+ * `/libpod/.../healthcheck` endpoint, and return the resulting status
+ * (`healthy` / `unhealthy` / `starting`) — or `null` when the call cannot be
+ * made or the daemon answers with something unexpected.
+ *
+ * Docker has no equivalent endpoint and schedules its own healthchecks
+ * regardless, so this is podman-only by construction: on Docker the dial
+ * 404s and the caller gets `null`.
+ *
+ * Used where nothing else will run the check. Podman schedules healthchecks
+ * as systemd transient timers, so on a host with no user systemd session it
+ * creates the container, silently skips the timer, and leaves the container
+ * reporting `starting` forever.
+ */
+export function libpodRunHealthcheck(
+  client: ContainerClient,
+  containerName: string,
+): Promise<string | null> {
+  return new Promise((resolve) => {
+    const dial = client.modem.dial?.bind(client.modem);
+    if (!dial) {
+      resolve(null);
+      return;
+    }
+    try {
+      dial(
+        {
+          path: `/v4.0.0/libpod/containers/${encodeURIComponent(
+            containerName,
+          )}/healthcheck`,
+          method: "GET",
+          statusCodes: {
+            200: true,
+            404: "no such container",
+            500: "server error",
+          },
+        },
+        (err, data) => {
+          // Async callback: a throw here would escape the surrounding try
+          // and leave the promise pending, so the payload is shape-checked.
+          if (err || typeof data !== "object" || data === null) {
+            resolve(null);
+            return;
+          }
+          const status = (data as { Status?: unknown }).Status;
+          resolve(typeof status === "string" ? status : null);
+        },
+      );
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+/**
  * Total width of the subordinate entries in one mapping table, or `null`
  * when the table is absent or contributes nothing usable.
  *
