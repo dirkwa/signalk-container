@@ -976,6 +976,8 @@ export async function pullImage(
   }
 }
 
+/** Healthcheck intervals come back from inspect in nanoseconds. */
+const NANOSECONDS_PER_MILLISECOND = 1_000_000;
 /** Podman's default when an image declares no explicit interval. */
 const DEFAULT_HEALTH_INTERVAL_MS = 30_000;
 /** Intervals to wait before calling a check unscheduled rather than pending. */
@@ -1021,7 +1023,7 @@ export function healthcheckIsUnscheduled(info: {
   const intervalNs = Number(info.Config?.Healthcheck?.Interval ?? 0);
   const intervalMs =
     Number.isFinite(intervalNs) && intervalNs > 0
-      ? intervalNs / 1_000_000
+      ? intervalNs / NANOSECONDS_PER_MILLISECOND
       : DEFAULT_HEALTH_INTERVAL_MS;
   return Date.now() - createdMs > intervalMs * UNSCHEDULED_INTERVAL_MARGIN;
 }

@@ -232,6 +232,12 @@ export default (app: App) => {
   // Claimed for the span of the async scheduling probe, so concurrent
   // ensureRunning calls cannot both install a timer for one container.
   const selfHealthSetup = new Set<string>();
+  // Bumped by every teardown. A probe that started before one must not
+  // install its timer afterwards: the timer map is cleared by teardown, so
+  // checking it alone would let a stale task re-populate a stopped plugin —
+  // and after stop() the interval's getClient() throws, since stop() resets
+  // the client.
+  let selfHealthGeneration = 0;
   let updateService: UpdateService | null = null;
   let manifestStore: ManifestStore | null = null;
 
@@ -650,6 +656,7 @@ export default (app: App) => {
     }
     selfHealthInFlight.delete(name);
     selfHealthSetup.delete(name);
+    selfHealthGeneration += 1;
     // A removed container's degradation alerts must not linger.
     degradation.clear("unhealthy", name);
     degradation.clear("deviceUnresolved", name);
@@ -1643,6 +1650,7 @@ export default (app: App) => {
         // both pass the check and install an interval — the second write
         // orphaning the first, which neither remove() nor stop() can clear.
         if (selfHealthTimers.has(name) || selfHealthSetup.has(name)) return;
+        const generation = selfHealthGeneration;
         selfHealthSetup.add(name);
         try {
           const live = await inspectForHealthSchedule(
@@ -1650,8 +1658,11 @@ export default (app: App) => {
             prefixedName(name),
           );
           if (!live || !healthcheckIsUnscheduled(live)) return;
-          // The container may have been removed while the inspect was in
-          // flight, which clears the map; re-check before installing.
+          // A teardown while the inspect was in flight invalidates this
+          // probe. Testing the timer map alone is not enough — teardown
+          // empties it, so the absence of a timer looks identical to never
+          // having had one.
+          if (generation !== selfHealthGeneration) return;
           if (selfHealthTimers.has(name)) return;
           app.debug(
             `ensureRunning(${name}): no daemon healthcheck scheduling detected; running it here every ${
@@ -2795,6 +2806,7 @@ export default (app: App) => {
       selfHealthTimers.clear();
       selfHealthInFlight.clear();
       selfHealthSetup.clear();
+      selfHealthGeneration += 1;
       // Clear every outstanding degradation notification so a plugin stop
       // doesn't strand alerts on the bus, then drop the tracking state.
       degradation.reset();

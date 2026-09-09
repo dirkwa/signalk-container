@@ -147,6 +147,13 @@ export function libpodNetworkBackendInfo(
 }
 
 /**
+ * The slice of a client this function needs: it only dials. Narrowing the
+ * parameter keeps a test double honest — it can supply exactly this rather
+ * than casting a stub through `unknown` to the full `ContainerClient`.
+ */
+export type DialOnlyClient = { modem: Pick<ContainerClient["modem"], "dial"> };
+
+/**
  * Run a container's own `HEALTHCHECK` once, via Podman's native
  * `/libpod/.../healthcheck` endpoint, and return the resulting status
  * (`healthy` / `unhealthy` / `starting`) — or `null` when the call cannot be
@@ -183,7 +190,7 @@ export async function inspectForHealthSchedule(
 }
 
 export function libpodRunHealthcheck(
-  client: ContainerClient,
+  client: DialOnlyClient,
   containerName: string,
 ): Promise<string | null> {
   return new Promise((resolve) => {

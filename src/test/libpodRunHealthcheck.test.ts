@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { libpodRunHealthcheck } from "../client.js";
-import type { ContainerClient } from "../client.js";
+import type { DialOnlyClient } from "../client.js";
 
 /**
  * Runs a container's own HEALTHCHECK over podman's native endpoint, for hosts
@@ -11,8 +11,8 @@ import type { ContainerClient } from "../client.js";
  */
 function clientWith(
   dial?: (opts: unknown, cb: (e: unknown, d: unknown) => void) => void,
-): ContainerClient {
-  return { modem: { dial } } as unknown as ContainerClient;
+): DialOnlyClient {
+  return { modem: { dial } } as DialOnlyClient;
 }
 
 describe("libpodRunHealthcheck", () => {
