@@ -154,6 +154,16 @@ export function libpodNetworkBackendInfo(
 export type DialOnlyClient = { modem: Pick<ContainerClient["modem"], "dial"> };
 
 /**
+ * The slice needed to inspect one container — `getContainer().inspect()` and
+ * nothing else. Same reasoning as `DialOnlyClient`: a test double supplies
+ * exactly this rather than casting a stub to the full client, so a change to
+ * `ContainerClient` cannot hide behind the cast.
+ */
+export type InspectOnlyClient = {
+  getContainer(id: string): { inspect(): Promise<unknown> };
+};
+
+/**
  * Run a container's own `HEALTHCHECK` once, via Podman's native
  * `/libpod/.../healthcheck` endpoint, and return the resulting status
  * (`healthy` / `unhealthy` / `starting`) — or `null` when the call cannot be
@@ -174,7 +184,7 @@ export type DialOnlyClient = { modem: Pick<ContainerClient["modem"], "dial"> };
  * to reject into nothing.
  */
 export async function inspectForHealthSchedule(
-  client: ContainerClient,
+  client: InspectOnlyClient,
   containerName: string,
 ): Promise<Record<string, unknown> | null> {
   try {

@@ -232,12 +232,20 @@ export default (app: App) => {
   // Claimed for the span of the async scheduling probe, so concurrent
   // ensureRunning calls cannot both install a timer for one container.
   const selfHealthSetup = new Set<string>();
-  // Bumped by every teardown. A probe that started before one must not
-  // install its timer afterwards: the timer map is cleared by teardown, so
-  // checking it alone would let a stale task re-populate a stopped plugin —
-  // and after stop() the interval's getClient() throws, since stop() resets
-  // the client.
-  let selfHealthGeneration = 0;
+  // Bumped by teardown so a probe that started before it does not install
+  // its timer afterwards. Checking the timer map alone cannot detect that —
+  // teardown empties it, making "removed" indistinguishable from "never had
+  // one" — and after stop() the interval's getClient() throws, since stop()
+  // resets the client.
+  //
+  // Per container, plus a plugin-wide counter for stop(). A single global
+  // would let removing one container cancel an in-flight probe for another,
+  // silently leaving that one without the fallback timer it needs.
+  const selfHealthGeneration = new Map<string, number>();
+  let selfHealthStopGeneration = 0;
+  const bumpSelfHealthGeneration = (name: string): void => {
+    selfHealthGeneration.set(name, (selfHealthGeneration.get(name) ?? 0) + 1);
+  };
   let updateService: UpdateService | null = null;
   let manifestStore: ManifestStore | null = null;
 
@@ -656,7 +664,7 @@ export default (app: App) => {
     }
     selfHealthInFlight.delete(name);
     selfHealthSetup.delete(name);
-    selfHealthGeneration += 1;
+    bumpSelfHealthGeneration(name);
     // A removed container's degradation alerts must not linger.
     degradation.clear("unhealthy", name);
     degradation.clear("deviceUnresolved", name);
@@ -1650,7 +1658,8 @@ export default (app: App) => {
         // both pass the check and install an interval — the second write
         // orphaning the first, which neither remove() nor stop() can clear.
         if (selfHealthTimers.has(name) || selfHealthSetup.has(name)) return;
-        const generation = selfHealthGeneration;
+        const generation = selfHealthGeneration.get(name) ?? 0;
+        const stopGeneration = selfHealthStopGeneration;
         selfHealthSetup.add(name);
         try {
           const live = await inspectForHealthSchedule(
@@ -1662,7 +1671,11 @@ export default (app: App) => {
           // probe. Testing the timer map alone is not enough — teardown
           // empties it, so the absence of a timer looks identical to never
           // having had one.
-          if (generation !== selfHealthGeneration) return;
+          if (
+            generation !== (selfHealthGeneration.get(name) ?? 0) ||
+            stopGeneration !== selfHealthStopGeneration
+          )
+            return;
           if (selfHealthTimers.has(name)) return;
           app.debug(
             `ensureRunning(${name}): no daemon healthcheck scheduling detected; running it here every ${
@@ -2806,7 +2819,8 @@ export default (app: App) => {
       selfHealthTimers.clear();
       selfHealthInFlight.clear();
       selfHealthSetup.clear();
-      selfHealthGeneration += 1;
+      selfHealthGeneration.clear();
+      selfHealthStopGeneration += 1;
       // Clear every outstanding degradation notification so a plugin stop
       // doesn't strand alerts on the bus, then drop the tracking state.
       degradation.reset();
