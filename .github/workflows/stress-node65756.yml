@@ -26,6 +26,14 @@
 #             without the runner's process-isolation path.
 #             Distinguishes "many Node starts/stops crash" from
 #             "the isolation plumbing is involved".
+#   perfile-default
+#           — the driver spawns `node --test <file>` per test
+#             file: one runner process managing exactly one
+#             isolation child. Keeps the isolation path that
+#             `perfile` removed, but drops the per-runner child
+#             count from ~250 to 1, so a hit here implicates the
+#             isolation plumbing itself and a miss implicates
+#             the accumulation of many children under one runner.
 # ─────────────────────────────────────────────────────────────
 name: stress-node65756
 
@@ -48,11 +56,9 @@ jobs:
       matrix:
         include:
           - node: "24.19.0"
-            mode: perfile
+            mode: perfile-default
           - node: "24.20.0"
-            mode: perfile
-          - node: "26.8.1"
-            mode: default
+            mode: perfile-default
     runs-on: windows-latest
     timeout-minutes: 180
     defaults:
@@ -75,23 +81,49 @@ jobs:
           import { spawnSync } from "node:child_process";
           import { globSync, writeFileSync } from "node:fs";
           const [iter, mode] = process.argv.slice(2);
-          if (mode === "perfile") {
+          if (mode === "perfile" || mode === "perfile-default") {
+            // perfile drops the runner's isolation path (child runs the tests
+            // directly); perfile-default keeps it, one runner per one child.
+            // In perfile-default a crashed child is reported BY its runner, which
+            // then exits 1 — indistinguishable from an assertion failure by exit
+            // status alone. So the crash signature is read from the runner's own
+            // JUnit output instead: only a testCodeFailure carries exitCode/signal.
+            const perFileArgs =
+              mode === "perfile"
+                ? ["--test", "--test-isolation=none"]
+                : ["--test", "--test-reporter=junit", "--test-reporter-destination=stdout"];
+            const CRASH_RE = /failureType: 'testCodeFailure'[\s\S]*?(exitCode: (?!null)[0-9-]+|signal: '[A-Z]+')/;
             const files = globSync("dist/test/*.test.js").sort();
             const bad = [];
             for (const f of files) {
-              const r = spawnSync(process.execPath, ["--test", "--test-isolation=none", f], {
+              const r = spawnSync(process.execPath, [...perFileArgs, f], {
                 stdio: ["ignore", "pipe", "pipe"],
               });
+              const out = Buffer.concat([
+                r.stdout ?? Buffer.alloc(0),
+                r.stderr ?? Buffer.alloc(0),
+              ]).toString();
+              const crashMatch = mode === "perfile-default" ? out.match(CRASH_RE) : null;
+              const crashed =
+                r.signal !== null ||
+                (r.status !== 0 && r.status !== 1) ||
+                crashMatch !== null;
               if (r.status !== 0 || r.signal) {
-                bad.push({ file: f, status: r.status, signal: r.signal });
+                bad.push({
+                  file: f,
+                  status: r.status,
+                  signal: r.signal,
+                  crashed,
+                  crashSig: crashMatch ? crashMatch[1] : null,
+                });
                 const slug = f.replace(/[\\/]/g, "_");
                 writeFileSync(
-                  `stress-logs/iter${iter}-${slug}.out.log`,
-                  Buffer.concat([r.stdout ?? Buffer.alloc(0), r.stderr ?? Buffer.alloc(0)]),
+                  `stress-logs/${crashed ? "HIT-" : ""}iter${iter}-${slug}.out.log`,
+                  out,
                 );
               }
             }
-            const hit = bad.some((b) => b.signal !== null || (b.status !== 0 && b.status !== 1));
+            const hit = bad.some((b) => b.crashed);
             console.log(
               `STRESS_RESULT ${JSON.stringify({ iter: Number(iter), mode, files: files.length, hit, bad })}`,
             );
