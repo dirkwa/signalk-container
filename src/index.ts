@@ -233,8 +233,8 @@ export default (app: App) => {
   // it and release only takes effect when that token still matches — see
   // SelfHealthOwnership.
   const selfHealth = new SelfHealthOwnership();
-  const SETUP = "setup";
-  const IN_FLIGHT = "inFlight";
+  const SETUP: SelfHealthMarker = "setup";
+  const IN_FLIGHT: SelfHealthMarker = "inFlight";
   let updateService: UpdateService | null = null;
   let manifestStore: ManifestStore | null = null;
 
@@ -3408,9 +3408,17 @@ function headlineForDoctorStatus(
  * outstanding claim, where removing one container must leave probes for the
  * others untouched.
  */
+/**
+ * The two markers the scheduler holds per container. A union rather than
+ * `string`: a mistyped kind would otherwise create a silent third bucket that
+ * nothing ever reads, and the class is exported, so the loose type would be
+ * part of its surface.
+ */
+export type SelfHealthMarker = "setup" | "inFlight";
+
 export class SelfHealthOwnership {
   private readonly generation = new Map<string, number>();
-  private readonly markers = new Map<string, Map<string, number>>();
+  private readonly markers = new Map<SelfHealthMarker, Map<string, number>>();
   private stopGeneration = 0;
 
   /** The generation an operation should carry for `name`. */
@@ -3432,7 +3440,7 @@ export class SelfHealthOwnership {
     );
   }
 
-  private bucket(kind: string): Map<string, number> {
+  private bucket(kind: SelfHealthMarker): Map<string, number> {
     let m = this.markers.get(kind);
     if (!m) {
       m = new Map();
@@ -3441,16 +3449,16 @@ export class SelfHealthOwnership {
     return m;
   }
 
-  held(kind: string, name: string): boolean {
+  held(kind: SelfHealthMarker, name: string): boolean {
     return this.bucket(kind).has(name);
   }
 
-  claim(kind: string, name: string, generation: number): void {
+  claim(kind: SelfHealthMarker, name: string, generation: number): void {
     this.bucket(kind).set(name, generation);
   }
 
   /** Release only a claim this generation made; a stale one is ignored. */
-  release(kind: string, name: string, generation: number): void {
+  release(kind: SelfHealthMarker, name: string, generation: number): void {
     const m = this.bucket(kind);
     if (m.get(name) === generation) m.delete(name);
   }

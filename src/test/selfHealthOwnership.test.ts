@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { SelfHealthOwnership } from "../index.js";
+import type { SelfHealthMarker } from "../index.js";
 
 /**
  * The self-healthcheck scheduler keeps two markers per container — a setup
@@ -11,8 +12,8 @@ import { SelfHealthOwnership } from "../index.js";
  * The invariant: a claim is released only by the operation that made it, and
  * a token taken before a teardown never acts afterwards.
  */
-const SETUP = "setup";
-const IN_FLIGHT = "inFlight";
+const SETUP: SelfHealthMarker = "setup";
+const IN_FLIGHT: SelfHealthMarker = "inFlight";
 const RECREATE_CYCLES = 5;
 
 describe("SelfHealthOwnership", () => {
