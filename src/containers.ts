@@ -1017,7 +1017,7 @@ export function healthIntervalMs(raw: unknown): number | null {
 /** Healthcheck intervals come back from inspect in nanoseconds. */
 const NANOSECONDS_PER_MILLISECOND = 1_000_000;
 /** Podman's default when an image declares no explicit interval. */
-const DEFAULT_HEALTH_INTERVAL_MS = 30_000;
+export const DEFAULT_HEALTH_INTERVAL_MS = 30_000;
 /** Intervals to wait before calling a check unscheduled rather than pending. */
 export const UNSCHEDULED_INTERVAL_MARGIN = 2;
 
@@ -1037,6 +1037,29 @@ export const UNSCHEDULED_INTERVAL_MARGIN = 2;
  * costs a stale `starting`; erring the other way runs checks against a
  * daemon already running them.
  */
+/**
+ * Whether a container has a healthcheck that has produced no verdict yet.
+ *
+ * The shared half of "is this unscheduled?" and "did the probe fire too
+ * early?" — two questions that differ only in what they conclude from it.
+ * Kept in one place so a change to what "no verdict" means cannot leave one
+ * caller reasoning from the old definition.
+ */
+export function healthVerdictPending(info: {
+  State?: { Health?: { Status?: unknown; Log?: unknown } | null } | null;
+  Config?: {
+    Healthcheck?: { Test?: unknown } | null;
+  } | null;
+}): boolean {
+  const test = info.Config?.Healthcheck?.Test;
+  // `["NONE"]` is how an image declares "no healthcheck".
+  if (!Array.isArray(test) || test.length === 0 || test[0] === "NONE")
+    return false;
+  const log = info.State?.Health?.Log;
+  if (Array.isArray(log) && log.length > 0) return false;
+  return String(info.State?.Health?.Status ?? "").toLowerCase() === "starting";
+}
+
 export function healthcheckIsUnscheduled(info: {
   State?: { Health?: { Status?: unknown; Log?: unknown } | null } | null;
   Config?: {
@@ -1044,15 +1067,7 @@ export function healthcheckIsUnscheduled(info: {
   } | null;
   Created?: unknown;
 }): boolean {
-  const test = info.Config?.Healthcheck?.Test;
-  // `["NONE"]` is how an image declares "no healthcheck"; treat it as none.
-  if (!Array.isArray(test) || test.length === 0 || test[0] === "NONE")
-    return false;
-
-  const log = info.State?.Health?.Log;
-  if (Array.isArray(log) && log.length > 0) return false;
-  if (String(info.State?.Health?.Status ?? "").toLowerCase() !== "starting")
-    return false;
+  if (!healthVerdictPending(info)) return false;
 
   // Wait out one full interval plus a margin before concluding, so a
   // container inspected seconds after creation isn't misread as unscheduled.
