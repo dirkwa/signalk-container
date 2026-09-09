@@ -104,6 +104,8 @@ import {
   safeInvokeResourceClamped,
   healthcheckIsUnscheduled,
   healthIntervalMs,
+  healthVerdictPending,
+  DEFAULT_HEALTH_INTERVAL_MS,
   UNSCHEDULED_INTERVAL_MARGIN,
 } from "./containers.js";
 import { createLogStreamBroker, LogStreamBroker } from "./log-stream-broker.js";
@@ -225,7 +227,7 @@ const SELF_HEALTHCHECK_POLL_MS = 60_000;
  * probe re-arms itself from the inspected interval when it turns out to have
  * fired too early, so a slower image is not left without a fallback.
  */
-const SELF_HEALTHCHECK_PROBE_DELAY_MS = 90_000;
+export const SELF_HEALTHCHECK_PROBE_DELAY_MS = 90_000;
 
 /**
  * How many times the probe may re-arm before giving up.
@@ -583,16 +585,7 @@ export default (app: App) => {
     attempt: number,
   ): boolean {
     if (attempt >= SELF_HEALTHCHECK_PROBE_MAX_ATTEMPTS) return false;
-    const state = live.State as
-      { Health?: { Status?: unknown; Log?: unknown } | null } | undefined;
-    const config = live.Config as
-      { Healthcheck?: { Test?: unknown } | null } | undefined;
-    const test = config?.Healthcheck?.Test;
-    if (!Array.isArray(test) || test.length === 0 || test[0] === "NONE")
-      return false;
-    const log = state?.Health?.Log;
-    if (Array.isArray(log) && log.length > 0) return false;
-    return String(state?.Health?.Status ?? "").toLowerCase() === "starting";
+    return healthVerdictPending(live);
   }
 
   /** How much longer until the container reaches its detection window. */
@@ -601,7 +594,7 @@ export default (app: App) => {
       { Healthcheck?: { Interval?: unknown } | null } | undefined;
     const intervalMs =
       healthIntervalMs(config?.Healthcheck?.Interval) ??
-      SELF_HEALTHCHECK_PROBE_DELAY_MS / UNSCHEDULED_INTERVAL_MARGIN;
+      DEFAULT_HEALTH_INTERVAL_MS;
     const createdMs = Date.parse(String(live.Created ?? ""));
     const window = intervalMs * UNSCHEDULED_INTERVAL_MARGIN;
     const elapsed = Number.isFinite(createdMs) ? Date.now() - createdMs : 0;
