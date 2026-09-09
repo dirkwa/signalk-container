@@ -103,6 +103,8 @@ import {
   tailContainerLogs,
   safeInvokeResourceClamped,
   healthcheckIsUnscheduled,
+  healthIntervalMs,
+  UNSCHEDULED_INTERVAL_MARGIN,
 } from "./containers.js";
 import { createLogStreamBroker, LogStreamBroker } from "./log-stream-broker.js";
 import { runJob, cleanupOrphanedJobs } from "./jobs.js";
@@ -219,10 +221,22 @@ const SELF_HEALTHCHECK_POLL_MS = 60_000;
  * Probing at create time therefore always answers "too early", which is why
  * this waits rather than running inline.
  *
- * Comfortably past two of podman's default 30s interval, and past two of any
- * shorter one an image is likely to declare.
+ * This is the delay used before the container's own interval is known — the
+ * probe re-arms itself from the inspected interval when it turns out to have
+ * fired too early, so a slower image is not left without a fallback.
  */
 const SELF_HEALTHCHECK_PROBE_DELAY_MS = 90_000;
+
+/**
+ * How many times the probe may re-arm before giving up.
+ *
+ * Each re-arm waits the container's real detection window, so a bound stops
+ * an image whose healthcheck never resolves from re-arming forever.
+ */
+const SELF_HEALTHCHECK_PROBE_MAX_ATTEMPTS = 4;
+
+/** Floor on a re-arm wait, so a tiny interval cannot busy-loop the retry. */
+const SELF_HEALTHCHECK_PROBE_MIN_RETRY_MS = 10_000;
 
 const MILLISECONDS_PER_SECOND = 1000;
 
@@ -560,6 +574,42 @@ export default (app: App) => {
   }
 
   /**
+   * Whether a "not unscheduled" answer means "too early" rather than
+   * "settled" — a healthcheck defined, no result yet, and the container
+   * younger than its own detection window, with attempts left.
+   */
+  function selfHealthProbeTooEarly(
+    live: Record<string, unknown>,
+    attempt: number,
+  ): boolean {
+    if (attempt >= SELF_HEALTHCHECK_PROBE_MAX_ATTEMPTS) return false;
+    const state = live.State as
+      { Health?: { Status?: unknown; Log?: unknown } | null } | undefined;
+    const config = live.Config as
+      { Healthcheck?: { Test?: unknown } | null } | undefined;
+    const test = config?.Healthcheck?.Test;
+    if (!Array.isArray(test) || test.length === 0 || test[0] === "NONE")
+      return false;
+    const log = state?.Health?.Log;
+    if (Array.isArray(log) && log.length > 0) return false;
+    return String(state?.Health?.Status ?? "").toLowerCase() === "starting";
+  }
+
+  /** How much longer until the container reaches its detection window. */
+  function selfHealthRemainingMs(live: Record<string, unknown>): number {
+    const config = live.Config as
+      { Healthcheck?: { Interval?: unknown } | null } | undefined;
+    const intervalMs =
+      healthIntervalMs(config?.Healthcheck?.Interval) ??
+      SELF_HEALTHCHECK_PROBE_DELAY_MS / UNSCHEDULED_INTERVAL_MARGIN;
+    const createdMs = Date.parse(String(live.Created ?? ""));
+    const window = intervalMs * UNSCHEDULED_INTERVAL_MARGIN;
+    const elapsed = Number.isFinite(createdMs) ? Date.now() - createdMs : 0;
+    // A floor keeps a pathological interval from busy-looping the retry.
+    return Math.max(window - elapsed, SELF_HEALTHCHECK_PROBE_MIN_RETRY_MS);
+  }
+
+  /**
    * Ask whether this container's own healthcheck is going unrun, and start
    * running it here if so. Fired from a timer once the container is old
    * enough for the question to have an answer.
@@ -567,14 +617,39 @@ export default (app: App) => {
   async function runSelfHealthProbe(
     name: string,
     token: { generation: number; stopGeneration: number },
+    attempt = 1,
   ): Promise<void> {
+    let rearmed = false;
     try {
       if (!selfHealth.isCurrent(name, token)) return;
       const live = await inspectForHealthSchedule(
         getClient(),
         prefixedName(name),
       );
-      if (!live || !healthcheckIsUnscheduled(live)) return;
+      if (!live) return;
+      if (!healthcheckIsUnscheduled(live)) {
+        // "Not unscheduled" is two different answers. If the daemon has
+        // produced a result, there is nothing to do. If the container is
+        // simply younger than its own detection window — which a declared
+        // interval above ~45s makes likely, since the first delay cannot
+        // know the interval before inspecting — re-arm for the remainder
+        // rather than leaving it without a fallback.
+        if (!selfHealthProbeTooEarly(live, attempt)) return;
+        const wait = selfHealthRemainingMs(live);
+        app.debug(
+          `ensureRunning(${name}): healthcheck verdict not settled yet; re-probing in ${Math.round(
+            wait / MILLISECONDS_PER_SECOND,
+          )}s (attempt ${attempt + 1}/${SELF_HEALTHCHECK_PROBE_MAX_ATTEMPTS})`,
+        );
+        const retry = setTimeout(() => {
+          selfHealthProbes.delete(name);
+          void runSelfHealthProbe(name, token, attempt + 1);
+        }, wait);
+        // Registered so removal and stop still cancel it.
+        selfHealthProbes.set(name, retry);
+        rearmed = true;
+        return;
+      }
       // A teardown while the inspect was in flight invalidates this probe.
       // Testing the timer map alone is not enough — teardown empties it, so
       // the absence of a timer looks identical to never having had one.
@@ -602,7 +677,10 @@ export default (app: App) => {
         }`,
       );
     } finally {
-      selfHealth.release(SETUP, name, token.generation);
+      // A re-armed probe still owns the setup claim; releasing it here would
+      // let a concurrent ensureRunning start a second probe for this
+      // container.
+      if (!rearmed) selfHealth.release(SETUP, name, token.generation);
     }
   }
 
