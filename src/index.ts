@@ -228,27 +228,13 @@ export default (app: App) => {
   // Separate from `healthTimers`, which polls the consumer-supplied
   // `options.healthCheck` callback — a different mechanism entirely.
   const selfHealthTimers = new Map<string, NodeJS.Timeout>();
-  // Keyed by container name, valued by the lifecycle generation that claimed
-  // it. A stale operation completing after remove+recreate must not clear a
-  // marker the NEW lifecycle owns, so cleanup compares the token it stored.
-  const selfHealthInFlight = new Map<string, number>();
-  // Claimed for the span of the async scheduling probe, so concurrent
-  // ensureRunning calls cannot both install a timer for one container.
-  const selfHealthSetup = new Map<string, number>();
-  // Bumped by teardown so a probe that started before it does not install
-  // its timer afterwards. Checking the timer map alone cannot detect that —
-  // teardown empties it, making "removed" indistinguishable from "never had
-  // one" — and after stop() the interval's getClient() throws, since stop()
-  // resets the client.
-  //
-  // Per container, plus a plugin-wide counter for stop(). A single global
-  // would let removing one container cancel an in-flight probe for another,
-  // silently leaving that one without the fallback timer it needs.
-  const selfHealthGeneration = new Map<string, number>();
-  let selfHealthStopGeneration = 0;
-  const bumpSelfHealthGeneration = (name: string): void => {
-    selfHealthGeneration.set(name, (selfHealthGeneration.get(name) ?? 0) + 1);
-  };
+  // Ownership tokens for the two self-healthcheck markers. Names are reused
+  // across remove+recreate, so every claim carries the generation that made
+  // it and release only takes effect when that token still matches — see
+  // SelfHealthOwnership.
+  const selfHealth = new SelfHealthOwnership();
+  const SETUP = "setup";
+  const IN_FLIGHT = "inFlight";
   let updateService: UpdateService | null = null;
   let manifestStore: ManifestStore | null = null;
 
@@ -665,9 +651,7 @@ export default (app: App) => {
       clearInterval(selfTimer);
       selfHealthTimers.delete(name);
     }
-    selfHealthInFlight.delete(name);
-    selfHealthSetup.delete(name);
-    bumpSelfHealthGeneration(name);
+    selfHealth.forget(name);
     // A removed container's degradation alerts must not linger.
     degradation.clear("unhealthy", name);
     degradation.clear("deviceUnresolved", name);
@@ -1660,10 +1644,9 @@ export default (app: App) => {
         // after it, so two concurrent ensureRunning calls would otherwise
         // both pass the check and install an interval — the second write
         // orphaning the first, which neither remove() nor stop() can clear.
-        if (selfHealthTimers.has(name) || selfHealthSetup.has(name)) return;
-        const generation = selfHealthGeneration.get(name) ?? 0;
-        const stopGeneration = selfHealthStopGeneration;
-        selfHealthSetup.set(name, generation);
+        if (selfHealthTimers.has(name) || selfHealth.held(SETUP, name)) return;
+        const token = selfHealth.tokenFor(name);
+        selfHealth.claim(SETUP, name, token.generation);
         try {
           const live = await inspectForHealthSchedule(
             getClient(),
@@ -1674,11 +1657,7 @@ export default (app: App) => {
           // probe. Testing the timer map alone is not enough — teardown
           // empties it, so the absence of a timer looks identical to never
           // having had one.
-          if (
-            generation !== (selfHealthGeneration.get(name) ?? 0) ||
-            stopGeneration !== selfHealthStopGeneration
-          )
-            return;
+          if (!selfHealth.isCurrent(name, token)) return;
           if (selfHealthTimers.has(name)) return;
           app.debug(
             `ensureRunning(${name}): no daemon healthcheck scheduling detected; running it here every ${
@@ -1686,18 +1665,14 @@ export default (app: App) => {
             }s`,
           );
           const timer = setInterval(() => {
-            if (selfHealthInFlight.has(name)) return;
-            const pollGeneration = selfHealthGeneration.get(name) ?? 0;
-            selfHealthInFlight.set(name, pollGeneration);
+            if (selfHealth.held(IN_FLIGHT, name)) return;
+            const poll = selfHealth.tokenFor(name);
+            selfHealth.claim(IN_FLIGHT, name, poll.generation);
             void libpodRunHealthcheck(getClient(), prefixedName(name))
               .catch(() => null)
-              .finally(() => {
-                // Only clear the marker this poll set. After remove+recreate
-                // the name is reused, and clearing the new lifecycle's marker
-                // would let its next tick run concurrently with this one.
-                if (selfHealthInFlight.get(name) === pollGeneration)
-                  selfHealthInFlight.delete(name);
-              });
+              .finally(() =>
+                selfHealth.release(IN_FLIGHT, name, poll.generation),
+              );
           }, SELF_HEALTHCHECK_POLL_MS);
           selfHealthTimers.set(name, timer);
         } catch (err) {
@@ -1708,9 +1683,7 @@ export default (app: App) => {
             }`,
           );
         } finally {
-          // Same reasoning as the poll marker: release only our own claim.
-          if (selfHealthSetup.get(name) === generation)
-            selfHealthSetup.delete(name);
+          selfHealth.release(SETUP, name, token.generation);
         }
       })();
 
@@ -2829,10 +2802,7 @@ export default (app: App) => {
         clearInterval(timer);
       }
       selfHealthTimers.clear();
-      selfHealthInFlight.clear();
-      selfHealthSetup.clear();
-      selfHealthGeneration.clear();
-      selfHealthStopGeneration += 1;
+      selfHealth.reset();
       // Clear every outstanding degradation notification so a plugin stop
       // doesn't strand alerts on the bus, then drop the tracking state.
       degradation.reset();
@@ -3425,6 +3395,80 @@ function headlineForDoctorStatus(
  * Exported for tests; the dependencies are parameters so neither a real
  * filesystem nor a real container is needed to exercise every branch.
  */
+/**
+ * Per-container ownership tokens for the self-healthcheck scheduler.
+ *
+ * Two markers guard it — a setup claim and an in-flight poll marker — and
+ * both are keyed by container name. Names are reused across remove+recreate,
+ * so an operation from an old lifecycle can land after a new one has claimed
+ * the same key. Every claim therefore carries the generation that made it,
+ * and release only takes effect when the token still matches.
+ *
+ * `stop()` is separate from per-container teardown: it invalidates every
+ * outstanding claim, where removing one container must leave probes for the
+ * others untouched.
+ */
+export class SelfHealthOwnership {
+  private readonly generation = new Map<string, number>();
+  private readonly markers = new Map<string, Map<string, number>>();
+  private stopGeneration = 0;
+
+  /** The generation an operation should carry for `name`. */
+  tokenFor(name: string): { generation: number; stopGeneration: number } {
+    return {
+      generation: this.generation.get(name) ?? 0,
+      stopGeneration: this.stopGeneration,
+    };
+  }
+
+  /** Whether a token taken earlier is still valid to act on. */
+  isCurrent(
+    name: string,
+    token: { generation: number; stopGeneration: number },
+  ): boolean {
+    return (
+      token.generation === (this.generation.get(name) ?? 0) &&
+      token.stopGeneration === this.stopGeneration
+    );
+  }
+
+  private bucket(kind: string): Map<string, number> {
+    let m = this.markers.get(kind);
+    if (!m) {
+      m = new Map();
+      this.markers.set(kind, m);
+    }
+    return m;
+  }
+
+  held(kind: string, name: string): boolean {
+    return this.bucket(kind).has(name);
+  }
+
+  claim(kind: string, name: string, generation: number): void {
+    this.bucket(kind).set(name, generation);
+  }
+
+  /** Release only a claim this generation made; a stale one is ignored. */
+  release(kind: string, name: string, generation: number): void {
+    const m = this.bucket(kind);
+    if (m.get(name) === generation) m.delete(name);
+  }
+
+  /** One container removed: its claims drop, every other container's stand. */
+  forget(name: string): void {
+    for (const m of this.markers.values()) m.delete(name);
+    this.generation.set(name, (this.generation.get(name) ?? 0) + 1);
+  }
+
+  /** Plugin stop: nothing outstanding may act afterwards. */
+  reset(): void {
+    for (const m of this.markers.values()) m.clear();
+    this.generation.clear();
+    this.stopGeneration += 1;
+  }
+}
+
 export function probeVolumeSource(
   hostPath: string,
   containerized: boolean = isContainerized(),
