@@ -20,3 +20,6 @@ cr-audit*
 
 # node --test JUnit report; CI uploads it as an artifact
 test-results/
+
+# Build artifacts from `npm pack`
+*.tgz

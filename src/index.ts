@@ -209,6 +209,21 @@ const HEALTH_POLL_MS = 60_000;
  */
 const SELF_HEALTHCHECK_POLL_MS = 60_000;
 
+/**
+ * How long to wait before asking whether the daemon ran a container's own
+ * healthcheck.
+ *
+ * The question is only answerable once the container has had time to produce
+ * a first result: `healthcheckIsUnscheduled` requires two intervals to have
+ * elapsed before it will call a check unscheduled rather than merely pending.
+ * Probing at create time therefore always answers "too early", which is why
+ * this waits rather than running inline.
+ *
+ * Comfortably past two of podman's default 30s interval, and past two of any
+ * shorter one an image is likely to declare.
+ */
+const SELF_HEALTHCHECK_PROBE_DELAY_MS = 90_000;
+
 const MILLISECONDS_PER_SECOND = 1000;
 
 // `DEFAULT_KEEP_IMAGE_VERSIONS` and `normalizeKeepImageVersions` live in
@@ -233,6 +248,8 @@ export default (app: App) => {
   // it and release only takes effect when that token still matches — see
   // SelfHealthOwnership.
   const selfHealth = new SelfHealthOwnership();
+  // Pending deferred probes, so stop() can cancel one that has not fired.
+  const selfHealthProbes = new Map<string, NodeJS.Timeout>();
   const SETUP: SelfHealthMarker = "setup";
   const IN_FLIGHT: SelfHealthMarker = "inFlight";
   let updateService: UpdateService | null = null;
@@ -542,6 +559,53 @@ export default (app: App) => {
     ].sort();
   }
 
+  /**
+   * Ask whether this container's own healthcheck is going unrun, and start
+   * running it here if so. Fired from a timer once the container is old
+   * enough for the question to have an answer.
+   */
+  async function runSelfHealthProbe(
+    name: string,
+    token: { generation: number; stopGeneration: number },
+  ): Promise<void> {
+    try {
+      if (!selfHealth.isCurrent(name, token)) return;
+      const live = await inspectForHealthSchedule(
+        getClient(),
+        prefixedName(name),
+      );
+      if (!live || !healthcheckIsUnscheduled(live)) return;
+      // A teardown while the inspect was in flight invalidates this probe.
+      // Testing the timer map alone is not enough — teardown empties it, so
+      // the absence of a timer looks identical to never having had one.
+      if (!selfHealth.isCurrent(name, token)) return;
+      if (selfHealthTimers.has(name)) return;
+      app.debug(
+        `ensureRunning(${name}): no daemon healthcheck scheduling detected; running it here every ${
+          SELF_HEALTHCHECK_POLL_MS / MILLISECONDS_PER_SECOND
+        }s`,
+      );
+      const timer = setInterval(() => {
+        if (selfHealth.held(IN_FLIGHT, name)) return;
+        const poll = selfHealth.tokenFor(name);
+        selfHealth.claim(IN_FLIGHT, name, poll.generation);
+        void libpodRunHealthcheck(getClient(), prefixedName(name))
+          .catch(() => null)
+          .finally(() => selfHealth.release(IN_FLIGHT, name, poll.generation));
+      }, SELF_HEALTHCHECK_POLL_MS);
+      selfHealthTimers.set(name, timer);
+    } catch (err) {
+      // Detached task: an escaping rejection would be unhandled.
+      app.debug(
+        `ensureRunning(${name}): self-healthcheck setup failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    } finally {
+      selfHealth.release(SETUP, name, token.generation);
+    }
+  }
+
   async function ensureCachedDataSource(): Promise<string> {
     if (cachedDataSource) return cachedDataSource;
     if (pendingDataSource) return pendingDataSource;
@@ -650,6 +714,11 @@ export default (app: App) => {
     if (selfTimer) {
       clearInterval(selfTimer);
       selfHealthTimers.delete(name);
+    }
+    const pendingProbe = selfHealthProbes.get(name);
+    if (pendingProbe) {
+      clearTimeout(pendingProbe);
+      selfHealthProbes.delete(name);
     }
     selfHealth.forget(name);
     // A removed container's degradation alerts must not linger.
@@ -1635,57 +1704,31 @@ export default (app: App) => {
       }
 
       // Where the daemon is not running this container's own HEALTHCHECK,
-      // run it ourselves. Detection is behavioural — podman logs nothing and
-      // exposes no capability flag — so it is deferred until the container
-      // has had time to produce a first result on its own.
-      void (async () => {
-        if (runtimeInfo?.runtime !== "podman") return;
-        // Claim the slot BEFORE the await. The timer map is only written
-        // after it, so two concurrent ensureRunning calls would otherwise
-        // both pass the check and install an interval — the second write
-        // orphaning the first, which neither remove() nor stop() can clear.
-        if (selfHealthTimers.has(name) || selfHealth.held(SETUP, name)) return;
-        const token = selfHealth.tokenFor(name);
-        selfHealth.claim(SETUP, name, token.generation);
-        try {
-          const live = await inspectForHealthSchedule(
-            getClient(),
-            prefixedName(name),
-          );
-          if (!live || !healthcheckIsUnscheduled(live)) return;
-          // A teardown while the inspect was in flight invalidates this
-          // probe. Testing the timer map alone is not enough — teardown
-          // empties it, so the absence of a timer looks identical to never
-          // having had one.
-          if (!selfHealth.isCurrent(name, token)) return;
-          if (selfHealthTimers.has(name)) return;
-          app.debug(
-            `ensureRunning(${name}): no daemon healthcheck scheduling detected; running it here every ${
-              SELF_HEALTHCHECK_POLL_MS / MILLISECONDS_PER_SECOND
-            }s`,
-          );
-          const timer = setInterval(() => {
-            if (selfHealth.held(IN_FLIGHT, name)) return;
-            const poll = selfHealth.tokenFor(name);
-            selfHealth.claim(IN_FLIGHT, name, poll.generation);
-            void libpodRunHealthcheck(getClient(), prefixedName(name))
-              .catch(() => null)
-              .finally(() =>
-                selfHealth.release(IN_FLIGHT, name, poll.generation),
-              );
-          }, SELF_HEALTHCHECK_POLL_MS);
-          selfHealthTimers.set(name, timer);
-        } catch (err) {
-          // Detached task: an escaping rejection would be unhandled.
-          app.debug(
-            `ensureRunning(${name}): self-healthcheck setup failed: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          );
-        } finally {
-          selfHealth.release(SETUP, name, token.generation);
+      // run it ourselves.
+      //
+      // The probe is DEFERRED, not inline. Detection is behavioural — podman
+      // logs nothing and exposes no capability flag — so it asks whether a
+      // result exists yet, which is only meaningful once the container has
+      // had time to produce one. Probing at create time would always answer
+      // "too early" and never ask again.
+      if (runtimeInfo?.runtime === "podman") {
+        // Claim the slot BEFORE the timer fires. The timer map is only
+        // written afterwards, so two concurrent ensureRunning calls would
+        // otherwise both pass the check and install an interval — the second
+        // write orphaning the first, which neither remove() nor stop() can
+        // clear.
+        if (!selfHealthTimers.has(name) && !selfHealth.held(SETUP, name)) {
+          const token = selfHealth.tokenFor(name);
+          selfHealth.claim(SETUP, name, token.generation);
+          const probe = setTimeout(() => {
+            selfHealthProbes.delete(name);
+            void runSelfHealthProbe(name, token);
+          }, SELF_HEALTHCHECK_PROBE_DELAY_MS);
+          // Held so plugin stop can cancel a probe that has not fired yet;
+          // an uncancelled one would run against a reset client.
+          selfHealthProbes.set(name, probe);
         }
-      })();
+      }
 
       if (options?.healthCheck) {
         const existing = healthTimers.get(name);
@@ -2802,6 +2845,10 @@ export default (app: App) => {
         clearInterval(timer);
       }
       selfHealthTimers.clear();
+      for (const probe of selfHealthProbes.values()) {
+        clearTimeout(probe);
+      }
+      selfHealthProbes.clear();
       selfHealth.reset();
       // Clear every outstanding degradation notification so a plugin stop
       // doesn't strand alerts on the bus, then drop the tracking state.
