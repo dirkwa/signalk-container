@@ -976,6 +976,44 @@ export async function pullImage(
   }
 }
 
+/**
+ * A healthcheck interval in milliseconds, or `null` when it cannot be read.
+ *
+ * Inspect returns this in two shapes: a nanosecond integer through the
+ * Docker-compat API, and a Go duration string (`"30s"`) through podman's own
+ * formatter. Reading only the first silently yields `NaN` for the second.
+ */
+export function healthIntervalMs(raw: unknown): number | null {
+  if (typeof raw === "number" && Number.isFinite(raw) && raw > 0)
+    return raw / NANOSECONDS_PER_MILLISECOND;
+  if (typeof raw !== "string") return null;
+  const text = raw.trim();
+  // Plain nanosecond integers also arrive as strings.
+  if (/^\d+$/.test(text)) {
+    const ns = Number(text);
+    return ns > 0 ? ns / NANOSECONDS_PER_MILLISECOND : null;
+  }
+  const units: Record<string, number> = {
+    ns: 1e-6,
+    us: 1e-3,
+    ms: 1,
+    s: 1000,
+    m: 60_000,
+    h: 3_600_000,
+  };
+  // Go renders compound durations ("1m30s"), so every part is summed rather
+  // than only the first matched.
+  const parts = text.match(/(\d+(?:\.\d+)?)(ns|us|ms|s|m|h)/g);
+  if (!parts) return null;
+  let total = 0;
+  for (const part of parts) {
+    const m = /^(\d+(?:\.\d+)?)(ns|us|ms|s|m|h)$/.exec(part);
+    if (!m) return null;
+    total += Number(m[1]) * units[m[2]];
+  }
+  return total > 0 ? total : null;
+}
+
 /** Healthcheck intervals come back from inspect in nanoseconds. */
 const NANOSECONDS_PER_MILLISECOND = 1_000_000;
 /** Podman's default when an image declares no explicit interval. */
@@ -1020,11 +1058,9 @@ export function healthcheckIsUnscheduled(info: {
   // container inspected seconds after creation isn't misread as unscheduled.
   const createdMs = Date.parse(String(info.Created ?? ""));
   if (!Number.isFinite(createdMs)) return false;
-  const intervalNs = Number(info.Config?.Healthcheck?.Interval ?? 0);
   const intervalMs =
-    Number.isFinite(intervalNs) && intervalNs > 0
-      ? intervalNs / NANOSECONDS_PER_MILLISECOND
-      : DEFAULT_HEALTH_INTERVAL_MS;
+    healthIntervalMs(info.Config?.Healthcheck?.Interval) ??
+    DEFAULT_HEALTH_INTERVAL_MS;
   return Date.now() - createdMs > intervalMs * UNSCHEDULED_INTERVAL_MARGIN;
 }
 
