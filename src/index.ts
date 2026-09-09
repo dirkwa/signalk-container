@@ -228,10 +228,13 @@ export default (app: App) => {
   // Separate from `healthTimers`, which polls the consumer-supplied
   // `options.healthCheck` callback — a different mechanism entirely.
   const selfHealthTimers = new Map<string, NodeJS.Timeout>();
-  const selfHealthInFlight = new Set<string>();
+  // Keyed by container name, valued by the lifecycle generation that claimed
+  // it. A stale operation completing after remove+recreate must not clear a
+  // marker the NEW lifecycle owns, so cleanup compares the token it stored.
+  const selfHealthInFlight = new Map<string, number>();
   // Claimed for the span of the async scheduling probe, so concurrent
   // ensureRunning calls cannot both install a timer for one container.
-  const selfHealthSetup = new Set<string>();
+  const selfHealthSetup = new Map<string, number>();
   // Bumped by teardown so a probe that started before it does not install
   // its timer afterwards. Checking the timer map alone cannot detect that —
   // teardown empties it, making "removed" indistinguishable from "never had
@@ -1660,7 +1663,7 @@ export default (app: App) => {
         if (selfHealthTimers.has(name) || selfHealthSetup.has(name)) return;
         const generation = selfHealthGeneration.get(name) ?? 0;
         const stopGeneration = selfHealthStopGeneration;
-        selfHealthSetup.add(name);
+        selfHealthSetup.set(name, generation);
         try {
           const live = await inspectForHealthSchedule(
             getClient(),
@@ -1684,10 +1687,17 @@ export default (app: App) => {
           );
           const timer = setInterval(() => {
             if (selfHealthInFlight.has(name)) return;
-            selfHealthInFlight.add(name);
+            const pollGeneration = selfHealthGeneration.get(name) ?? 0;
+            selfHealthInFlight.set(name, pollGeneration);
             void libpodRunHealthcheck(getClient(), prefixedName(name))
               .catch(() => null)
-              .finally(() => selfHealthInFlight.delete(name));
+              .finally(() => {
+                // Only clear the marker this poll set. After remove+recreate
+                // the name is reused, and clearing the new lifecycle's marker
+                // would let its next tick run concurrently with this one.
+                if (selfHealthInFlight.get(name) === pollGeneration)
+                  selfHealthInFlight.delete(name);
+              });
           }, SELF_HEALTHCHECK_POLL_MS);
           selfHealthTimers.set(name, timer);
         } catch (err) {
@@ -1698,7 +1708,9 @@ export default (app: App) => {
             }`,
           );
         } finally {
-          selfHealthSetup.delete(name);
+          // Same reasoning as the poll marker: release only our own claim.
+          if (selfHealthSetup.get(name) === generation)
+            selfHealthSetup.delete(name);
         }
       })();
 
