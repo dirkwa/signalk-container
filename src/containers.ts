@@ -1019,7 +1019,7 @@ const NANOSECONDS_PER_MILLISECOND = 1_000_000;
 /** Podman's default when an image declares no explicit interval. */
 const DEFAULT_HEALTH_INTERVAL_MS = 30_000;
 /** Intervals to wait before calling a check unscheduled rather than pending. */
-const UNSCHEDULED_INTERVAL_MARGIN = 2;
+export const UNSCHEDULED_INTERVAL_MARGIN = 2;
 
 /**
  * Whether this container's own `HEALTHCHECK` is going unrun.
