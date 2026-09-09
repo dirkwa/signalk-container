@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { inspectForHealthSchedule } from "../client.js";
-import type { ContainerClient } from "../client.js";
+import type { InspectOnlyClient } from "../client.js";
 
 /**
  * The scheduling probe runs detached, so this helper's contract is that it
@@ -9,10 +9,8 @@ import type { ContainerClient } from "../client.js";
  * useful context. `safeInspect` only swallows 404s, so anything else — a
  * refused socket, a stopped daemon — has to be caught here.
  */
-function clientWith(inspect: () => Promise<unknown>): ContainerClient {
-  return {
-    getContainer: () => ({ inspect }),
-  } as unknown as ContainerClient;
+function clientWith(inspect: () => Promise<unknown>): InspectOnlyClient {
+  return { getContainer: () => ({ inspect }) };
 }
 
 describe("inspectForHealthSchedule", () => {
@@ -53,11 +51,11 @@ describe("inspectForHealthSchedule", () => {
   });
 
   it("returns null when the client itself throws synchronously", async () => {
-    const client = {
+    const client: InspectOnlyClient = {
       getContainer: () => {
         throw new Error("client reset");
       },
-    } as unknown as ContainerClient;
+    };
     assert.equal(await inspectForHealthSchedule(client, "sk-x"), null);
   });
 });
