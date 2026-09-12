@@ -2833,8 +2833,8 @@ export default (app: App) => {
       (globalThis as any).__signalk_containerManager = api;
 
       // Async init — server does not await start()
+      const generation = startGeneration;
       (async () => {
-        const generation = startGeneration;
         const preference = config.runtime ?? "auto";
         runtimePreference = preference;
         const containerized = isContainerized();
@@ -2892,6 +2892,14 @@ export default (app: App) => {
         await onRuntimeDetected(runtimeInfo);
         localResolveReady();
       })().catch((err) => {
+        // A rejection that arrives after stop() belongs to a plugin that no
+        // longer exists; flagging it would leave an error on the dashboard
+        // that nothing will ever clear. Readiness still settles, so a
+        // consumer holding this start's promise is released either way.
+        if (generation !== startGeneration) {
+          localResolveReady();
+          return;
+        }
         app.setPluginError(
           `Startup failed: ${err instanceof Error ? err.message : String(err)}`,
         );
