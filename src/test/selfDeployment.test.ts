@@ -328,6 +328,10 @@ describe("selfDeployment — no-runtime branch", () => {
       probesWith({
         isContainerized: () => false,
         resolveClient: resolveNone,
+        // No configured endpoint: this asserts the guidance for a host that
+        // never pinned one. A dev box exporting DOCKER_HOST would otherwise
+        // get the configured-endpoint remediation instead.
+        readEnv: () => undefined,
       }),
     );
     assert.equal(result.status, "no-runtime");
@@ -339,6 +343,47 @@ describe("selfDeployment — no-runtime branch", () => {
     assert.match(joined, /apt install podman/);
     assert.match(joined, /podman\.socket/);
     assert.doesNotMatch(joined, /bind-mount/i);
+  });
+
+  it("configured endpoint that did not answer → names it, not 'install a runtime'", async () => {
+    // An operator who pinned an endpoint has already chosen a runtime;
+    // telling them to install one sends them the wrong way. Detection only
+    // ever probes that endpoint, so a typo in it presents as "no runtime".
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({
+        isContainerized: () => false,
+        resolveClient: resolveNone,
+        readEnv: (k: string) =>
+          k === "DOCKER_HOST" ? "unix:///run/nope/podman.sock" : undefined,
+      }),
+    );
+    assert.equal(result.status, "no-runtime");
+    const joined = result.remediation.join("\n");
+    assert.match(joined, /unix:\/\/\/run\/nope\/podman\.sock/);
+    assert.match(joined, /DOCKER_HOST/);
+    assert.equal(
+      joined.includes("Install a runtime"),
+      false,
+      "must not offer install guidance for an endpoint the operator chose",
+    );
+  });
+
+  it("names CONTAINER_HOST when it is the only endpoint set", async () => {
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({
+        isContainerized: () => false,
+        resolveClient: resolveNone,
+        readEnv: (k: string) =>
+          k === "CONTAINER_HOST"
+            ? "/run/user/1000/podman/podman.sock"
+            : undefined,
+      }),
+    );
+    assert.match(result.remediation.join("\n"), /CONTAINER_HOST/);
   });
 
   it("containerized, no socket → no-runtime + socket-mount remediation (no CLI)", async () => {
@@ -353,6 +398,9 @@ describe("selfDeployment — no-runtime branch", () => {
       probesWith({
         isContainerized: () => true,
         resolveClient: resolveNone,
+        // As above: the socket-mount guidance is for a container with no
+        // endpoint pinned, so keep the ambient DOCKER_HOST out of it.
+        readEnv: () => undefined,
       }),
     );
     assert.equal(result.status, "no-runtime");
