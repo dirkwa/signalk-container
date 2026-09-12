@@ -557,7 +557,6 @@ function stripTrailingSlashes(p: string): string {
   return p.slice(0, end);
 }
 
-
 /** Parse an `/etc/group` body into gid -> name. */
 export function parseGroupNames(contents: string): Map<number, string> {
   const byGid = new Map<number, string>();
@@ -607,7 +606,9 @@ export async function probeHostDevice(
     /** Reads a directory on this process's own filesystem. */
     readDir: (p: string) => Promise<string[]>;
     /** Stats a path on this process's own filesystem. */
-    statPath: (p: string) => Promise<{ isCharacterDevice: boolean; gid: number }>;
+    statPath: (
+      p: string,
+    ) => Promise<{ isCharacterDevice: boolean; gid: number }>;
     /** Reads a file on this process's own filesystem. */
     readFile: (p: string) => Promise<string>;
     /** Runs the probe inside a container; null when none can be run. */
@@ -712,7 +713,9 @@ async function readDeviceDir(
   devicePath: string,
   options: {
     readDir: (p: string) => Promise<string[]>;
-    statPath: (p: string) => Promise<{ isCharacterDevice: boolean; gid: number }>;
+    statPath: (
+      p: string,
+    ) => Promise<{ isCharacterDevice: boolean; gid: number }>;
     readFile: (p: string) => Promise<string>;
   },
 ): Promise<HostDeviceProbeResult | null> {
@@ -876,12 +879,12 @@ export function conventionalDeviceGroup(
   if (node.startsWith("renderD")) return "render";
   if (node.startsWith("card")) return "video";
   if (directory !== undefined) {
-    const known = CONVENTIONAL_DIRECTORY_GROUPS[stripTrailingSlashes(directory)];
+    const known =
+      CONVENTIONAL_DIRECTORY_GROUPS[stripTrailingSlashes(directory)];
     if (known !== undefined) return known;
   }
   return null;
 }
-
 
 /**
  * Resolve the group for each device node individually.

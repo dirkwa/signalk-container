@@ -201,7 +201,9 @@ describe("getLiveContainerConfig", () => {
       ),
     );
     assert.ok(result);
-    assert.deepEqual(result.binds, [{ host: "my-volume", container: "/data", readOnly: false }]);
+    assert.deepEqual(result.binds, [
+      { host: "my-volume", container: "/data", readOnly: false },
+    ]);
   });
 
   it("parses Env entries into a Map keyed by name", async () => {

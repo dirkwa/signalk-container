@@ -53,10 +53,7 @@ describe("probeVolumeSource — containerized", () => {
     const exists = visibleTo(["/data/bound"]);
     const bound = (p: string) => p.startsWith("/data/");
     assert.equal(probeVolumeSource("/data/bound", true, exists, bound), true);
-    assert.equal(
-      probeVolumeSource("/data/gone", true, exists, bound),
-      false,
-    );
+    assert.equal(probeVolumeSource("/data/gone", true, exists, bound), false);
   });
 
   it("never returns a bare false without a covering mount", () => {
