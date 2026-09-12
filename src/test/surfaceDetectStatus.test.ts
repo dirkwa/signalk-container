@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { shouldSurfaceDetectStatus } from "../index.js";
 
 /**
- * The re-probe added for the runtime boot race polls once a minute in its
- * steady state. Two failure modes bracket what this rule has to get right:
+ * The runtime boot-race re-probe polls once a minute in its steady state.
+ * Two failure modes bracket what this rule has to get right:
  * repeating identical remediation buries the server log, while never
  * repeating leaves the operator reading advice for a problem they no longer
  * have.
