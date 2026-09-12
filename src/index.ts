@@ -24,6 +24,7 @@ import {
   ResolveResult,
   RuntimePreference,
   SelfDeploymentResult,
+  SelfDeploymentStatus,
   SetupSnippetFormat,
   SetupSnippetResult,
   DeviceIssue,
@@ -242,6 +243,53 @@ const SELF_HEALTHCHECK_PROBE_MIN_RETRY_MS = 10_000;
 
 const MILLISECONDS_PER_SECOND = 1000;
 
+/**
+ * First wait before re-probing for a container runtime, doubling up to
+ * `DETECT_RETRY_MAX_MS`.
+ *
+ * Signal K can start before the runtime socket exists. A rootless podman
+ * socket is socket-activated under the user's systemd instance, so a server
+ * started from a system unit (what `npm i -g signalk-server` installs — it
+ * writes no `After=` at all) routinely probes before the user manager has
+ * brought it up. Without a retry the plugin stays dead until someone restarts
+ * Signal K by hand.
+ */
+const DETECT_RETRY_INITIAL_MS = 5_000;
+
+/**
+ * Ceiling on the re-probe wait. Re-probing is a `stat` plus one `version()`
+ * call, so a steady minute-long poll costs nothing and lets a host that gains
+ * a runtime long after boot heal on its own rather than needing a restart.
+ */
+const DETECT_RETRY_MAX_MS = 60_000;
+
+/**
+ * Doctor statuses worth re-probing for.
+ *
+ * Both mean nothing usable answered yet and that this can change without the
+ * operator doing anything: `no-runtime` when no socket was there at all,
+ * `socket-unreachable` when one existed but its daemon was not listening —
+ * the same boot race one step later.
+ *
+ * `permission-denied` is deliberately absent. A socket answered and refused
+ * us, which is a stable condition an operator fixes (group membership, uid
+ * ownership); re-probing it would replace a clear red error with a silent
+ * loop that never converges.
+ */
+const RETRYABLE_DETECTION_STATUSES: ReadonlySet<SelfDeploymentStatus> = new Set(
+  ["no-runtime", "socket-unreachable"],
+);
+
+/**
+ * Wait before the re-probe following one that waited `currentMs`: double it,
+ * then hold at `DETECT_RETRY_MAX_MS`. Holding rather than giving up is
+ * deliberate — a host that gains a runtime long after boot then recovers on
+ * its own instead of needing a Signal K restart.
+ */
+export function nextDetectRetryDelay(currentMs: number): number {
+  return Math.min(currentMs * 2, DETECT_RETRY_MAX_MS);
+}
+
 // `DEFAULT_KEEP_IMAGE_VERSIONS` and `normalizeKeepImageVersions` live in
 // `./configNormalize.js` so the backend and the React config panel share
 // one contract — a browser-safe module with no node-only imports.
@@ -250,6 +298,12 @@ export default (app: App) => {
   let runtimeInfo: ContainerRuntimeInfo | null = null;
   let runtimePreference: RuntimePreference = "auto";
   let pruneScheduler: PruneScheduler | null = null;
+  // Pending runtime re-probe, so stop() can cancel one that has not fired.
+  let detectRetryTimer: NodeJS.Timeout | null = null;
+  // Whether a detection failure has put an error in front of the operator.
+  // Gates the clear on a later success, so a first attempt that works never
+  // calls setPluginError at all.
+  let detectFailureSurfaced = false;
   const healthTimers = new Map<string, NodeJS.Timeout>();
   // Guards against overlapping health polls per container: a slow check must
   // not race a later one and overwrite the emitter's edge-triggered health
@@ -2795,28 +2849,109 @@ export default (app: App) => {
           const doctor = await selfDeployment(preference);
           const headline = headlineForDoctorStatus(doctor.status);
           app.setPluginError(pluginErrorForDoctor(doctor, headline));
+          detectFailureSurfaced = true;
           if (doctor.remediation.length > 0) {
             app.error(
               `signalk-container deployment doctor — ${headline}:\n${doctor.remediation.join("\n")}`,
             );
           }
           surfaceDeploymentDoctor(doctor);
+          // Resolve readiness on the first attempt whatever the outcome:
+          // whenReady() means "detection has settled once", and a consumer
+          // awaiting it must not block for as long as a host takes to gain a
+          // runtime. Consumers read getRuntime() — null until a retry wins.
           localResolveReady();
+          if (RETRYABLE_DETECTION_STATUSES.has(doctor.status)) {
+            scheduleDetectRetry(DETECT_RETRY_INITIAL_MS);
+          }
           return;
         }
 
-        const hostUser = runtimeInfo.hostUser;
+        await onRuntimeDetected(runtimeInfo);
+        localResolveReady();
+      })().catch((err) => {
+        app.setPluginError(
+          `Startup failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        localResolveReady();
+      });
+
+      /**
+       * Re-probe for a runtime after `delayMs`, doubling the wait up to
+       * `DETECT_RETRY_MAX_MS` for as long as the failure stays retryable.
+       *
+       * Runs only while the plugin is started: stop() clears the timer, and
+       * the detection it performs is the same `detectRuntime` the first
+       * attempt ran, preceded by `resetClient()` so the socket is picked
+       * again rather than re-read from the resolve cache.
+       */
+      function scheduleDetectRetry(delayMs: number): void {
+        detectRetryTimer = setTimeout(() => {
+          detectRetryTimer = null;
+          void (async () => {
+            resetClient();
+            const detected = await detectRuntime(runtimePreference);
+            if (!detected) {
+              const doctor = await selfDeployment(runtimePreference);
+              surfaceDeploymentDoctor(doctor);
+              if (RETRYABLE_DETECTION_STATUSES.has(doctor.status)) {
+                scheduleDetectRetry(nextDetectRetryDelay(delayMs));
+              } else {
+                // No longer retryable (a socket now answers and refuses us):
+                // surface it the way the first attempt would have.
+                const headline = headlineForDoctorStatus(doctor.status);
+                app.setPluginError(pluginErrorForDoctor(doctor, headline));
+                detectFailureSurfaced = true;
+                if (doctor.remediation.length > 0) {
+                  app.error(
+                    `signalk-container deployment doctor — ${headline}:\n${doctor.remediation.join("\n")}`,
+                  );
+                }
+              }
+              return;
+            }
+            app.debug("runtime detected on retry");
+            runtimeInfo = detected;
+            await onRuntimeDetected(detected);
+          })().catch((err) => {
+            app.error(
+              `signalk-container runtime re-probe failed: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          });
+        }, delayMs);
+      }
+
+      /**
+       * Everything that must happen once a runtime is in hand, shared by the
+       * first detection attempt and a later re-probe: status line, the
+       * degraded-host doctor pass, and the prune scheduler.
+       */
+      async function onRuntimeDetected(
+        detected: ContainerRuntimeInfo,
+      ): Promise<void> {
+        const containerized = isContainerized();
+        const preference = runtimePreference;
+        const hostUser = detected.hostUser;
         app.debug(
-          `runtime ready: ${runtimeInfo.runtime} ${runtimeInfo.version}` +
-            `, rootless=${runtimeInfo.isRootless ?? "unknown"}` +
+          `runtime ready: ${detected.runtime} ${detected.version}` +
+            `, rootless=${detected.isRootless ?? "unknown"}` +
             `, hostUser=${hostUser ? `${hostUser.uid}:${hostUser.gid}` : "unavailable"}` +
             `, containerized=${containerized}`,
         );
 
         const statusPrefix = containerized ? "(in-container) " : "";
         app.setPluginStatus(
-          `${statusPrefix}${runtimeInfo.runtime} ${runtimeInfo.version}${runtimeInfo.isPodmanDockerShim ? " (podman shim)" : ""}`,
+          `${statusPrefix}${detected.runtime} ${detected.version}${detected.isPodmanDockerShim ? " (podman shim)" : ""}`,
         );
+        // Only a retry that wins has an error to clear; a first attempt that
+        // succeeds must not touch setPluginError at all, or a healthy host
+        // records an error call it never earned.
+        if (detectFailureSurfaced) {
+          detectFailureSurfaced = false;
+          app.setPluginError("");
+        }
 
         // Runtime detection succeeded, but a container can still run while
         // its host is degraded: cgroup controllers not delegated (memory
@@ -2893,13 +3028,7 @@ export default (app: App) => {
         }
 
         app.debug("Container manager started");
-        localResolveReady();
-      })().catch((err) => {
-        app.setPluginError(
-          `Startup failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
-        localResolveReady();
-      });
+      }
     },
 
     stop() {
@@ -2968,6 +3097,10 @@ export default (app: App) => {
       pendingNetworks = null;
       portAddressMap.clear();
       registeredPorts.clear();
+      if (detectRetryTimer) {
+        clearTimeout(detectRetryTimer);
+        detectRetryTimer = null;
+      }
       // Drop the cached dockerode client so a future start() re-probes the
       // socket (it may have moved, or the runtime may have changed).
       resetClient();
