@@ -2721,6 +2721,16 @@ export default (app: App) => {
     },
 
     start(config: PluginConfig) {
+      // Retire the previous start the same way stop() does. Only stop()
+      // bumping the generation would leave a re-entered start() sharing the
+      // prior one, so an earlier run's in-flight detection would pass every
+      // guard and overwrite this run's runtimeInfo and prune scheduler.
+      startGeneration += 1;
+      detectFailureSurfaced = false;
+      if (detectRetryTimer) {
+        clearTimeout(detectRetryTimer);
+        detectRetryTimer = null;
+      }
       // Fresh whenReady() promise per start — see comment by the
       // declaration above. Reset before the async IIFE so any pending
       // readers either see the new promise or the resolved old one,
@@ -2917,8 +2927,14 @@ export default (app: App) => {
        */
       function scheduleDetectRetry(delayMs: number): void {
         const generation = startGeneration;
-        detectRetryTimer = setTimeout(() => {
-          detectRetryTimer = null;
+        // Named so the callback can compare against its own handle; the
+        // closure body runs long after the assignment completes. Stored in
+        // `detectRetryTimer` below, which is what stop() cancels.
+        const timer: NodeJS.Timeout = setTimeout(() => {
+          // Only clear the handle this callback owns: a later start may have
+          // installed its own timer, and nulling that one would leave it
+          // uncancellable by stop().
+          if (detectRetryTimer === timer) detectRetryTimer = null;
           void (async () => {
             resetClient();
             const detected = await detectRuntime(runtimePreference);
@@ -2954,6 +2970,7 @@ export default (app: App) => {
             );
           });
         }, delayMs);
+        detectRetryTimer = timer;
       }
 
       /**
