@@ -75,4 +75,21 @@ describe("pickSocket — existing-but-refused socket falls back to permission", 
       assert.equal(picked, null);
     },
   );
+
+  // The boot-race shape on a rootless host: the preferred
+  // `/run/user/<uid>/podman/podman.sock` is socket-activated and not there
+  // yet, while the rootful `/run/podman/podman.sock` sits behind a
+  // `0700 root:root` directory and denies us. Returning the denial would pin
+  // the plugin — via `resolveClient`'s cache — to a socket it can never use,
+  // and the operator would have to restart Signal K by hand once the user
+  // socket appeared.
+  it(
+    "prefers null over a denial that a not-yet-present socket outranks",
+    { skip: SKIP },
+    async () => {
+      const absent = join(dir, "notyet.sock");
+      const picked = await _pickSocketForTesting([absent, deniedSock]);
+      assert.equal(picked, null);
+    },
+  );
 });

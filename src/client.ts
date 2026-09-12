@@ -390,6 +390,17 @@ function isPermissionError(err: unknown): boolean {
  * `permission`, and surface the `permission-denied` remediation. A genuinely
  * absent socket (ENOENT) is NOT remembered, so it still falls through to
  * `no-runtime`.
+ *
+ * That fallback is only sound when the refused socket outranks every candidate
+ * that merely wasn't there yet. A rootless host at boot inverts it: the
+ * preferred `/run/user/<uid>/podman/podman.sock` is socket-activated and does
+ * not exist until the user manager has started it, while the rootful
+ * `/run/podman/podman.sock` sits behind a `0700 root:root` directory whose
+ * `stat` raises EACCES for any other user. Remembering the rootful denial and
+ * returning it would pin the plugin to a socket it can never use — and
+ * `resolveClient` caches that for the process lifetime. So a denial is only
+ * returned when no HIGHER-priority candidate was absent; otherwise the absent
+ * preferred socket is the better answer and `null` lets the caller retry.
  */
 async function pickSocket(
   preference: SocketPreference = "auto",
@@ -400,6 +411,15 @@ async function pickSocket(
 } | null> {
   const { candidates, explicit } = override ?? socketCandidates(preference);
   let permissionDenied: { socketPath: string; client: Docker } | null = null;
+  // Set by any candidate that is passed over for a reason OTHER than a
+  // permission denial. Because `candidates` is in priority order and this is
+  // only consulted when a denial was recorded later, it answers exactly one
+  // question: did something the operator would rather we used rank above the
+  // socket that refused us?
+  let outrankedByUnusable = false;
+  const skip = (): void => {
+    if (!permissionDenied) outrankedByUnusable = true;
+  };
   for (const socketPath of candidates) {
     try {
       const s = await stat(socketPath);
@@ -409,6 +429,7 @@ async function pickSocket(
             `Configured endpoint '${socketPath}' is not a socket`,
           );
         }
+        skip();
         continue;
       }
     } catch (err) {
@@ -418,6 +439,8 @@ async function pickSocket(
       // permission remediation rather than "no runtime".
       if (!permissionDenied && isPermissionError(err)) {
         permissionDenied = { socketPath, client: new Docker({ socketPath }) };
+      } else {
+        skip();
       }
       continue;
     }
@@ -433,12 +456,13 @@ async function pickSocket(
       // such candidate so we can fall back to it if nothing else answers.
       if (!permissionDenied && isPermissionError(err)) {
         permissionDenied = { socketPath, client };
+      } else {
+        // Socket exists but doesn't answer the API (wrong uid, dead daemon).
+        skip();
       }
-      // Otherwise: socket exists but doesn't answer the API (wrong uid, dead
-      // daemon) — try the next candidate.
     }
   }
-  return permissionDenied;
+  return outrankedByUnusable ? null : permissionDenied;
 }
 
 export interface ResolvedClient {
