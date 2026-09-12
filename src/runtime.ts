@@ -433,7 +433,7 @@ export function honoursVolumeSubpath(version: string | null): boolean {
   return atLeast(version, VOLUME_SUBPATH_MIN);
 }
 
-export async function detectRuntime(
+async function detectRuntimeImpl(
   preference: RuntimePreference,
 ): Promise<ContainerRuntimeInfo | null> {
   const resolved = await resolveClient(preference);
@@ -473,6 +473,34 @@ export async function detectRuntime(
     socketPath,
     isContainerized: isContainerized(),
   };
+}
+
+let currentDetectRuntime: (
+  preference: RuntimePreference,
+) => Promise<ContainerRuntimeInfo | null> = detectRuntimeImpl;
+
+/**
+ * Resolve the container runtime. Forwards to the real probe unless a test has
+ * substituted one — the indirection exists so a test can hold detection
+ * pending, which is the only way to stage the plugin's start/stop lifecycle
+ * races at the function boundary.
+ */
+export function detectRuntime(
+  preference: RuntimePreference,
+): Promise<ContainerRuntimeInfo | null> {
+  return currentDetectRuntime(preference);
+}
+
+/**
+ * Test-only override for the runtime probe, mirroring
+ * `_setCurrentHostIdsForTesting`. Pass `null` to restore the real one.
+ */
+export function _setDetectRuntimeForTesting(
+  fn:
+    | ((preference: RuntimePreference) => Promise<ContainerRuntimeInfo | null>)
+    | null,
+): void {
+  currentDetectRuntime = fn ?? detectRuntimeImpl;
 }
 
 /**
