@@ -2849,8 +2849,13 @@ export default (app: App) => {
         // A stop() during that await already tore the plugin down. Returning
         // before the assignment keeps the stopped instance from regaining a
         // runtime — and keeps the helpers below from capturing the bumped
-        // generation and mistaking themselves for current.
-        if (generation !== startGeneration) return;
+        // generation and mistaking themselves for current. Readiness still
+        // settles: whenReady() promises one resolution per start, and a
+        // consumer awaiting this start's promise must not hang on a stop.
+        if (generation !== startGeneration) {
+          localResolveReady();
+          return;
+        }
         runtimeInfo = initial;
         app.debug("detectRuntime result: %o", runtimeInfo);
 
@@ -2860,7 +2865,10 @@ export default (app: App) => {
           // land in the Signal K server log; setPluginError stays
           // short because it shows inline in the admin UI.
           const doctor = await selfDeployment(preference);
-          if (generation !== startGeneration) return;
+          if (generation !== startGeneration) {
+            localResolveReady();
+            return;
+          }
           const headline = headlineForDoctorStatus(doctor.status);
           app.setPluginError(pluginErrorForDoctor(doctor, headline));
           detectFailureSurfaced = true;
