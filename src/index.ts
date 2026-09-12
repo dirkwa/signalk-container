@@ -2834,6 +2834,7 @@ export default (app: App) => {
 
       // Async init — server does not await start()
       (async () => {
+        const generation = startGeneration;
         const preference = config.runtime ?? "auto";
         runtimePreference = preference;
         const containerized = isContainerized();
@@ -2844,7 +2845,13 @@ export default (app: App) => {
           );
         }
         app.debug("detecting runtime, preference=%s", preference);
-        runtimeInfo = await detectRuntime(preference);
+        const initial = await detectRuntime(preference);
+        // A stop() during that await already tore the plugin down. Returning
+        // before the assignment keeps the stopped instance from regaining a
+        // runtime — and keeps the helpers below from capturing the bumped
+        // generation and mistaking themselves for current.
+        if (generation !== startGeneration) return;
+        runtimeInfo = initial;
         app.debug("detectRuntime result: %o", runtimeInfo);
 
         if (!runtimeInfo) {
@@ -2853,6 +2860,7 @@ export default (app: App) => {
           // land in the Signal K server log; setPluginError stays
           // short because it shows inline in the admin UI.
           const doctor = await selfDeployment(preference);
+          if (generation !== startGeneration) return;
           const headline = headlineForDoctorStatus(doctor.status);
           app.setPluginError(pluginErrorForDoctor(doctor, headline));
           detectFailureSurfaced = true;
