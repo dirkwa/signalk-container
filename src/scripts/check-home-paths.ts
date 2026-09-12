@@ -35,7 +35,9 @@ export function findHardcodedHomePaths(root: string): string[] {
   for (const file of walk(root)) {
     const matches = readFileSync(file, "utf8").match(HARDCODED_PATH_RE);
     if (matches) {
-      errors.push(`${relative(root, file)}: ${[...new Set(matches)].join(", ")}`);
+      errors.push(
+        `${relative(root, file)}: ${[...new Set(matches)].join(", ")}`,
+      );
     }
   }
   return errors;

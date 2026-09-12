@@ -19,7 +19,10 @@ describe("cachedProbe", () => {
       return Promise.resolve(FOUND);
     };
     assert.deepEqual(await cachedProbe(cache, "/dev/dri", 0, TTL, run), FOUND);
-    assert.deepEqual(await cachedProbe(cache, "/dev/dri", 100, TTL, run), FOUND);
+    assert.deepEqual(
+      await cachedProbe(cache, "/dev/dri", 100, TTL, run),
+      FOUND,
+    );
     assert.equal(runs, 1);
   });
 

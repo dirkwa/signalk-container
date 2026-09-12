@@ -270,7 +270,11 @@ describe("classifyVolumeSources — unverifiable host source", () => {
         "/d": { source: "/host/blind-required", ifMissing: "abort" },
       },
       (path) =>
-        path === "/host/seen" ? true : path === "/host/gone" ? false : "unknown",
+        path === "/host/seen"
+          ? true
+          : path === "/host/gone"
+            ? false
+            : "unknown",
     );
     assert.deepEqual(r.kept, {
       "/a": "/host/seen",
