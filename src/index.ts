@@ -390,14 +390,24 @@ export default (app: App) => {
   // start()'s IIFE once detectRuntime has settled (success or failure).
   // Consumers `await api.whenReady()` to replace the manual
   // "while (Date.now() < deadline && !getRuntime()) await sleep(1000)"
-  // polling pattern. The resolver itself is a per-start local captured
-  // by the IIFE — see start() — so overlapping start() calls (in
-  // theory possible if SignalK ever re-enters) can't fire each
-  // other's promises.
+  // polling pattern.
   let readyPromise = new Promise<void>(() => {
     // initial placeholder — replaced before whenReady() ever resolves
     // because start() reassigns readyPromise first thing.
   });
+
+  // Resolver for the promise above. Kept at plugin scope rather than as a
+  // per-start local so stop() can settle a start whose detection is still
+  // in flight: the generation guards resolve on every path they take, but
+  // only once the awaited call returns, and a socket connect that never
+  // settles would otherwise leave whenReady() pending for good. start()
+  // overwrites the slot, so a superseded start can no more fire the current
+  // promise than it could when the resolver was a local.
+  let activeResolveReady: (() => void) | null = null;
+  const settleReady = (): void => {
+    activeResolveReady?.();
+    activeResolveReady = null;
+  };
 
   /**
    * Per-container state for resource limit management:
@@ -2731,16 +2741,19 @@ export default (app: App) => {
         clearTimeout(detectRetryTimer);
         detectRetryTimer = null;
       }
-      // Fresh whenReady() promise per start — see comment by the
-      // declaration above. Reset before the async IIFE so any pending
-      // readers either see the new promise or the resolved old one,
-      // never a stale promise pointing at the prior run. The resolver
-      // is captured into `localResolveReady` (closed over by the IIFE
-      // below) so overlapping start() calls can't fire each other's
-      // promises.
+      // Fresh whenReady() promise per start — see comment by the declaration
+      // above. Settle the outgoing one first: a consumer that already awaited
+      // the previous promise still holds it, and overwriting the resolver
+      // without firing would strand them. Only then reset, so any new reader
+      // sees this run's promise and never a stale one.
+      settleReady();
       let localResolveReady: () => void = () => {};
       readyPromise = new Promise<void>((r) => {
-        localResolveReady = r;
+        localResolveReady = () => {
+          activeResolveReady = null;
+          r();
+        };
+        activeResolveReady = localResolveReady;
       });
 
       // Cache the full config object so recordOverride() can rebuild it
@@ -3159,6 +3172,10 @@ export default (app: App) => {
         clearTimeout(detectRetryTimer);
         detectRetryTimer = null;
       }
+      // Release anyone awaiting whenReady() for a detection that is still in
+      // flight. The generation bump above already keeps that detection from
+      // touching state when it finally returns.
+      settleReady();
       // Drop the cached dockerode client so a future start() re-probes the
       // socket (it may have moved, or the runtime may have changed).
       resetClient();
