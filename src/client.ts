@@ -411,15 +411,12 @@ async function pickSocket(
 } | null> {
   const { candidates, explicit } = override ?? socketCandidates(preference);
   let permissionDenied: { socketPath: string; client: Docker } | null = null;
-  // Set by any candidate that is passed over for a reason OTHER than a
-  // permission denial. Because `candidates` is in priority order and this is
-  // only consulted when a denial was recorded later, it answers exactly one
-  // question: did something the operator would rather we used rank above the
-  // socket that refused us?
-  let outrankedByUnusable = false;
-  const skip = (): void => {
-    if (!permissionDenied) outrankedByUnusable = true;
-  };
+  // Set when a candidate ranked above the denial simply was not there yet.
+  // Deliberately narrower than "was skipped": a stale plain file, an
+  // unreadable parent, or a socket whose daemon is dead are all conditions
+  // the denial's remediation still outranks, and suppressing it for those
+  // would trade a fixable `group_add` message for an endless no-runtime poll.
+  let outrankedByAbsent = false;
   for (const socketPath of candidates) {
     try {
       const s = await stat(socketPath);
@@ -429,7 +426,6 @@ async function pickSocket(
             `Configured endpoint '${socketPath}' is not a socket`,
           );
         }
-        skip();
         continue;
       }
     } catch (err) {
@@ -439,8 +435,11 @@ async function pickSocket(
       // permission remediation rather than "no runtime".
       if (!permissionDenied && isPermissionError(err)) {
         permissionDenied = { socketPath, client: new Docker({ socketPath }) };
-      } else {
-        skip();
+      } else if (
+        !permissionDenied &&
+        (err as NodeJS.ErrnoException | null)?.code === "ENOENT"
+      ) {
+        outrankedByAbsent = true;
       }
       continue;
     }
@@ -456,13 +455,12 @@ async function pickSocket(
       // such candidate so we can fall back to it if nothing else answers.
       if (!permissionDenied && isPermissionError(err)) {
         permissionDenied = { socketPath, client };
-      } else {
-        // Socket exists but doesn't answer the API (wrong uid, dead daemon).
-        skip();
       }
+      // Otherwise: socket exists but doesn't answer the API (wrong uid, dead
+      // daemon) — try the next candidate.
     }
   }
-  return outrankedByUnusable ? null : permissionDenied;
+  return outrankedByAbsent ? null : permissionDenied;
 }
 
 export interface ResolvedClient {
