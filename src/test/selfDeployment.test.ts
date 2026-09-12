@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { selfDeployment, type SelfDeploymentProbes } from "../doctor.js";
 import type { ContainerClient, ResolvedClient } from "../client.js";
+import { EndpointConfigError } from "../client.js";
 import { makeMockClient } from "./helpers/mockClient.js";
 
 const TEST_SOCKET = "/run/test/podman.sock";
@@ -343,6 +344,35 @@ describe("selfDeployment — no-runtime branch", () => {
     assert.match(joined, /apt install podman/);
     assert.match(joined, /podman\.socket/);
     assert.doesNotMatch(joined, /bind-mount/i);
+  });
+
+  it("a rejected endpoint becomes remediation, not a thrown doctor", async () => {
+    // selfDeployment() is documented as never throwing: it is what an
+    // operator reaches for when something is already broken, and a rejected
+    // request hands them a 500 instead of the fix. resolveClient rethrows
+    // EndpointConfigError by design, so the doctor has to absorb it.
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({
+        isContainerized: () => false,
+        resolveClient: () =>
+          Promise.reject(
+            new EndpointConfigError(
+              "Unsupported container socket endpoint 'tcp://10.0.0.1:2375'; only unix sockets (unix://… or an absolute path) are supported",
+            ),
+          ),
+        readEnv: (k: string) =>
+          k === "DOCKER_HOST" ? "tcp://10.0.0.1:2375" : undefined,
+      }),
+    );
+    assert.equal(result.status, "no-runtime");
+    assert.match(result.daemon.error ?? "", /Unsupported container socket/);
+    const joined = result.remediation.join("\n");
+    assert.match(joined, /not usable/);
+    assert.match(joined, /Only unix sockets are supported/);
+    // Retrying cannot fix a malformed value, so it must not suggest waiting.
+    assert.doesNotMatch(joined, /Detection retries on its own/);
   });
 
   it("configured endpoint that did not answer → names it, not 'install a runtime'", async () => {

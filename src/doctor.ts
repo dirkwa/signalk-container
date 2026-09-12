@@ -19,6 +19,7 @@ import {
   type ContainerClient,
   type LibpodNetworkBackendInfo,
   type ResolvedClient,
+  EndpointConfigError,
   getClient,
   libpodNetworkBackendInfo,
   resolveClient,
@@ -641,7 +642,19 @@ export async function selfDeployment(
   // probed. The order matters — reading them the other way round would name a
   // variable detection never consulted.
   const configuredEndpoint = env.DOCKER_HOST ?? env.CONTAINER_HOST ?? null;
-  const resolved = await probeResolveClient();
+  // `selfDeployment` promises never to throw — it is the thing an operator
+  // reaches for when something is already broken, and a rejected request
+  // gives them a 500 instead of the fix. A malformed endpoint rejects out of
+  // `resolveClient` by design; catch it here and report it as the
+  // configuration problem it is.
+  let endpointConfigError: string | null = null;
+  let resolved: ResolvedClient | null = null;
+  try {
+    resolved = await probeResolveClient();
+  } catch (err) {
+    if (!(err instanceof EndpointConfigError)) throw err;
+    endpointConfigError = err.message;
+  }
   if (!resolved) {
     return {
       isContainerized: containerized,
@@ -655,7 +668,9 @@ export async function selfDeployment(
         // (CONTAINER_HOST for podman, DOCKER_HOST for docker) as the
         // troubleshooting hint, rather than hardcoding the docker var.
         socketPath: env.CONTAINER_HOST ?? env.DOCKER_HOST ?? null,
-        error: "no container runtime socket answered the Docker API",
+        error:
+          endpointConfigError ??
+          "no container runtime socket answered the Docker API",
       },
       env,
       selfId: { value: null, source: null },
@@ -668,7 +683,11 @@ export async function selfDeployment(
       // — the runtime is chosen, it just did not answer. Name the endpoint
       // and the variable that set it instead.
       remediation: configuredEndpoint
-        ? remediationConfiguredEndpoint(configuredEndpoint, env)
+        ? remediationConfiguredEndpoint(
+            configuredEndpoint,
+            env,
+            endpointConfigError,
+          )
         : containerized
           ? REMEDIATION_NO_RUNTIME_CONTAINERIZED
           : REMEDIATION_NO_RUNTIME_BARE_METAL,
@@ -1230,8 +1249,25 @@ function remediationForDaemonFailure(
 function remediationConfiguredEndpoint(
   endpoint: string,
   env: SelfDeploymentResult["env"],
+  configError: string | null,
 ): string[] {
   const variable = env.DOCKER_HOST ? "DOCKER_HOST" : "CONTAINER_HOST";
+  // A rejected endpoint is a different problem from one that simply did not
+  // answer: retrying cannot fix it, so say what is wrong with the value
+  // rather than suggesting the socket might appear.
+  if (configError) {
+    return [
+      `Configured runtime endpoint is not usable: ${configError}`,
+      `(from ${variable})`,
+      "",
+      "Only unix sockets are supported — either an absolute path or a",
+      "unix:// URL pointing at the runtime's socket, for example:",
+      "  CONTAINER_HOST=unix:///run/user/$(id -u)/podman/podman.sock",
+      "  DOCKER_HOST=unix:///var/run/docker.sock",
+      "",
+      "Unset the variable to fall back to the conventional socket paths.",
+    ];
+  }
   return [
     `Configured runtime endpoint did not answer: ${endpoint}`,
     `(from ${variable} — detection uses only this endpoint, never the`,
