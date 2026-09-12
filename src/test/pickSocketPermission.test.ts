@@ -1,7 +1,13 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import net from "node:net";
-import { chmodSync, mkdtempSync, rmSync, unlinkSync } from "node:fs";
+import {
+  chmodSync,
+  mkdtempSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { _pickSocketForTesting } from "../client.js";
@@ -90,6 +96,21 @@ describe("pickSocket — existing-but-refused socket falls back to permission", 
       const absent = join(dir, "notyet.sock");
       const picked = await _pickSocketForTesting([absent, deniedSock]);
       assert.equal(picked, null);
+    },
+  );
+
+  // Only genuine absence outranks a denial. Every other way a higher-priority
+  // candidate can fail leaves the denial the most useful thing we know: its
+  // remediation is actionable, whereas suppressing it would report no-runtime
+  // and leave the caller re-probing a host whose real fix is an ACL change.
+  it(
+    "still returns the denial when a higher-priority path is not a socket",
+    { skip: SKIP },
+    async () => {
+      const plainFile = join(dir, "stale.sock");
+      writeFileSync(plainFile, "");
+      const picked = await _pickSocketForTesting([plainFile, deniedSock]);
+      assert.equal(picked, deniedSock);
     },
   );
 });
