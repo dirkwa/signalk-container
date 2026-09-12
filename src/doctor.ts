@@ -664,10 +664,10 @@ export async function selfDeployment(
         reachable: false,
         rootless: null,
         // No runtime was detected, so there's no binary kind to key on —
-        // surface whichever explicit endpoint the operator configured
-        // (CONTAINER_HOST for podman, DOCKER_HOST for docker) as the
-        // troubleshooting hint, rather than hardcoding the docker var.
-        socketPath: env.CONTAINER_HOST ?? env.DOCKER_HOST ?? null,
+        // surface the endpoint detection actually used as the troubleshooting
+        // hint. Shares `configuredEndpoint` with the remediation below so the
+        // two can never name different variables.
+        socketPath: configuredEndpoint,
         error:
           endpointConfigError ??
           "no container runtime socket answered the Docker API",

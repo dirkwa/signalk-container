@@ -400,6 +400,30 @@ describe("selfDeployment — no-runtime branch", () => {
     );
   });
 
+  it("reports DOCKER_HOST when both variables are set", async () => {
+    // socketCandidates reads DOCKER_HOST ?? CONTAINER_HOST, so that is the
+    // only endpoint probed. Reporting the other one would send the operator
+    // to check a socket detection never touched.
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({
+        isContainerized: () => false,
+        resolveClient: resolveNone,
+        readEnv: (k: string) =>
+          k === "DOCKER_HOST"
+            ? "/run/docker-endpoint.sock"
+            : k === "CONTAINER_HOST"
+              ? "/run/podman-endpoint.sock"
+              : undefined,
+      }),
+    );
+    assert.equal(result.daemon.socketPath, "/run/docker-endpoint.sock");
+    const joined = result.remediation.join("\n");
+    assert.match(joined, /DOCKER_HOST/);
+    assert.doesNotMatch(joined, /podman-endpoint\.sock/);
+  });
+
   it("names CONTAINER_HOST when it is the only endpoint set", async () => {
     const result = await selfDeployment(
       "auto",
