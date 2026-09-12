@@ -400,9 +400,9 @@ export default (app: App) => {
   // per-start local so stop() can settle a start whose detection is still
   // in flight: the generation guards resolve on every path they take, but
   // only once the awaited call returns, and a socket connect that never
-  // settles would otherwise leave whenReady() pending for good. start()
-  // overwrites the slot, so a superseded start can no more fire the current
-  // promise than it could when the resolver was a local.
+  // settles would otherwise leave whenReady() pending for good. Each start
+  // owns the slot it installs — a superseded start's resolver still fires
+  // its own promise, but must not clear a successor's.
   let activeResolveReady: (() => void) | null = null;
   const settleReady = (): void => {
     activeResolveReady?.();
@@ -2750,7 +2750,12 @@ export default (app: App) => {
       let localResolveReady: () => void = () => {};
       readyPromise = new Promise<void>((r) => {
         localResolveReady = () => {
-          activeResolveReady = null;
+          // Clear only our own slot: a later start may have installed its
+          // resolver, and a stale closure firing after that would otherwise
+          // leave stop() with nothing to settle and hang the newer promise.
+          if (activeResolveReady === localResolveReady) {
+            activeResolveReady = null;
+          }
           r();
         };
         activeResolveReady = localResolveReady;
