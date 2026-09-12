@@ -304,6 +304,12 @@ export default (app: App) => {
   // Gates the clear on a later success, so a first attempt that works never
   // calls setPluginError at all.
   let detectFailureSurfaced = false;
+  // Bumped by stop(). A re-probe captures it before its first await and
+  // rechecks after each one: clearTimeout cannot reach a callback that has
+  // already fired and is sitting in `await detectRuntime(...)`, so without
+  // this a stop landing in that window would still assign runtimeInfo and
+  // start a PruneScheduler after teardown.
+  let startGeneration = 0;
   const healthTimers = new Map<string, NodeJS.Timeout>();
   // Guards against overlapping health polls per container: a slow check must
   // not race a later one and overwrite the emitter's edge-triggered health
@@ -2886,13 +2892,16 @@ export default (app: App) => {
        * again rather than re-read from the resolve cache.
        */
       function scheduleDetectRetry(delayMs: number): void {
+        const generation = startGeneration;
         detectRetryTimer = setTimeout(() => {
           detectRetryTimer = null;
           void (async () => {
             resetClient();
             const detected = await detectRuntime(runtimePreference);
+            if (generation !== startGeneration) return;
             if (!detected) {
               const doctor = await selfDeployment(runtimePreference);
+              if (generation !== startGeneration) return;
               surfaceDeploymentDoctor(doctor);
               if (RETRYABLE_DETECTION_STATUSES.has(doctor.status)) {
                 scheduleDetectRetry(nextDetectRetryDelay(delayMs));
@@ -2931,6 +2940,7 @@ export default (app: App) => {
       async function onRuntimeDetected(
         detected: ContainerRuntimeInfo,
       ): Promise<void> {
+        const generation = startGeneration;
         const containerized = isContainerized();
         const preference = runtimePreference;
         const hostUser = detected.hostUser;
@@ -2960,6 +2970,10 @@ export default (app: App) => {
         // with a green status hiding a real problem. The headline mirrors
         // the no-runtime path; full remediation goes to the server log.
         const doctor = await selfDeployment(preference);
+        // A stop that landed in that await already tore down the plugin;
+        // surfacing a status or starting the prune scheduler now would
+        // resurrect state stop() just cleared.
+        if (generation !== startGeneration) return;
         const surfacing = doctorSurfacing(
           doctor.status,
           doctor.remediation.length,
@@ -3097,6 +3111,9 @@ export default (app: App) => {
       pendingNetworks = null;
       portAddressMap.clear();
       registeredPorts.clear();
+      // Invalidates any re-probe already past its clearTimeout window.
+      startGeneration += 1;
+      detectFailureSurfaced = false;
       if (detectRetryTimer) {
         clearTimeout(detectRetryTimer);
         detectRetryTimer = null;
