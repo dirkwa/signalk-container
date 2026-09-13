@@ -42,6 +42,16 @@ Do not add error handling, fallbacks, or validation for scenarios that cannot ha
   - `npm test` — unit only (`dist/test/*.test.js`, no recursion). Safe to run anywhere.
   - `npm run test:integration` — integration only (`dist/test/integration/*.test.js`). Requires podman or docker; tests still self-skip on Windows and when no runtime is found.
   - `npm run test:all` — both. The pre-PR full sweep on a dev box.
+- **Manual verification scripts** live in `src/scripts/tests/` and are run by
+  hand from `dist/scripts/tests/`, never by any `npm test` script. They exist
+  for behaviour a suite cannot honestly assert: real backoff intervals
+  elapsing, a socket appearing mid-run, anything needing tens of seconds of
+  wall clock or a live host socket to manipulate. Keep them out of the suite —
+  a unit test that sleeps 15s is one everybody learns to skip. Each script
+  should exit non-zero on regression so it can still be driven from a shell.
+  `verify-runtime-recovery.ts` is the model: it boots the real plugin against
+  a socket that does not exist yet, makes it appear, and asserts the plugin
+  recovers without a restart.
 - **Known Windows CI flake.** `node --test` intermittently marks a whole test
   file failed with a bare `'test failed'` at `:1:1` while every assertion
   inside it passed — the file's child process exits non-zero after its work
