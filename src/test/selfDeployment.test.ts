@@ -424,6 +424,31 @@ describe("selfDeployment — no-runtime branch", () => {
     assert.doesNotMatch(joined, /podman-endpoint\.sock/);
   });
 
+  it("quotes an endpoint path before putting it in a pasteable command", async () => {
+    // The endpoint is operator-set and lands in a command we invite them to
+    // paste. An unquoted path with a space would check the wrong file; one
+    // with metacharacters would run something they did not intend.
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({
+        isContainerized: () => false,
+        resolveClient: resolveNone,
+        readEnv: (k: string) =>
+          k === "DOCKER_HOST"
+            ? "/run/my sockets/podman.sock; touch /tmp/pwned"
+            : undefined,
+      }),
+    );
+    const ls = result.remediation.find((l) => l.includes("ls -l"));
+    assert.ok(ls, "remediation should offer an ls command");
+    assert.match(
+      ls,
+      /ls -l -- '\/run\/my sockets\/podman\.sock; touch \/tmp\/pwned'/,
+      "the path must be single-quoted and guarded with --",
+    );
+  });
+
   it("names CONTAINER_HOST when it is the only endpoint set", async () => {
     const result = await selfDeployment(
       "auto",

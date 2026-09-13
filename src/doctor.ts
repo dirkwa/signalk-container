@@ -1246,6 +1246,18 @@ function remediationForDaemonFailure(
  * in effect — `DOCKER_HOST` wins over `CONTAINER_HOST` in `socketCandidates`,
  * and an operator who set both needs to know which one is being used.
  */
+/**
+ * Wrap a value in single quotes for a POSIX shell, escaping any it contains.
+ *
+ * The endpoint comes from an operator-set environment variable and lands in a
+ * command we invite them to paste. A path holding a space would otherwise
+ * check the wrong file, and one holding shell metacharacters would run
+ * something they did not intend.
+ */
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
 function remediationConfiguredEndpoint(
   endpoint: string,
   env: SelfDeploymentResult["env"],
@@ -1274,7 +1286,7 @@ function remediationConfiguredEndpoint(
     "conventional socket paths, so a typo here looks like no runtime.)",
     "",
     "Check the socket exists and this user can reach it:",
-    `  ls -l ${endpoint.replace(/^unix:\/\//, "")}`,
+    `  ls -l -- ${shellQuote(endpoint.replace(/^unix:\/\//, ""))}`,
     "",
     "For rootless podman, the socket is started on demand by the user's",
     "systemd instance:",
