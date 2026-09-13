@@ -330,6 +330,19 @@ export type SocketPreference = "auto" | "podman" | "docker";
  * "auto" keeps the historical podman-first order. `/var/run/docker.sock` is the
  * universal-installer bind-mount target.
  */
+/**
+ * An explicitly configured endpoint that is wrong in a way no amount of
+ * waiting fixes: a scheme we do not speak, or a path that exists and is not a
+ * socket. Distinguished from an endpoint that is merely unreachable, because
+ * detection retries the latter and must not spin forever on the former.
+ */
+export class EndpointConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "EndpointConfigError";
+  }
+}
+
 function socketCandidates(preference: SocketPreference = "auto"): {
   candidates: string[];
   explicit: boolean;
@@ -337,7 +350,7 @@ function socketCandidates(preference: SocketPreference = "auto"): {
   const envEndpoint = process.env.DOCKER_HOST ?? process.env.CONTAINER_HOST;
   if (envEndpoint) {
     if (!envEndpoint.startsWith("unix://") && !envEndpoint.startsWith("/")) {
-      throw new Error(
+      throw new EndpointConfigError(
         `Unsupported container socket endpoint '${envEndpoint}'; only unix sockets (unix://… or an absolute path) are supported`,
       );
     }
@@ -422,7 +435,7 @@ async function pickSocket(
       const s = await stat(socketPath);
       if (!s.isSocket()) {
         if (explicit) {
-          throw new Error(
+          throw new EndpointConfigError(
             `Configured endpoint '${socketPath}' is not a socket`,
           );
         }
@@ -479,12 +492,27 @@ let cached: ResolvedClient | null = null;
  * Resolve (once) and cache the dockerode client + its socket path. Returns
  * `null` when no socket answers — the caller surfaces this as "no container
  * runtime" via the doctor. Re-resolves after `resetClient()`.
+ *
+ * An explicitly configured endpoint fails closed inside `pickSocket` so we
+ * never silently manage a daemon the operator did not select. That throw is
+ * translated here: an endpoint that is simply not answering yet is a
+ * transient condition and reported as `null`, the same as any other socket
+ * that did not respond, so detection retries it rather than giving up until
+ * the next restart. `EndpointConfigError` — a scheme we do not speak, or a
+ * path that is not a socket — is an operator mistake that retrying cannot
+ * fix, so it still propagates.
  */
 export async function resolveClient(
   preference: SocketPreference = "auto",
 ): Promise<ResolvedClient | null> {
   if (cached) return cached;
-  const picked = await pickSocket(preference);
+  let picked: Awaited<ReturnType<typeof pickSocket>>;
+  try {
+    picked = await pickSocket(preference);
+  } catch (err) {
+    if (err instanceof EndpointConfigError) throw err;
+    return null;
+  }
   if (!picked) return null;
   cached = { client: picked.client, socketPath: picked.socketPath };
   return cached;

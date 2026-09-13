@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { selfDeployment, type SelfDeploymentProbes } from "../doctor.js";
 import type { ContainerClient, ResolvedClient } from "../client.js";
+import { EndpointConfigError } from "../client.js";
 import { makeMockClient } from "./helpers/mockClient.js";
 
 const TEST_SOCKET = "/run/test/podman.sock";
@@ -328,6 +329,10 @@ describe("selfDeployment — no-runtime branch", () => {
       probesWith({
         isContainerized: () => false,
         resolveClient: resolveNone,
+        // No configured endpoint: this asserts the guidance for a host that
+        // never pinned one. A dev box exporting DOCKER_HOST would otherwise
+        // get the configured-endpoint remediation instead.
+        readEnv: () => undefined,
       }),
     );
     assert.equal(result.status, "no-runtime");
@@ -339,6 +344,125 @@ describe("selfDeployment — no-runtime branch", () => {
     assert.match(joined, /apt install podman/);
     assert.match(joined, /podman\.socket/);
     assert.doesNotMatch(joined, /bind-mount/i);
+  });
+
+  it("a rejected endpoint becomes remediation, not a thrown doctor", async () => {
+    // selfDeployment() is documented as never throwing: it is what an
+    // operator reaches for when something is already broken, and a rejected
+    // request hands them a 500 instead of the fix. resolveClient rethrows
+    // EndpointConfigError by design, so the doctor has to absorb it.
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({
+        isContainerized: () => false,
+        resolveClient: () =>
+          Promise.reject(
+            new EndpointConfigError(
+              "Unsupported container socket endpoint 'tcp://10.0.0.1:2375'; only unix sockets (unix://… or an absolute path) are supported",
+            ),
+          ),
+        readEnv: (k: string) =>
+          k === "DOCKER_HOST" ? "tcp://10.0.0.1:2375" : undefined,
+      }),
+    );
+    assert.equal(result.status, "no-runtime");
+    assert.match(result.daemon.error ?? "", /Unsupported container socket/);
+    const joined = result.remediation.join("\n");
+    assert.match(joined, /not usable/);
+    assert.match(joined, /Only unix sockets are supported/);
+    // Retrying cannot fix a malformed value, so it must not suggest waiting.
+    assert.doesNotMatch(joined, /Detection retries on its own/);
+  });
+
+  it("configured endpoint that did not answer → names it, not 'install a runtime'", async () => {
+    // An operator who pinned an endpoint has already chosen a runtime;
+    // telling them to install one sends them the wrong way. Detection only
+    // ever probes that endpoint, so a typo in it presents as "no runtime".
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({
+        isContainerized: () => false,
+        resolveClient: resolveNone,
+        readEnv: (k: string) =>
+          k === "DOCKER_HOST" ? "unix:///run/nope/podman.sock" : undefined,
+      }),
+    );
+    assert.equal(result.status, "no-runtime");
+    const joined = result.remediation.join("\n");
+    assert.match(joined, /unix:\/\/\/run\/nope\/podman\.sock/);
+    assert.match(joined, /DOCKER_HOST/);
+    assert.equal(
+      joined.includes("Install a runtime"),
+      false,
+      "must not offer install guidance for an endpoint the operator chose",
+    );
+  });
+
+  it("reports DOCKER_HOST when both variables are set", async () => {
+    // socketCandidates reads DOCKER_HOST ?? CONTAINER_HOST, so that is the
+    // only endpoint probed. Reporting the other one would send the operator
+    // to check a socket detection never touched.
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({
+        isContainerized: () => false,
+        resolveClient: resolveNone,
+        readEnv: (k: string) =>
+          k === "DOCKER_HOST"
+            ? "/run/docker-endpoint.sock"
+            : k === "CONTAINER_HOST"
+              ? "/run/podman-endpoint.sock"
+              : undefined,
+      }),
+    );
+    assert.equal(result.daemon.socketPath, "/run/docker-endpoint.sock");
+    const joined = result.remediation.join("\n");
+    assert.match(joined, /DOCKER_HOST/);
+    assert.doesNotMatch(joined, /podman-endpoint\.sock/);
+  });
+
+  it("quotes an endpoint path before putting it in a pasteable command", async () => {
+    // The endpoint is operator-set and lands in a command we invite them to
+    // paste. An unquoted path with a space would check the wrong file; one
+    // with metacharacters would run something they did not intend.
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({
+        isContainerized: () => false,
+        resolveClient: resolveNone,
+        readEnv: (k: string) =>
+          k === "DOCKER_HOST"
+            ? "/run/my sockets/podman.sock; touch /tmp/pwned"
+            : undefined,
+      }),
+    );
+    const ls = result.remediation.find((l) => l.includes("ls -l"));
+    assert.ok(ls, "remediation should offer an ls command");
+    assert.match(
+      ls,
+      /ls -l -- '\/run\/my sockets\/podman\.sock; touch \/tmp\/pwned'/,
+      "the path must be single-quoted and guarded with --",
+    );
+  });
+
+  it("names CONTAINER_HOST when it is the only endpoint set", async () => {
+    const result = await selfDeployment(
+      "auto",
+      null,
+      probesWith({
+        isContainerized: () => false,
+        resolveClient: resolveNone,
+        readEnv: (k: string) =>
+          k === "CONTAINER_HOST"
+            ? "/run/user/1000/podman/podman.sock"
+            : undefined,
+      }),
+    );
+    assert.match(result.remediation.join("\n"), /CONTAINER_HOST/);
   });
 
   it("containerized, no socket → no-runtime + socket-mount remediation (no CLI)", async () => {
@@ -353,6 +477,9 @@ describe("selfDeployment — no-runtime branch", () => {
       probesWith({
         isContainerized: () => true,
         resolveClient: resolveNone,
+        // As above: the socket-mount guidance is for a container with no
+        // endpoint pinned, so keep the ambient DOCKER_HOST out of it.
+        readEnv: () => undefined,
       }),
     );
     assert.equal(result.status, "no-runtime");

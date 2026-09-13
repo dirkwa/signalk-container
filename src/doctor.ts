@@ -19,6 +19,7 @@ import {
   type ContainerClient,
   type LibpodNetworkBackendInfo,
   type ResolvedClient,
+  EndpointConfigError,
   getClient,
   libpodNetworkBackendInfo,
   resolveClient,
@@ -637,7 +638,23 @@ export async function selfDeployment(
 
   // 1. Socket resolution — the first socket that answers the API wins.
   //    No socket → no runtime (was "no binary on PATH" in the CLI era).
-  const resolved = await probeResolveClient();
+  // Mirror `socketCandidates`: DOCKER_HOST wins, and only that endpoint is
+  // probed. The order matters — reading them the other way round would name a
+  // variable detection never consulted.
+  const configuredEndpoint = env.DOCKER_HOST ?? env.CONTAINER_HOST ?? null;
+  // `selfDeployment` promises never to throw — it is the thing an operator
+  // reaches for when something is already broken, and a rejected request
+  // gives them a 500 instead of the fix. A malformed endpoint rejects out of
+  // `resolveClient` by design; catch it here and report it as the
+  // configuration problem it is.
+  let endpointConfigError: string | null = null;
+  let resolved: ResolvedClient | null = null;
+  try {
+    resolved = await probeResolveClient();
+  } catch (err) {
+    if (!(err instanceof EndpointConfigError)) throw err;
+    endpointConfigError = err.message;
+  }
   if (!resolved) {
     return {
       isContainerized: containerized,
@@ -647,11 +664,13 @@ export async function selfDeployment(
         reachable: false,
         rootless: null,
         // No runtime was detected, so there's no binary kind to key on —
-        // surface whichever explicit endpoint the operator configured
-        // (CONTAINER_HOST for podman, DOCKER_HOST for docker) as the
-        // troubleshooting hint, rather than hardcoding the docker var.
-        socketPath: env.CONTAINER_HOST ?? env.DOCKER_HOST ?? null,
-        error: "no container runtime socket answered the Docker API",
+        // surface the endpoint detection actually used as the troubleshooting
+        // hint. Shares `configuredEndpoint` with the remediation below so the
+        // two can never name different variables.
+        socketPath: configuredEndpoint,
+        error:
+          endpointConfigError ??
+          "no container runtime socket answered the Docker API",
       },
       env,
       selfId: { value: null, source: null },
@@ -660,9 +679,18 @@ export async function selfDeployment(
       linger: null,
       networkDns: null,
       status: "no-runtime",
-      remediation: containerized
-        ? REMEDIATION_NO_RUNTIME_CONTAINERIZED
-        : REMEDIATION_NO_RUNTIME_BARE_METAL,
+      // An operator who pinned an endpoint does not need "install a runtime"
+      // — the runtime is chosen, it just did not answer. Name the endpoint
+      // and the variable that set it instead.
+      remediation: configuredEndpoint
+        ? remediationConfiguredEndpoint(
+            configuredEndpoint,
+            env,
+            endpointConfigError,
+          )
+        : containerized
+          ? REMEDIATION_NO_RUNTIME_CONTAINERIZED
+          : REMEDIATION_NO_RUNTIME_BARE_METAL,
     };
   }
 
@@ -1209,6 +1237,65 @@ function remediationForDaemonFailure(
   return binary === "podman"
     ? REMEDIATION_SOCKET_UNREACHABLE_PODMAN
     : remediationDockerSocket(env.DOCKER_HOST);
+}
+
+/**
+ * Text for an endpoint the operator pinned that did not answer. Distinct from
+ * the generic no-runtime blocks: the runtime is already chosen, so telling
+ * them to install one sends them the wrong way. Names the variable actually
+ * in effect — `DOCKER_HOST` wins over `CONTAINER_HOST` in `socketCandidates`,
+ * and an operator who set both needs to know which one is being used.
+ */
+/**
+ * Wrap a value in single quotes for a POSIX shell, escaping any it contains.
+ *
+ * The endpoint comes from an operator-set environment variable and lands in a
+ * command we invite them to paste. A path holding a space would otherwise
+ * check the wrong file, and one holding shell metacharacters would run
+ * something they did not intend.
+ */
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+function remediationConfiguredEndpoint(
+  endpoint: string,
+  env: SelfDeploymentResult["env"],
+  configError: string | null,
+): string[] {
+  const variable = env.DOCKER_HOST ? "DOCKER_HOST" : "CONTAINER_HOST";
+  // A rejected endpoint is a different problem from one that simply did not
+  // answer: retrying cannot fix it, so say what is wrong with the value
+  // rather than suggesting the socket might appear.
+  if (configError) {
+    return [
+      `Configured runtime endpoint is not usable: ${configError}`,
+      `(from ${variable})`,
+      "",
+      "Only unix sockets are supported — either an absolute path or a",
+      "unix:// URL pointing at the runtime's socket, for example:",
+      "  CONTAINER_HOST=unix:///run/user/$(id -u)/podman/podman.sock",
+      "  DOCKER_HOST=unix:///var/run/docker.sock",
+      "",
+      "Unset the variable to fall back to the conventional socket paths.",
+    ];
+  }
+  return [
+    `Configured runtime endpoint did not answer: ${endpoint}`,
+    `(from ${variable} — detection uses only this endpoint, never the`,
+    "conventional socket paths, so a typo here looks like no runtime.)",
+    "",
+    "Check the socket exists and this user can reach it:",
+    `  ls -l -- ${shellQuote(endpoint.replace(/^unix:\/\//, ""))}`,
+    "",
+    "For rootless podman, the socket is started on demand by the user's",
+    "systemd instance:",
+    "  systemctl --user status podman.socket",
+    "  systemctl --user enable --now podman.socket",
+    "",
+    "Detection retries on its own, so a socket that appears later is picked",
+    "up without restarting Signal K.",
+  ];
 }
 
 /**
