@@ -2918,14 +2918,19 @@ export default (app: App) => {
           }
           surfaceDetectionFailure(doctor);
           surfaceDeploymentDoctor(doctor);
-          // Resolve readiness on the first attempt whatever the outcome:
-          // whenReady() means "detection has settled once", and a consumer
-          // awaiting it must not block for as long as a host takes to gain a
-          // runtime. Consumers read getRuntime() — null until a retry wins.
-          localResolveReady();
           if (RETRYABLE_DETECTION_STATUSES.has(doctor.status)) {
+            // Readiness stays pending while a re-probe is outstanding.
+            // Consumers read getRuntime() ONCE, immediately after awaiting
+            // whenReady() — signalk-container-helper's waitForContainerManager
+            // is the common path — so settling here with no runtime makes
+            // them publish "no container runtime detected" and stop, even
+            // though a probe seconds later would have succeeded. Their own
+            // timeout bounds the wait; ours must not cut it short.
             scheduleDetectRetry(DETECT_RETRY_INITIAL_MS);
+            return;
           }
+          // Terminal: no probe will change this, so release the waiters.
+          localResolveReady();
           return;
         }
 
@@ -3003,18 +3008,28 @@ export default (app: App) => {
               surfaceDetectionFailure(doctor);
               if (RETRYABLE_DETECTION_STATUSES.has(doctor.status)) {
                 scheduleDetectRetry(nextDetectRetryDelay(delayMs));
+              } else {
+                // Nothing further will change this, so stop holding waiters:
+                // they read getRuntime() and surface the failure themselves.
+                localResolveReady();
               }
               return;
             }
             app.debug("runtime detected on retry");
             runtimeInfo = detected;
             await onRuntimeDetected(detected);
+            // The wait is over for anyone still holding whenReady() from the
+            // start that could not detect a runtime.
+            localResolveReady();
           })().catch((err) => {
             app.error(
               `signalk-container runtime re-probe failed: ${
                 err instanceof Error ? err.message : String(err)
               }`,
             );
+            // A re-probe that threw leaves no further scheduled attempt, so
+            // releasing waiters here is what keeps whenReady() from hanging.
+            localResolveReady();
           });
         }, delayMs);
         detectRetryTimer = timer;
