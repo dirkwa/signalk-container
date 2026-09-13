@@ -4,6 +4,16 @@ on:
   push:
     tags:
       - "v*"
+  # Re-run a release that the tag push already attempted. A GitHub outage can
+  # fail the release step after the tag is pushed, and the tag only fires this
+  # workflow once — without a manual trigger the only way back is deleting and
+  # re-pushing the tag. Run it from the Actions tab with the tag selected as
+  # the ref: every job reads github.ref_name, so a dispatch against v1.2.3
+  # behaves exactly like the push that created it.
+  #
+  # Delete any release the failed attempt left behind first (a half-succeeded
+  # attempt can leave a draft), or creating it again will collide.
+  workflow_dispatch:
 
 jobs:
   release:
