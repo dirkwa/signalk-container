@@ -17,6 +17,13 @@ on:
 
 jobs:
   release:
+    # A manual run can select any ref, including a branch. Everything here
+    # treats the ref as a released version — it becomes the release name and
+    # the published package — so a branch dispatch would cut a release called
+    # "master" and npm-publish that branch's contents. The tag guard is what
+    # keeps the manual trigger to its one purpose: re-running a release whose
+    # tag already exists.
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -37,6 +44,10 @@ jobs:
 
   publish:
     needs: release
+    # `needs` already blocks this when the guard above skips, but this job
+    # holds `id-token: write` and publishes to npm — it should not depend on
+    # another job's condition to stay off a branch.
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-24.04
     permissions:
       id-token: write
