@@ -4,7 +4,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import containerManagerPlugin from "../../index.js";
-import { resetClient } from "../../client.js";
+import { resetClient, resolveClient } from "../../client.js";
+import { _setDetectRuntimeForTesting } from "../../runtime.js";
 import type { ContainerManagerApi, PluginConfig } from "../../types.js";
 
 /**
@@ -39,6 +40,31 @@ function restoreEndpointEnv(): void {
 
 const CONFIG = { disableUserNamespaceRemap: true } as PluginConfig;
 
+/**
+ * Count how many times detection is attempted.
+ *
+ * Counting probes is what makes the no-re-probe assertion mean anything: a
+ * scheduled retry that throws lands in the retry's own catch, which calls
+ * `app.error` and never `setPluginError`, so watching surfaced errors would
+ * stay flat through exactly the regression being guarded against.
+ *
+ * The stub keeps the part of `detectRuntime` this scenario turns on — the
+ * `resolveClient` call whose `EndpointConfigError` has to stay terminal.
+ * Nothing follows it, because a malformed endpoint never resolves.
+ */
+function countingProbe(): { count: () => number; restore: () => void } {
+  let calls = 0;
+  _setDetectRuntimeForTesting(async (preference) => {
+    calls += 1;
+    await resolveClient(preference);
+    return null;
+  });
+  return {
+    count: () => calls,
+    restore: () => _setDetectRuntimeForTesting(null),
+  };
+}
+
 describe("malformed endpoint stays terminal through startup", () => {
   afterEach(restoreEndpointEnv);
 
@@ -62,6 +88,7 @@ describe("malformed endpoint stays terminal through startup", () => {
     // so waiting is the wrong answer.
     process.env.DOCKER_HOST = "tcp://192.0.2.10:2375";
 
+    const probe = countingProbe();
     const plugin = containerManagerPlugin(app);
     try {
       plugin.start(CONFIG);
@@ -86,16 +113,20 @@ describe("malformed endpoint stays terminal through startup", () => {
         `error should name the endpoint problem; saw ${JSON.stringify(surfaced)}`,
       );
 
-      // The retry ladder starts at 5s. Give it well past that: a re-probe
-      // would call setPluginError again, and a terminal failure must not.
-      const before = pluginErrors.length;
+      // Count probes rather than surfaced errors. A scheduled re-probe that
+      // throws lands in the retry's own catch, which calls app.error and
+      // never setPluginError — so watching the plugin-error list would stay
+      // flat through exactly the regression this is guarding against.
+      const before = probe.count();
+      // The retry ladder starts at 5s; wait past that.
       await new Promise((r) => setTimeout(r, 6_000));
       assert.equal(
-        pluginErrors.length,
+        probe.count(),
         before,
         "a malformed endpoint must not be re-probed",
       );
     } finally {
+      probe.restore();
       if (plugin.stop) await plugin.stop();
       rmSync(dataDir, { recursive: true, force: true });
     }
