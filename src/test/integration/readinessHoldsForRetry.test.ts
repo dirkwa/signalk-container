@@ -1,6 +1,6 @@
 import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import containerManagerPlugin from "../../index.js";
@@ -42,7 +42,11 @@ function restoreEndpointEnv(): void {
   resetClient();
 }
 
-/** Resolves true if `p` settles within `ms`, false if it is still pending. */
+/**
+ * Races a promise against a deadline. Pending is a legitimate outcome here
+ * rather than a failure, so the wait cannot simply be awaited — and a hung
+ * promise must fail an assertion instead of wedging the suite.
+ */
 async function settlesWithin(p: Promise<void>, ms: number): Promise<boolean> {
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<false>((resolve) => {
@@ -109,6 +113,47 @@ describe("whenReady holds while a re-probe is outstanding", () => {
         "whenReady() must not settle while a re-probe is still scheduled",
       );
       assert.equal(api().getRuntime(), null);
+    } finally {
+      if (plugin.stop) await plugin.stop();
+      cleanup();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves the original promise once a re-probe finds the runtime", async () => {
+    // The path a consumer actually rides through a boot race: it is holding
+    // whenReady() from before any runtime existed, and that same promise —
+    // not a later one — has to resolve when detection finally succeeds.
+    const real = `/run/user/${String(process.getuid?.() ?? 1000)}/podman/podman.sock`;
+    if (!existsSync(real)) {
+      console.log(`skip: no podman socket at ${real}`);
+      return;
+    }
+    const dir = mkdtempSync(join(tmpdir(), "skc-recovery-"));
+    const sock = join(dir, "appears-later.sock");
+    clearEndpointEnv();
+    process.env.CONTAINER_HOST = sock;
+
+    const { plugin, api, cleanup } = bootPlugin();
+    try {
+      plugin.start(CONFIG);
+      const ready = api().whenReady();
+
+      // The socket shows up the way a user systemd instance brings it up
+      // partway through Signal K's own startup.
+      setTimeout(() => symlinkSync(real, sock), 1_000);
+
+      assert.equal(
+        await settlesWithin(ready, 20_000),
+        true,
+        "the promise held across the outage must resolve once a probe wins",
+      );
+      const rt = api().getRuntime();
+      assert.ok(
+        rt,
+        "getRuntime() must report the runtime the winning probe found",
+      );
+      assert.equal(rt.runtime, "podman");
     } finally {
       if (plugin.stop) await plugin.stop();
       cleanup();
