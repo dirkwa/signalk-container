@@ -290,6 +290,23 @@ export function nextDetectRetryDelay(currentMs: number): number {
   return Math.min(currentMs * 2, DETECT_RETRY_MAX_MS);
 }
 
+/**
+ * Whether a detection failure should be put in front of the operator again.
+ *
+ * Re-probing polls once a minute in its steady state, so repeating identical
+ * remediation would bury the server log in copies of the same advice. But a
+ * retrying host genuinely changes reason — a machine coming up from boot
+ * reports no-runtime while nothing answers, then socket-unreachable once the
+ * socket exists but its daemon has not finished starting — and each carries
+ * different remediation. Surface on change, stay quiet otherwise.
+ */
+export function shouldSurfaceDetectStatus(
+  next: SelfDeploymentStatus,
+  surfaced: SelfDeploymentStatus | null,
+): boolean {
+  return next !== surfaced;
+}
+
 // `DEFAULT_KEEP_IMAGE_VERSIONS` and `normalizeKeepImageVersions` live in
 // `./configNormalize.js` so the backend and the React config panel share
 // one contract — a browser-safe module with no node-only imports.
@@ -300,10 +317,12 @@ export default (app: App) => {
   let pruneScheduler: PruneScheduler | null = null;
   // Pending runtime re-probe, so stop() can cancel one that has not fired.
   let detectRetryTimer: NodeJS.Timeout | null = null;
-  // Whether a detection failure has put an error in front of the operator.
-  // Gates the clear on a later success, so a first attempt that works never
-  // calls setPluginError at all.
-  let detectFailureSurfaced = false;
+  // The doctor status currently in front of the operator, or null when
+  // nothing is. Gates the clear on a later success, so a first attempt that
+  // works never calls setPluginError at all — and lets a re-probe notice that
+  // the reason changed, since a retrying host moves between no-runtime and
+  // socket-unreachable and each carries different remediation.
+  let surfacedDetectStatus: SelfDeploymentStatus | null = null;
   // Bumped by stop(). A re-probe captures it before its first await and
   // rechecks after each one: clearTimeout cannot reach a callback that has
   // already fired and is sitting in `await detectRuntime(...)`, so without
@@ -2736,7 +2755,7 @@ export default (app: App) => {
       // prior one, so an earlier run's in-flight detection would pass every
       // guard and overwrite this run's runtimeInfo and prune scheduler.
       startGeneration += 1;
-      detectFailureSurfaced = false;
+      surfacedDetectStatus = null;
       if (detectRetryTimer) {
         clearTimeout(detectRetryTimer);
         detectRetryTimer = null;
@@ -2897,14 +2916,7 @@ export default (app: App) => {
             localResolveReady();
             return;
           }
-          const headline = headlineForDoctorStatus(doctor.status);
-          app.setPluginError(pluginErrorForDoctor(doctor, headline));
-          detectFailureSurfaced = true;
-          if (doctor.remediation.length > 0) {
-            app.error(
-              `signalk-container deployment doctor — ${headline}:\n${doctor.remediation.join("\n")}`,
-            );
-          }
+          surfaceDetectionFailure(doctor);
           surfaceDeploymentDoctor(doctor);
           // Resolve readiness on the first attempt whatever the outcome:
           // whenReady() means "detection has settled once", and a consumer
@@ -2935,6 +2947,29 @@ export default (app: App) => {
       });
 
       /**
+       * Put a detection failure in front of the operator, or leave the
+       * standing message alone when the reason has not changed.
+       *
+       * Re-probing polls once a minute in its steady state, so re-logging an
+       * identical remediation block would bury the server log in copies of
+       * the same advice. Keying on the status means the operator sees the
+       * text change exactly when the underlying problem does.
+       */
+      function surfaceDetectionFailure(doctor: SelfDeploymentResult): void {
+        if (!shouldSurfaceDetectStatus(doctor.status, surfacedDetectStatus)) {
+          return;
+        }
+        surfacedDetectStatus = doctor.status;
+        const headline = headlineForDoctorStatus(doctor.status);
+        app.setPluginError(pluginErrorForDoctor(doctor, headline));
+        if (doctor.remediation.length > 0) {
+          app.error(
+            `signalk-container deployment doctor — ${headline}:\n${doctor.remediation.join("\n")}`,
+          );
+        }
+      }
+
+      /**
        * Re-probe for a runtime after `delayMs`, doubling the wait up to
        * `DETECT_RETRY_MAX_MS` for as long as the failure stays retryable.
        *
@@ -2961,19 +2996,13 @@ export default (app: App) => {
               const doctor = await selfDeployment(runtimePreference);
               if (generation !== startGeneration) return;
               surfaceDeploymentDoctor(doctor);
+              // Refresh the operator-facing text whenever the reason changed,
+              // retryable or not. A host working its way up from boot moves
+              // from no-runtime to socket-unreachable, and leaving the first
+              // message in place tells it to install a runtime it already has.
+              surfaceDetectionFailure(doctor);
               if (RETRYABLE_DETECTION_STATUSES.has(doctor.status)) {
                 scheduleDetectRetry(nextDetectRetryDelay(delayMs));
-              } else {
-                // No longer retryable (a socket now answers and refuses us):
-                // surface it the way the first attempt would have.
-                const headline = headlineForDoctorStatus(doctor.status);
-                app.setPluginError(pluginErrorForDoctor(doctor, headline));
-                detectFailureSurfaced = true;
-                if (doctor.remediation.length > 0) {
-                  app.error(
-                    `signalk-container deployment doctor — ${headline}:\n${doctor.remediation.join("\n")}`,
-                  );
-                }
               }
               return;
             }
@@ -3017,8 +3046,8 @@ export default (app: App) => {
         // Only a retry that wins has an error to clear; a first attempt that
         // succeeds must not touch setPluginError at all, or a healthy host
         // records an error call it never earned.
-        if (detectFailureSurfaced) {
-          detectFailureSurfaced = false;
+        if (surfacedDetectStatus !== null) {
+          surfacedDetectStatus = null;
           app.setPluginError("");
         }
 
@@ -3172,7 +3201,7 @@ export default (app: App) => {
       registeredPorts.clear();
       // Invalidates any re-probe already past its clearTimeout window.
       startGeneration += 1;
-      detectFailureSurfaced = false;
+      surfacedDetectStatus = null;
       if (detectRetryTimer) {
         clearTimeout(detectRetryTimer);
         detectRetryTimer = null;
