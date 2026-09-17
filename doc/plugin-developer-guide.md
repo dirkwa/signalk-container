@@ -853,7 +853,7 @@ Prefer this over direct `podman inspect` because it reflects the merge logic and
 
 ### `updateResources(name, limits): Promise<UpdateResourcesResult>`
 
-Apply new resource limits to a running container, merging `limits` against the consumer plugin's pristine default captured at `ensureRunning` time. Tries `podman update` first (live, no downtime), falls back to stop+remove+ensureRunning if the runtime refuses (e.g. `cpusetCpus` on a host without cgroup delegation, or unsetting a `memory` limit which create-time-only fields can't do live).
+Apply new resource limits to a running container, merging `limits` against the consumer plugin's pristine default captured at `ensureRunning` time. Tries `podman update` first (live, no downtime), falls back to stop+remove+ensureRunning if the runtime refuses (e.g. `cpusetCpus` on a host without cgroup delegation, or unsetting a `memory` limit which create-time-only fields can't do live). The live update carries the container's restart policy along with the limits, so `restart` is never disturbed by it.
 
 ```typescript
 const result = await containers.updateResources("my-db", {

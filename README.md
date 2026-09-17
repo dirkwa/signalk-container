@@ -572,7 +572,7 @@ curl -X DELETE http://localhost:3000/plugins/signalk-container/api/containers/ma
 
 ### When changes take effect
 
-- **Immediately via the UI or REST API** (`updateResources`): signalk-container tries `podman update` / `docker update` first (instantaneous, no downtime). Falls back to stop+remove+create if the runtime can't apply the change live (e.g. unsetting memory limits, or changing `cpusetCpus` / `oomScoreAdj` which are set at container create time only).
+- **Immediately via the UI or REST API** (`updateResources`): signalk-container tries `podman update` / `docker update` first (instantaneous, no downtime). Falls back to stop+remove+create if the runtime can't apply the change live (e.g. unsetting memory limits, or changing `cpusetCpus` / `oomScoreAdj` which are set at container create time only). A live update leaves the container's `restart` policy as configured.
 - **On next consumer plugin restart**: the merge happens automatically inside `ensureRunning` — useful for installations that manage via JSON edits and don't want to use the REST API.
 - **Persistence**: overrides applied via the UI or REST API are auto-persisted to `plugin-config-data/signalk-container.json` — they survive Signal K restarts without any extra action.
 

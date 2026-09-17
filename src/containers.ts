@@ -23,6 +23,7 @@ import {
   UlimitClamp,
   VolumeIssue,
   VolumeSpec,
+  RestartPolicy,
 } from "./types.js";
 import {
   StreamingProcessHandle,
@@ -2565,6 +2566,28 @@ export function ulimitsForRun(
 }
 
 /**
+ * The restart policy a managed container runs under when its consumer
+ * sets none: containers come back after a host reboot without the
+ * consumer plugin having to opt in. The runtime daemon honours it at
+ * boot regardless of whether signalk-server is up yet (rootless Podman
+ * needs `loginctl enable-linger $USER`; see AGENTS.md "Container
+ * persistence across reboots"). Consumers wanting a one-shot pass
+ * `restart: "no"`.
+ */
+export const DEFAULT_RESTART_POLICY: RestartPolicy = "unless-stopped";
+
+/**
+ * The restart policy `config` asks for, default applied. Every runtime
+ * call that sets or re-sends the policy — create and live update alike —
+ * derives it from here so the two can never disagree.
+ */
+export function restartPolicyFor(
+  config: Pick<ContainerConfig, "restart">,
+): RestartPolicy {
+  return config.restart ?? DEFAULT_RESTART_POLICY;
+}
+
+/**
  * Build the dockerode `createContainer` options from a `ContainerConfig`.
  * Replaces the former `buildRunArgs` flag-array builder; the same fields
  * map onto the structured create payload (top-level vs `HostConfig`).
@@ -2587,13 +2610,8 @@ function buildCreateOptions(
 
   const hostConfig: Docker.HostConfig = {};
 
-  // Default restart policy is `unless-stopped` so containers come back
-  // after a host reboot without the consumer plugin having to opt in.
-  // The runtime daemon honours it at boot regardless of whether
-  // signalk-server is up yet (rootless Podman needs `loginctl
-  // enable-linger $USER`; see AGENTS.md "Container persistence across
-  // reboots"). Consumers wanting a one-shot pass `restart: "no"`.
-  const restartPolicy = config.restart ?? "unless-stopped";
+  // `no` is the runtime's own default, so it is expressed by omission.
+  const restartPolicy = restartPolicyFor(config);
   if (restartPolicy !== "no") {
     hostConfig.RestartPolicy = { Name: restartPolicy };
   }
