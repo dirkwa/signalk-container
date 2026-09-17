@@ -147,9 +147,14 @@ reviews:
 
         Note: `restart` is intentionally _not_ in `diffContainerConfig`.
         Flipping a restart policy doesn't justify the downtime of
-        recreate. New consumers get the `unless-stopped` default;
-        existing containers keep their old policy until a separate
-        drift reason forces recreate.
+        recreate. The configured policy (default `unless-stopped`)
+        reaches a running container on its next live resource update,
+        which every update body carries because Podman's compat
+        `/update` otherwise resets it to `no`; a policy change alone
+        triggers neither an update nor a recreate. An unset `restart`
+        means the default on update exactly as on create — flag any
+        change that echoes the live policy for an unset field, since
+        that would keep a policy the runtime already reset.
 
         ## Default restart policy
 
