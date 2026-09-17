@@ -1,6 +1,10 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { ensureRunning } from "../containers.js";
+import {
+  DEFAULT_RESTART_POLICY,
+  ensureRunning,
+  restartPolicyFor,
+} from "../containers.js";
 import { _setCurrentHostIdsForTesting } from "../runtime.js";
 import { makeMockClient } from "./helpers/mockClient.js";
 import type { ContainerConfig, ContainerRuntimeInfo } from "../types.js";
@@ -141,5 +145,17 @@ describe("ensureRunning — port binding keys", () => {
     const opts = createOptsFrom(calls);
     const keys = Object.keys(opts.HostConfig?.PortBindings ?? {});
     assert.deepEqual(keys, ["53/udp"], "udp key must not become 53/udp/tcp");
+  });
+});
+
+describe("restartPolicyFor", () => {
+  it("applies the default when the consumer sets none", () => {
+    assert.equal(restartPolicyFor({}), DEFAULT_RESTART_POLICY);
+    assert.equal(restartPolicyFor({ restart: undefined }), "unless-stopped");
+  });
+
+  it("returns an explicit policy unchanged", () => {
+    assert.equal(restartPolicyFor({ restart: "no" }), "no");
+    assert.equal(restartPolicyFor({ restart: "always" }), "always");
   });
 });

@@ -294,6 +294,7 @@ describe("tryLiveUpdate", () => {
       dummyRuntime,
       "sk-mayara-server",
       { cpus: 1.5 },
+      "unless-stopped",
       client,
     );
     assert.equal(result.ok, true);
@@ -303,6 +304,7 @@ describe("tryLiveUpdate", () => {
     assert.deepEqual(update[0].payload, {
       CpuQuota: 150000,
       CpuPeriod: 100000,
+      RestartPolicy: { Name: "unless-stopped" },
     });
   });
 
@@ -323,6 +325,7 @@ describe("tryLiveUpdate", () => {
       dummyRuntime,
       "sk-nope",
       { cpus: 1.5 },
+      "unless-stopped",
       client,
     );
     assert.equal(result.ok, false);
@@ -352,6 +355,7 @@ describe("tryLiveUpdate", () => {
       dummyRuntime,
       "sk-nope",
       { cpus: 1.5 },
+      "unless-stopped",
       client,
     );
     assert.equal(result.ok, false);
@@ -373,6 +377,7 @@ describe("tryLiveUpdate", () => {
       dummyRuntime,
       "sk-mayara",
       { cpus: 1.5, cpusetCpus: "0,1" },
+      "unless-stopped",
       client,
     );
     assert.equal(result.ok, false);
@@ -395,7 +400,13 @@ describe("tryLiveUpdate", () => {
       containers: { "sk-x": { inspect: {} } },
       calls,
     });
-    const result = await tryLiveUpdate(dummyRuntime, "sk-x", {}, client);
+    const result = await tryLiveUpdate(
+      dummyRuntime,
+      "sk-x",
+      {},
+      "unless-stopped",
+      client,
+    );
     assert.equal(result.ok, true);
     assert.equal(
       calls.get("update"),
@@ -407,7 +418,13 @@ describe("tryLiveUpdate", () => {
   it("for empty limits AND missing container, returns ok=false", async () => {
     // Container not listed → inspect throws 404 → existence check fails.
     const client = makeMockClient({});
-    const result = await tryLiveUpdate(dummyRuntime, "sk-x", {}, client);
+    const result = await tryLiveUpdate(
+      dummyRuntime,
+      "sk-x",
+      {},
+      "unless-stopped",
+      client,
+    );
     assert.equal(result.ok, false);
     assert.match(result.stderr ?? "", /does not exist/);
   });
@@ -621,6 +638,7 @@ describe("tryLiveUpdate Bug C: container existence check", () => {
       "sk-mayara",
       // Only field is cpusetCpus, which gets filtered out → empty
       { cpusetCpus: "0,1" },
+      "unless-stopped",
       client,
     );
     assert.equal(result.ok, false);
@@ -635,6 +653,7 @@ describe("tryLiveUpdate Bug C: container existence check", () => {
       restrictedRuntime,
       "sk-mayara",
       { cpusetCpus: "0,1" },
+      "unless-stopped",
       client,
     );
     assert.equal(result.ok, true);
@@ -650,6 +669,7 @@ describe("tryLiveUpdate Bug C: container existence check", () => {
       dummyRuntime,
       "sk-mayara",
       { cpus: 1.5 },
+      "unless-stopped",
       client,
     );
     assert.equal(result.ok, true);
@@ -668,6 +688,7 @@ describe("tryLiveUpdate Bug C: container existence check", () => {
       restrictedRuntime,
       "sk-mayara",
       { cpus: 1.5, cpusetCpus: "0,1" },
+      "unless-stopped",
       client,
     );
     assert.equal(result.ok, true);
@@ -677,7 +698,132 @@ describe("tryLiveUpdate Bug C: container existence check", () => {
     assert.deepEqual(update[0].payload, {
       CpuQuota: 150000,
       CpuPeriod: 100000,
+      RestartPolicy: { Name: "unless-stopped" },
     });
+  });
+});
+
+describe("tryLiveUpdate restart policy", () => {
+  // Podman's compat `/update` stores whatever `RestartPolicy.Name` the body
+  // carries — an omitted field becomes `no`. Every update therefore names
+  // the policy; these pin what gets named.
+  function clientWith(
+    livePolicy: unknown,
+    calls: Map<string, unknown[]>,
+  ): ReturnType<typeof makeMockClient> {
+    return makeMockClient({
+      containers: {
+        "sk-x": {
+          inspect: { HostConfig: { RestartPolicy: livePolicy } },
+          update: () => Promise.resolve(),
+        },
+      },
+      calls,
+    });
+  }
+  function sentPayload(calls: Map<string, unknown[]>): unknown {
+    const update = calls.get("update") as Array<{ payload: unknown }>;
+    assert.equal(update.length, 1);
+    return update[0].payload;
+  }
+
+  it("sends the requested policy, not the container's current one", async () => {
+    const calls = new Map<string, unknown[]>();
+    const client = clientWith({ Name: "no", MaximumRetryCount: 0 }, calls);
+    const result = await tryLiveUpdate(
+      dummyRuntime,
+      "sk-x",
+      { cpuShares: 512 },
+      "always",
+      client,
+    );
+    assert.equal(result.ok, true);
+    assert.deepEqual(sentPayload(calls), {
+      CpuShares: 512,
+      RestartPolicy: { Name: "always" },
+    });
+  });
+
+  it("sends `no` explicitly rather than omitting the field", async () => {
+    const calls = new Map<string, unknown[]>();
+    const client = clientWith({ Name: "unless-stopped" }, calls);
+    await tryLiveUpdate(dummyRuntime, "sk-x", { cpuShares: 512 }, "no", client);
+    assert.deepEqual(sentPayload(calls), {
+      CpuShares: 512,
+      RestartPolicy: { Name: "no" },
+    });
+  });
+
+  it("with no known policy, echoes the container's current one", async () => {
+    const calls = new Map<string, unknown[]>();
+    const client = clientWith(
+      { Name: "unless-stopped", MaximumRetryCount: 0 },
+      calls,
+    );
+    const result = await tryLiveUpdate(
+      dummyRuntime,
+      "sk-x",
+      { cpuShares: 512 },
+      undefined,
+      client,
+    );
+    assert.equal(result.ok, true);
+    assert.deepEqual(sentPayload(calls), {
+      CpuShares: 512,
+      RestartPolicy: { Name: "unless-stopped" },
+    });
+  });
+
+  it("echoes a retry count when the current policy carries one", async () => {
+    const calls = new Map<string, unknown[]>();
+    const client = clientWith(
+      { Name: "on-failure", MaximumRetryCount: 3 },
+      calls,
+    );
+    await tryLiveUpdate(
+      dummyRuntime,
+      "sk-x",
+      { cpuShares: 512 },
+      undefined,
+      client,
+    );
+    assert.deepEqual(sentPayload(calls), {
+      CpuShares: 512,
+      RestartPolicy: { Name: "on-failure", MaximumRetryCount: 3 },
+    });
+  });
+
+  it("normalises an empty or absent current policy to `no`", async () => {
+    for (const live of [{ Name: "" }, undefined]) {
+      const calls = new Map<string, unknown[]>();
+      const client = clientWith(live, calls);
+      await tryLiveUpdate(
+        dummyRuntime,
+        "sk-x",
+        { cpuShares: 512 },
+        undefined,
+        client,
+      );
+      assert.deepEqual(sentPayload(calls), {
+        CpuShares: 512,
+        RestartPolicy: { Name: "no" },
+      });
+    }
+  });
+
+  it("with no known policy and no container, fails without updating", async () => {
+    const calls = new Map<string, unknown[]>();
+    const client = makeMockClient({ calls });
+    const result = await tryLiveUpdate(
+      dummyRuntime,
+      "sk-x",
+      { cpuShares: 512 },
+      undefined,
+      client,
+    );
+    assert.equal(result.ok, false);
+    assert.match(result.stderr ?? "", /does not exist/);
+    assert.equal(calls.get("update"), undefined);
   });
 });
 

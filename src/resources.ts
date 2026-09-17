@@ -2,6 +2,7 @@ import type {
   ContainerResourceLimits,
   ContainerRuntimeInfo,
   ResourceClamp,
+  RestartPolicy,
 } from "./types.js";
 import {
   getClient,
@@ -38,6 +39,31 @@ export interface ResourceHostConfig {
   PidsLimit?: number;
   OomScoreAdj?: number;
 }
+
+/**
+ * `HostConfig.RestartPolicy` as the update endpoint and inspect carry it.
+ * `MaximumRetryCount` only means anything under Docker's `on-failure`,
+ * which no `ContainerConfig` can ask for; it is kept so a policy read
+ * back from inspect is re-sent exactly as found.
+ */
+interface RestartPolicySetting {
+  Name: string;
+  MaximumRetryCount?: number;
+}
+
+/**
+ * Body of `POST /containers/{id}/update`. The restart policy is always
+ * present: Podman's Docker-compat handler stores `RestartPolicy.Name`
+ * from the body whether or not the body carried one, so a resources-only
+ * update sets a running container's policy to `no` and it neither
+ * restarts after a crash nor comes back at boot (measured on 5.4.2;
+ * upstream main carries the same handler). Docker keeps the stored
+ * policy when the field is omitted and applies it when present, so
+ * sending it is uniform across runtimes.
+ */
+type LiveUpdatePayload = ResourceHostConfig & {
+  RestartPolicy: RestartPolicySetting;
+};
 
 /** CFS period (100ms) used to express the CPU cap as quota/period. */
 const CPU_PERIOD = 100_000;
@@ -591,7 +617,7 @@ export function resourcePayloadForUpdate(
  * (caller is expected to fall back to recreate).
  *
  * The container name should already be the prefixed form (sk-...).
- * `exec` defaults to the production execRuntime; tests pass a stub.
+ * `client` defaults to the shared dockerode client; tests pass a mock.
  *
  * Behavior:
  *   - Filters `limits` against `runtime.cgroupControllers` first.
@@ -605,19 +631,27 @@ export function resourcePayloadForUpdate(
  *     verifies the container exists before claiming vacuous success.
  *     This prevents Bug C: silent success when the container has
  *     been removed out from under us.
+ *   - The update body always carries a restart policy (see
+ *     `LiveUpdatePayload`): `restartPolicy` when the caller knows what
+ *     the container's config asks for, otherwise the policy the
+ *     container currently runs under, read from inspect and echoed
+ *     back unchanged. A caller that cannot name the policy passes
+ *     `undefined` rather than a guess — the default is the consumer's
+ *     to set, not this layer's.
  */
 export async function tryLiveUpdate(
   runtime: ContainerRuntimeInfo,
   fullName: string,
   limits: ContainerResourceLimits,
+  restartPolicy: RestartPolicy | undefined,
   client: ContainerClient = getClient(),
 ): Promise<{ ok: boolean; stderr?: string }> {
   const { accepted } = filterUnsupportedLimits(limits, runtime);
-  const payload = resourcePayloadForUpdate(accepted);
-  if (payload === null) {
+  const resources = resourcePayloadForUpdate(accepted);
+  if (resources === null) {
     return { ok: false, stderr: "limits contain non-live-updatable fields" };
   }
-  if (Object.keys(payload).length === 0) {
+  if (Object.keys(resources).length === 0) {
     // Nothing to apply via update. Don't claim vacuous success without
     // verifying the target exists — the caller may be operating on a
     // container that was removed out from under us.
@@ -629,6 +663,14 @@ export async function tryLiveUpdate(
     }
     return { ok: true };
   }
+  const policy =
+    restartPolicy === undefined
+      ? await readLiveRestartPolicy(fullName, client)
+      : { Name: restartPolicy };
+  if (policy === null) {
+    return { ok: false, stderr: `container ${fullName} does not exist` };
+  }
+  const payload: LiveUpdatePayload = { ...resources, RestartPolicy: policy };
   const result = await safe(() =>
     client.getContainer(fullName).update(payload),
   );
@@ -639,6 +681,28 @@ export async function tryLiveUpdate(
     };
   }
   return { ok: true };
+}
+
+/**
+ * The restart policy a container currently runs under, or null when the
+ * container does not exist. Both runtimes report an unset policy as
+ * `no`; an empty name is normalised to the same so the echo is always a
+ * policy the update endpoint accepts.
+ */
+async function readLiveRestartPolicy(
+  fullName: string,
+  client: ContainerClient,
+): Promise<RestartPolicySetting | null> {
+  const info = await safeInspect(() => client.getContainer(fullName).inspect());
+  if (info === null) return null;
+  const hc = info.HostConfig as
+    { RestartPolicy?: Partial<RestartPolicySetting> } | undefined;
+  const live = hc?.RestartPolicy;
+  const retries = live?.MaximumRetryCount;
+  return {
+    Name: live?.Name || "no",
+    ...(retries ? { MaximumRetryCount: retries } : {}),
+  };
 }
 
 /**

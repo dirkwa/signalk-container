@@ -152,13 +152,14 @@ See `src/client.ts`, `src/containers.ts`, `src/log-stream-broker.ts`, and the te
 
 Everything except `/libpod/info` goes through Podman's **Docker-compat** API via dockerode. That endpoint accepts several fields the CLI supports, returns 201, and then ignores them — but _which_ ones depends on the podman version, so a claim measured once is not a claim about podman generally:
 
-| Field                            | podman 5.4.2                  | podman 6.1.0                             |
-| -------------------------------- | ----------------------------- | ---------------------------------------- |
-| `HostConfig.Ulimits` (nofile)    | dropped (fixed 5.5.0, #25881) | honoured — asked 4242, got 4242          |
-| `Mounts[].VolumeOptions.Subpath` | accepted, ignored             | honoured, echoed by inspect as `SubPath` |
-| `HostConfig.UsernsMode`          | stored as `private`           | still stored as `private`                |
+| Field                                                  | podman 5.4.2                  | podman 6.1.0                                   |
+| ------------------------------------------------------ | ----------------------------- | ---------------------------------------------- |
+| `HostConfig.Ulimits` (nofile)                          | dropped (fixed 5.5.0, #25881) | honoured — asked 4242, got 4242                |
+| `Mounts[].VolumeOptions.Subpath`                       | accepted, ignored             | honoured, echoed by inspect as `SubPath`       |
+| `HostConfig.UsernsMode`                                | stored as `private`           | still stored as `private`                      |
+| `POST /containers/{id}/update` without `RestartPolicy` | resets the policy to `no`     | same handler in the 6.1.0 source; not measured |
 
-Docker Engine honours the volume subpath on its own API (29.7.2 / API 1.55), so that one was never a Docker gap at all. The podman rows are measured on both x86_64 and aarch64, which agree.
+Docker Engine honours the volume subpath on its own API (29.7.2 / API 1.55), so that one was never a Docker gap at all, and it keeps a container's restart policy when `/update` omits the field (29.8.0), so that row is podman-only too. The three create-time podman rows are measured on both x86_64 and aarch64, which agree; the `/update` row is measured on 5.4.2 x86_64 only, its 6.1.0 cell read from the source.
 
 Two rules follow:
 
@@ -247,6 +248,8 @@ The contract for consumer plugins:
 - For the **signalk-universal-installer** deployment (where signalk-server itself is a systemd Quadlet and peer engine containers are Quadlets too), systemd is the source of truth — the universal installer's Quadlets carry `Restart=always` and crashloop-guard directives that the runtime's `--restart` flag isn't equipped to express. Plugins under that deployment register peers with `managedContainer: false` and don't touch their lifecycle.
 
 When a consumer plugin sets a restart policy explicitly, it overrides the default. Existing containers are not recreated just to flip the policy — drift detection skips `restart` because flipping it doesn't justify the downtime; the new default kicks in on the next image/env/volumes recreate or on a clean install.
+
+Every live resource update (`tryLiveUpdate`) names the policy from `restartPolicyFor(config)` in the update body, because Podman's compat `/update` handler otherwise resets it to `no` (see the compat-endpoint table above) — the one place the create-time default is applied besides `buildCreateOptions`, so both go through that helper. A changed policy therefore also reaches a running container whenever its resources are next updated live, but nothing triggers an update for the policy alone. A caller with no `ContainerConfig` for the container (`updateResources` on a cold `lastConfigs`) passes `undefined` and the container's current policy is read from inspect and echoed back, never defaulted — the default is the consumer's to set.
 
 ### In-container signalk-server + host-side rootless Podman
 

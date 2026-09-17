@@ -108,6 +108,7 @@ import {
   healthVerdictPending,
   DEFAULT_HEALTH_INTERVAL_MS,
   UNSCHEDULED_INTERVAL_MARGIN,
+  restartPolicyFor,
 } from "./containers.js";
 import { createLogStreamBroker, LogStreamBroker } from "./log-stream-broker.js";
 import { runJob, cleanupOrphanedJobs } from "./jobs.js";
@@ -1796,7 +1797,12 @@ export default (app: App) => {
           );
         }
 
-        const live = await tryLiveUpdate(runtimeInfo, fullName, filteredMerged);
+        const live = await tryLiveUpdate(
+          runtimeInfo,
+          fullName,
+          filteredMerged,
+          restartPolicyFor(effectiveConfig),
+        );
         if (!live.ok) {
           // Live update failed (e.g. cpuset on a host that doesn't
           // delegate it). The container is still running with its
@@ -2335,22 +2341,30 @@ export default (app: App) => {
       // Try the runtime's live `update` first — instantaneous, no
       // downtime — and only fall back to recreate when it refuses
       // OR when we know live update can't perform the requested unset.
+      // The live update carries the restart policy too (see
+      // `tryLiveUpdate`): the consumer's ask when its config is cached,
+      // otherwise whatever the container currently runs under.
+      const cachedConfig = lastConfigs.get(name);
       const live = forceRecreate
         ? {
             ok: false as const,
             stderr: "force-recreate for unset of non-live-unsettable field(s)",
           }
-        : await tryLiveUpdate(runtimeInfo, fullName, filteredLimits);
+        : await tryLiveUpdate(
+            runtimeInfo,
+            fullName,
+            filteredLimits,
+            cachedConfig ? restartPolicyFor(cachedConfig) : undefined,
+          );
       if (live.ok) {
         effectiveResources.set(name, { ...filteredLimits });
         recordOverride(name, limits);
         // Also keep the cached ContainerConfig in sync so that a
         // future recreate (e.g. on plugin restart) preserves the
         // newer limits.
-        const cached = lastConfigs.get(name);
-        if (cached) {
+        if (cachedConfig) {
           lastConfigs.set(name, {
-            ...cached,
+            ...cachedConfig,
             resources: { ...filteredLimits },
           });
         }
@@ -2363,7 +2377,6 @@ export default (app: App) => {
       // Live update refused (cpuset on incompatible kernel, oom-score-adj,
       // or runtime quirk). Fall back to stop+remove+ensureRunning if we
       // have the original config cached.
-      const cachedConfig = lastConfigs.get(name);
       if (!cachedConfig) {
         throw new Error(
           `updateResources: cannot recreate ${name} — no cached ContainerConfig. ` +

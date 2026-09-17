@@ -178,6 +178,12 @@ export interface UserMappingPayload {
 }
 
 /**
+ * Restart policy a managed container runs under, as the runtime spells it.
+ * Absent from `ContainerConfig` means `"unless-stopped"`.
+ */
+export type RestartPolicy = "no" | "unless-stopped" | "always";
+
+/**
  * Drop-in shape for a managed container. Pass the same `ContainerConfig`
  * to `ensureRunning` on every plugin start; signalk-container compares
  * the requested config against the live container's effective state and
@@ -368,7 +374,7 @@ export interface ContainerConfig {
    * Pass `"no"` explicitly for one-shot containers that shouldn't
    * restart at all.
    */
-  restart?: "no" | "unless-stopped" | "always";
+  restart?: RestartPolicy;
   command?: string[];
   networkMode?: string;
   /**
