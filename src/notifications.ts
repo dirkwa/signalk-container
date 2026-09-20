@@ -312,7 +312,7 @@ export function makeDegradationEmitter(
     // minutes would alert on a rate never observed — the very error
     // reading a raw lifetime count makes. Re-anchor and wait for a
     // window actually watched.
-    if (samples.length >= 2 && samples[samples.length - 2].at <= cutoff) {
+    if (samples.length >= 2 && samples[samples.length - 2].at < cutoff) {
       restartSamples.set(name, [{ count: restartCount, at: now }]);
       clear("crashLooping", name);
       return;

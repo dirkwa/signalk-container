@@ -424,6 +424,16 @@ describe("observeRestarts — crash-loop rate detection", () => {
     assert.equal(raises.length, 0);
   });
 
+  it("treats a gap of exactly the window as observed, not stalled", () => {
+    const { app, raises } = makeApp();
+    const e = makeDegradationEmitter(app);
+    e.observeRestarts("questdb", 10, T0);
+    // Exactly five minutes: the sample sits on the window's edge, which
+    // is still an observation of it rather than a gap past it.
+    e.observeRestarts("questdb", 13, T0 + 5 * 60_000);
+    assert.equal(raises.length, 1);
+  });
+
   it("re-anchors instead of alerting across a stalled poll", () => {
     const { app, raises } = makeApp();
     const e = makeDegradationEmitter(app);
