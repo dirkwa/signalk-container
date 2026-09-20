@@ -17,13 +17,17 @@ on:
 
 jobs:
   release:
+    # release-please creates the GitHub release for a real version, so only a
+    # hand-pushed pre-release tag needs one made here; running for every tag
+    # would collide with the release that already exists.
+    #
     # A manual run can select any ref, including a branch. Everything here
     # treats the ref as a released version — it becomes the release name and
     # the published package — so a branch dispatch would cut a release called
     # "master" and npm-publish that branch's contents. The tag guard is what
     # keeps the manual trigger to its one purpose: re-running a release whose
     # tag already exists.
-    if: github.ref_type == 'tag'
+    if: ${{ github.ref_type == 'tag' && (contains(github.ref_name, '-beta.') || contains(github.ref_name, '-rc.')) }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -43,10 +47,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   publish:
-    needs: release
-    # `needs` already blocks this when the guard above skips, but this job
-    # holds `id-token: write` and publishes to npm — it should not depend on
-    # another job's condition to stay off a branch.
+    # No `needs: release`: that job is pre-release-only now, and a real
+    # release must still publish when it is skipped. This job holds
+    # `id-token: write` and publishes to npm, so it carries its own guard
+    # rather than leaning on another job's condition to stay off a branch.
     if: github.ref_type == 'tag'
     runs-on: ubuntu-24.04
     permissions:
