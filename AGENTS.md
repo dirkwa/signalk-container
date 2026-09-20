@@ -297,23 +297,30 @@ Only push after all four pass. **Never push without explicit approval.** `git pu
 
 ### Release flow
 
-Tag-triggered (`.github/workflows/publish.yml` fires on `v*` tags):
+release-please owns the release. Merging a releasable commit to master opens
+a `chore: release X.Y.Z` PR that bumps `package.json`; merging that PR creates
+the tag and the GitHub Release, then dispatches `publish.yml` on the tag to run
+`npm publish --provenance --access public`.
 
-1. Branch `chore-release-X.Y.Z` off master.
-2. Bump `version` in `package.json`. There is no `package-lock.json` (the `~/.npmrc` setting disables it).
-3. Commit `chore(release): X.Y.Z`. Run the pre-PR checklist.
-4. Open PR, wait for explicit merge approval.
-5. After merge: `git checkout master && git pull --ff-only`, then `git tag vX.Y.Z && git push --tags`. The workflow creates the GitHub Release and runs `npm publish --provenance --access public` (prereleases use `--tag beta`).
-6. Never publish to npm without explicit approval.
+1. Land the work through a normal PR. No hand-written `chore(release)` PR — release-please writes the bump itself.
+2. Merge the release PR when the version is right. `versioning: always-bump-patch` means every release is a PATCH bump; for a minor or major, add a `Release-As: X.Y.Z` footer to a commit.
+3. Never merge a release PR without explicit approval — that merge is what publishes to npm.
 
-Angular semver:
+Pre-release tags (`vX.Y.Z-beta.N`, `vX.Y.Z-rc.N`) are still pushed by hand and
+publish under the `beta` dist-tag; only those get their GitHub Release created
+by `publish.yml`.
 
-- `feat` → minor
-- `fix` → patch
-- `BREAKING CHANGE:` footer or `!` → major
-- Pure `chore`/`docs`/`refactor` → patch (or skip release)
+A release only gets proposed when the push carries a commit users get — see the
+`gate` job in `.github/workflows/release-please.yml`.
 
-Dirk may override the bump rule (e.g. ship behavior change as minor even if technically API-compatible). Ask before assuming.
+Commit type drives whether a release is proposed, not how big the bump is:
+`always-bump-patch` makes every release a PATCH. `feat`, `fix`, `perf`, a
+`revert`, any `type!`, a `BREAKING CHANGE:` footer and `build(deps)` all
+propose one; pure `chore`, `docs`, `ci`, `test` and `build(deps-dev)` do not.
+
+For a minor or major, say so explicitly with a `Release-As: X.Y.Z` footer.
+Dirk may override the bump (e.g. ship a behavior change as minor even if
+technically API-compatible). Ask before assuming.
 
 ## Common Pitfalls
 
