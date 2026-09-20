@@ -369,3 +369,106 @@ describe("degradation emitter — reset", () => {
     assert.equal(raises.length, 1);
   });
 });
+
+describe("observeRestarts — crash-loop rate detection", () => {
+  const T0 = 1_700_000_000_000;
+
+  it("does not raise on the first observation, whatever the count", () => {
+    const { app, raises } = makeApp();
+    const e = makeDegradationEmitter(app);
+    // A container that survived a host reboot can legitimately show a
+    // high lifetime count; we did not witness those restarts.
+    e.observeRestarts("questdb", 250, T0);
+    assert.equal(raises.length, 0);
+  });
+
+  it("raises once the restart delta crosses the threshold in-window", () => {
+    const { app, raises } = makeApp();
+    const e = makeDegradationEmitter(app);
+    e.observeRestarts("questdb", 10, T0);
+    e.observeRestarts("questdb", 11, T0 + 60_000);
+    assert.equal(raises.length, 0, "one restart is not a loop");
+    e.observeRestarts("questdb", 13, T0 + 120_000);
+    assert.equal(raises.length, 1);
+    assert.equal(raises[0].state, "alert");
+    assert.equal(
+      raises[0].path,
+      "notifications.container.questdb.crashLooping",
+    );
+    assert.match(raises[0].message, /restarted 3 times/);
+  });
+
+  it("does not raise when the same delta spans more than the window", () => {
+    const { app, raises } = makeApp();
+    const e = makeDegradationEmitter(app);
+    e.observeRestarts("questdb", 10, T0);
+    // Same three restarts, but observed after the window has expired:
+    // the baseline slides forward instead of alerting.
+    e.observeRestarts("questdb", 13, T0 + 6 * 60_000);
+    assert.equal(raises.length, 0);
+  });
+
+  it("re-baselines and clears when the counter goes backwards", () => {
+    const { app, raises, cleared } = makeApp();
+    const e = makeDegradationEmitter(app);
+    e.observeRestarts("questdb", 10, T0);
+    e.observeRestarts("questdb", 14, T0 + 60_000);
+    assert.equal(raises.length, 1);
+    // Recreated container: lifetime count restarts from zero.
+    e.observeRestarts("questdb", 0, T0 + 120_000);
+    assert.equal(cleared.length, 1, "stale loop alert must be cleared");
+    // And the fresh baseline must not instantly re-raise.
+    e.observeRestarts("questdb", 1, T0 + 180_000);
+    assert.equal(raises.length, 1);
+  });
+
+  it("clears when a quiet window passes with no further restarts", () => {
+    const { app, raises, cleared } = makeApp();
+    const e = makeDegradationEmitter(app);
+    e.observeRestarts("questdb", 10, T0);
+    e.observeRestarts("questdb", 13, T0 + 60_000);
+    assert.equal(raises.length, 1);
+    // Window expires with the count unchanged — the loop has stopped.
+    e.observeRestarts("questdb", 13, T0 + 7 * 60_000);
+    assert.equal(cleared.length, 1);
+  });
+
+  it("ignores an absent or nonsensical count without losing the baseline", () => {
+    const { app, raises } = makeApp();
+    const e = makeDegradationEmitter(app);
+    e.observeRestarts("questdb", 10, T0);
+    // A runtime that omits the field must not read as a counter reset.
+    e.observeRestarts("questdb", undefined, T0 + 30_000);
+    e.observeRestarts("questdb", -1, T0 + 40_000);
+    e.observeRestarts("questdb", 13, T0 + 60_000);
+    assert.equal(raises.length, 1, "baseline survived the gaps");
+  });
+
+  it("tracks containers independently", () => {
+    const { app, raises } = makeApp();
+    const e = makeDegradationEmitter(app);
+    e.observeRestarts("a", 0, T0);
+    e.observeRestarts("b", 0, T0);
+    e.observeRestarts("a", 5, T0 + 60_000);
+    assert.equal(raises.length, 1);
+    assert.equal(raises[0].path, "notifications.container.a.crashLooping");
+  });
+
+  it("drops the baseline on forgetContainer", () => {
+    const { app, raises } = makeApp();
+    const e = makeDegradationEmitter(app);
+    e.observeRestarts("questdb", 10, T0);
+    e.forgetContainer("questdb");
+    // Next observation is a first sight again, so it cannot raise.
+    e.observeRestarts("questdb", 20, T0 + 60_000);
+    assert.equal(raises.length, 0);
+  });
+
+  it("stays silent while emission is disabled", () => {
+    const { app, raises } = makeApp();
+    const e = makeDegradationEmitter(app, false);
+    e.observeRestarts("questdb", 10, T0);
+    e.observeRestarts("questdb", 20, T0 + 60_000);
+    assert.equal(raises.length, 0);
+  });
+});

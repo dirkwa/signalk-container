@@ -2,11 +2,11 @@
  * Degradation notifications for managed containers
  * (`notifications.container.*`).
  *
- * A single emitter for the four managed-container degradation conditions
+ * A single emitter for the five managed-container degradation conditions
  * (unhealthy container, host-rejected device, missing required volume,
- * degraded runtime deployment). It is ADDITIVE — a parallel channel next
- * to the existing log / plugin-status / consumer-callback surfacing, never
- * a replacement.
+ * degraded runtime deployment, crash-looping container). It is ADDITIVE —
+ * a parallel channel next to the existing log / plugin-status /
+ * consumer-callback surfacing, never a replacement.
  *
  * Two things gate emission:
  *  - the config toggle (`emitDegradationNotifications`, default on), and
@@ -25,8 +25,24 @@
  */
 import type { DeviceIssue } from "./types.js";
 
+/**
+ * Restarts within one `CRASH_LOOP_WINDOW_MS` that mark a container as
+ * crash-looping. A container under `--restart=unless-stopped` that dies
+ * on startup cycles far faster than this; three restarts inside five
+ * minutes is well clear of the one-off crash a healthy service may
+ * suffer and recover from.
+ */
+const CRASH_LOOP_RESTARTS = 3;
+
+/** Sliding window the restart delta is measured over. */
+const CRASH_LOOP_WINDOW_MS = 5 * 60_000;
+
 export type DegradationCondition =
-  "unhealthy" | "deviceUnresolved" | "volumeAborted" | "deploymentDegraded";
+  | "unhealthy"
+  | "deviceUnresolved"
+  | "volumeAborted"
+  | "deploymentDegraded"
+  | "crashLooping";
 
 /** Minimal slice of the host `app` the emitter needs. */
 export interface NotificationApp {
@@ -71,6 +87,27 @@ export interface DegradationEmitter {
    * can't diverge.
    */
   syncDeviceIssues(name: string, issues: DeviceIssue[]): void;
+  /**
+   * Feed one observation of a container's cumulative restart count and
+   * raise/clear `crashLooping` from the RATE of change across
+   * observations.
+   *
+   * The runtime reports only a lifetime total, which is legitimately
+   * non-zero on a healthy container that has survived a host reboot
+   * under `--restart=unless-stopped`. A threshold on the raw value would
+   * therefore alert on uptime rather than on failure. The rate is
+   * derived here instead, from the delta between consecutive samples and
+   * the wall-clock gap between them, so only restarts that happen while
+   * we are watching can raise the notification.
+   *
+   * `now` is injected so tests drive the clock directly rather than
+   * sleeping through the window.
+   */
+  observeRestarts(
+    name: string,
+    restartCount: number | undefined,
+    now?: number,
+  ): void;
   /** Enable/disable emission (config toggle). Clears nothing. */
   setEnabled(enabled: boolean): void;
   /** Drop one container's health-tracking state (on container removal). */
@@ -101,6 +138,10 @@ export function makeDegradationEmitter(
   // so a changed set (e.g. /dev/a → /dev/b) re-raises with a fresh message
   // instead of the idempotent raise() no-op leaving the stale one live.
   const unresolvedSig = new Map<string, string>();
+  // Last restart count we saw per container and when we saw it. The
+  // baseline for the rate calculation in observeRestarts; a lifetime
+  // total is meaningless without one.
+  const restartBaseline = new Map<string, { count: number; at: number }>();
   // current health-check message, so a changed reason re-raises rather than
   // leaving the idempotent stale one live.
   const unhealthyReason = new Map<string, string>();
@@ -196,6 +237,72 @@ export function makeDegradationEmitter(
     }
   };
 
+  const observeRestarts: DegradationEmitter["observeRestarts"] = (
+    name,
+    restartCount,
+    now = Date.now(),
+  ) => {
+    // A runtime that does not report the field tells us nothing; keep the
+    // previous baseline so an intermittently-absent value does not read as
+    // a counter reset and discard a loop already in progress.
+    if (
+      typeof restartCount !== "number" ||
+      !Number.isFinite(restartCount) ||
+      restartCount < 0
+    ) {
+      return;
+    }
+
+    const prior = restartBaseline.get(name);
+
+    // First sight of this container — in this process, or after a
+    // recreate. Whatever the counter reads now is history we did not
+    // witness (a host reboot may have restarted it many times), so it
+    // becomes the baseline and raises nothing.
+    if (prior === undefined) {
+      restartBaseline.set(name, { count: restartCount, at: now });
+      return;
+    }
+
+    // The counter went backwards: the container was recreated underneath
+    // us and its lifetime count restarted. Re-baseline rather than
+    // computing a negative delta.
+    if (restartCount < prior.count) {
+      restartBaseline.set(name, { count: restartCount, at: now });
+      clear("crashLooping", name);
+      return;
+    }
+
+    const elapsed = now - prior.at;
+
+    // Window expired with the container below the threshold: it is not
+    // looping now, whatever it did earlier. Slide the window forward and
+    // drop any alert the previous window raised.
+    if (elapsed >= CRASH_LOOP_WINDOW_MS) {
+      restartBaseline.set(name, { count: restartCount, at: now });
+      clear("crashLooping", name);
+      return;
+    }
+
+    const restarts = restartCount - prior.count;
+    if (restarts < CRASH_LOOP_RESTARTS) return;
+
+    raise(
+      "crashLooping",
+      name,
+      "alert",
+      `${name}: restarted ${restarts} times in the last ${
+        Math.round(elapsed / 60_000) || 1
+      } min`,
+      { restartCount, windowMs: elapsed },
+    );
+    // Start a fresh window from the restart that tripped the threshold.
+    // Without this the baseline stays pinned to the original sample, so
+    // the delta can never fall back below the threshold and the alert
+    // would outlive the loop that caused it.
+    restartBaseline.set(name, { count: restartCount, at: now });
+  };
+
   const syncDeviceIssues: DegradationEmitter["syncDeviceIssues"] = (
     name,
     issues,
@@ -228,6 +335,7 @@ export function makeDegradationEmitter(
     clear,
     pollHealth,
     syncDeviceIssues,
+    observeRestarts,
     setEnabled: (enabled: boolean) => {
       emit = enabled;
     },
@@ -236,6 +344,7 @@ export function makeDegradationEmitter(
       health.delete(name);
       unresolvedSig.delete(name);
       unhealthyReason.delete(name);
+      restartBaseline.delete(name);
     },
     reset: () => {
       resetEpoch += 1;
@@ -250,6 +359,7 @@ export function makeDegradationEmitter(
       health.clear();
       unresolvedSig.clear();
       unhealthyReason.clear();
+      restartBaseline.clear();
       // Disable emission until the next start() re-enables via setEnabled().
       // Without this, a raise() from an async startup step (e.g. the
       // deployment doctor) that resolves AFTER stop()+reset() would strand a

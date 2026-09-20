@@ -203,6 +203,16 @@ const SSE_HEARTBEAT_MS = 30_000;
 const HEALTH_POLL_MS = 60_000;
 
 /**
+ * How often to sample every managed container's restart count to detect a
+ * crash loop. One shared poll rather than a per-container timer: the
+ * check is a single inspect each and applies to every managed container,
+ * including the ones no consumer gave a `healthCheck` — a container dying
+ * on startup never reaches the state where a health check could run, so
+ * the health poll cannot see this class of failure at all.
+ */
+const RESTART_POLL_MS = 60_000;
+
+/**
  * How often to run a container's own `HEALTHCHECK` ourselves where nothing
  * else will. Podman schedules healthchecks as systemd transient timers, so a
  * host with no user systemd session (Venus OS, or any rootless install
@@ -346,6 +356,11 @@ export default (app: App) => {
   const selfHealth = new SelfHealthOwnership();
   // Pending deferred probes, so stop() can cancel one that has not fired.
   const selfHealthProbes = new Map<string, NodeJS.Timeout>();
+  // Single shared crash-loop poll across every managed container, armed on
+  // the first ensureRunning and cleared in stop().
+  let restartPollTimer: NodeJS.Timeout | null = null;
+  // Guards against a slow sweep overlapping the next tick.
+  let restartPollInFlight = false;
   const SETUP: SelfHealthMarker = "setup";
   const IN_FLIGHT: SelfHealthMarker = "inFlight";
   let updateService: UpdateService | null = null;
@@ -847,6 +862,45 @@ export default (app: App) => {
     }
   }
 
+  /**
+   * One crash-loop sweep: sample every managed container's restart count
+   * and let the emitter decide from the rate of change.
+   *
+   * Failures are swallowed per container — an inspect that fails (the
+   * container is mid-recreate, the socket blipped) must not abort the
+   * sweep for the others, and must not raise anything: no observation is
+   * not evidence of a loop.
+   */
+  async function sweepRestartCounts(): Promise<void> {
+    for (const name of [...lastConfigs.keys()]) {
+      try {
+        const detail = await getContainerStateDetail(name);
+        // A container that is gone tells us nothing about a restart rate,
+        // and its baseline is dropped by afterContainerRemoved.
+        if (detail.state === "missing") continue;
+        degradation.observeRestarts(name, detail.restartCount);
+      } catch (err) {
+        app.debug(
+          `crash-loop poll(${name}) failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+  }
+
+  /** Arm the shared crash-loop poll once; idempotent. */
+  function armRestartPoll(): void {
+    if (restartPollTimer) return;
+    restartPollTimer = setInterval(() => {
+      if (restartPollInFlight) return;
+      restartPollInFlight = true;
+      void sweepRestartCounts().finally(() => {
+        restartPollInFlight = false;
+      });
+    }, RESTART_POLL_MS);
+  }
+
   // Shared post-removal teardown for every path that removes a container
   // (`remove`, `removeManagedData`): release reserved host ports, then tear
   // down the log-stream broker so SSE clients get `event: end` and the
@@ -886,6 +940,7 @@ export default (app: App) => {
     degradation.clear("unhealthy", name);
     degradation.clear("deviceUnresolved", name);
     degradation.clear("volumeAborted", name);
+    degradation.clear("crashLooping", name);
     degradation.forgetContainer(name);
   }
 
@@ -1895,6 +1950,10 @@ export default (app: App) => {
           selfHealthProbes.set(name, probe);
         }
       }
+
+      // Every managed container is watched for a crash loop, with or
+      // without a consumer health check.
+      armRestartPoll();
 
       if (options?.healthCheck) {
         const existing = healthTimers.get(name);
@@ -3180,6 +3239,11 @@ export default (app: App) => {
       }
       selfHealthProbes.clear();
       selfHealth.reset();
+      if (restartPollTimer) {
+        clearInterval(restartPollTimer);
+        restartPollTimer = null;
+      }
+      restartPollInFlight = false;
       // Clear every outstanding degradation notification so a plugin stop
       // doesn't strand alerts on the bus, then drop the tracking state.
       degradation.reset();
