@@ -44,6 +44,7 @@ import { detectRuntime, isContainerized, setDisableUserns } from "./runtime.js";
 import { setNamespace, resetNamespace } from "./namespace.js";
 import {
   makeDegradationEmitter,
+  type DegradationEmitter,
   type NotificationApp,
 } from "./notifications.js";
 import {
@@ -862,37 +863,20 @@ export default (app: App) => {
     }
   }
 
-  /**
-   * One crash-loop sweep: sample every managed container's restart count
-   * and let the emitter decide from the rate of change.
-   *
-   * Failures are swallowed per container — an inspect that fails (the
-   * container is mid-recreate, the socket blipped) must not abort the
-   * sweep for the others, and must not raise anything: no observation is
-   * not evidence of a loop.
-   */
   async function sweepRestartCounts(): Promise<void> {
-    // A stop() (or a re-entered start()) landing while an inspect is in
-    // flight retires this sweep: degradation.reset() has already dropped
-    // the sample history, and recording against it afterwards would seed
-    // the next run with counts from before the restart.
     const generation = startGeneration;
-    for (const name of [...lastConfigs.keys()]) {
-      try {
-        const detail = await getContainerStateDetail(name);
-        if (generation !== startGeneration) return;
-        // A container that is gone tells us nothing about a restart rate,
-        // and its samples are dropped by afterContainerRemoved.
-        if (detail.state === "missing") continue;
-        degradation.observeRestarts(name, detail.restartCount);
-      } catch (err) {
+    await sweepRestartsOnce({
+      names: () => lastConfigs.keys(),
+      inspect: (name) => getContainerStateDetail(name),
+      emitter: degradation,
+      retired: () => generation !== startGeneration,
+      onError: (name, err) =>
         app.debug(
           `crash-loop poll(${name}) failed: ${
             err instanceof Error ? err.message : String(err)
           }`,
-        );
-      }
-    }
+        ),
+    });
   }
 
   /** Arm the shared crash-loop poll once; idempotent. */
@@ -3945,6 +3929,51 @@ export function probeVolumeSource(
   // A bind mount makes this container's view of the path the host's view.
   if (coveredByOwnMount(hostPath)) return exists(hostPath);
   return "unknown";
+}
+
+/** Dependencies of one crash-loop sweep, injected so it can be tested. */
+export interface RestartSweepDeps {
+  /** The containers this process is managing right now. */
+  names: () => Iterable<string>;
+  inspect: (name: string) => Promise<ContainerStateDetail>;
+  emitter: Pick<DegradationEmitter, "observeRestarts" | "forgetRestarts">;
+  /** True once a stop() or re-entered start() has retired this sweep. */
+  retired: () => boolean;
+  onError: (name: string, err: unknown) => void;
+}
+
+/**
+ * One crash-loop sweep: sample every managed container's restart count
+ * and let the emitter decide from the rate of change.
+ *
+ * Failures are isolated per container — an inspect that fails (the
+ * container is mid-recreate, the socket blipped) must not abort the
+ * sweep for the others, and must not raise anything: a missing
+ * observation is not evidence of a loop.
+ */
+export async function sweepRestartsOnce(deps: RestartSweepDeps): Promise<void> {
+  for (const name of [...deps.names()]) {
+    try {
+      const detail = await deps.inspect(name);
+      // A stop() landing while the inspect was in flight has already
+      // dropped the sample history; recording against it now would seed
+      // the next run with counts from before the restart.
+      if (deps.retired()) return;
+      // Gone from the runtime — removed through this plugin (where
+      // afterContainerRemoved has already cleaned up) or directly by an
+      // operator (where nothing else will). Drop the restart history
+      // either way: it describes a container that no longer exists, and
+      // a stale alert would otherwise outlive it. Only the restart state
+      // goes; an ensureRunning may still be managing this name.
+      if (detail.state === "missing") {
+        deps.emitter.forgetRestarts(name);
+        continue;
+      }
+      deps.emitter.observeRestarts(name, detail.restartCount);
+    } catch (err) {
+      deps.onError(name, err);
+    }
+  }
 }
 
 export function pluginErrorForDoctor(

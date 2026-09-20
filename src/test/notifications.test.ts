@@ -424,16 +424,19 @@ describe("observeRestarts — crash-loop rate detection", () => {
     assert.equal(raises.length, 0);
   });
 
-  it("still raises across a poll gap longer than the window", () => {
+  it("re-anchors instead of alerting across a stalled poll", () => {
     const { app, raises } = makeApp();
     const e = makeDegradationEmitter(app);
     e.observeRestarts("questdb", 10, T0);
     // Two samples six minutes apart: three restarts happened somewhere in
-    // that span, but nothing says when. Pruning keeps the aged-out sample
-    // because it is the only record of the count when the window opened,
-    // so the delta is still visible. At a 60s poll this only arises when
-    // the sweep itself stalled, and alerting is the safer reading.
+    // that span, but nothing says when — they may be evenly spread. The
+    // poll runs every 60s, so this means it stalled; charging the
+    // restarts to the last five minutes would alert on an unobserved
+    // rate.
     e.observeRestarts("questdb", 13, T0 + 6 * 60_000);
+    assert.equal(raises.length, 0);
+    // And the fresh anchor must still be able to catch a real loop.
+    e.observeRestarts("questdb", 16, T0 + 7 * 60_000);
     assert.equal(raises.length, 1);
   });
 

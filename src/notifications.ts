@@ -105,6 +105,11 @@ export interface DegradationEmitter {
    * restart before the reset and two after it are three restarts inside
    * two minutes, and must alert.
    *
+   * A gap between observations longer than the window re-anchors instead
+   * of alerting. The restarts are real but undatable, and charging them
+   * to the last five minutes would report a rate that was never
+   * observed.
+   *
    * `now` is injected so tests drive the clock directly rather than
    * sleeping through the window.
    */
@@ -113,6 +118,15 @@ export interface DegradationEmitter {
     restartCount: number | undefined,
     now?: number,
   ): void;
+  /**
+   * Drop a container's restart history and clear any crash-loop alert,
+   * without touching the health or device-issue tracking that
+   * `forgetContainer` also resets. For the poll to use when a container
+   * has vanished from the runtime: its history says nothing about the
+   * next container to take the name, but an `ensureRunning` may still be
+   * managing it, so the rest of its state must survive.
+   */
+  forgetRestarts(name: string): void;
   /** Enable/disable emission (config toggle). Clears nothing. */
   setEnabled(enabled: boolean): void;
   /** Drop one container's health-tracking state (on container removal). */
@@ -281,18 +295,28 @@ export function makeDegradationEmitter(
 
     samples.push({ count: restartCount, at: now });
 
-    // Prune to the window, but keep the newest sample that has already
-    // aged out: it is the only evidence of what the count was when the
-    // window opened, and dropping it would understate the delta.
+    // Keep the newest sample that predates the window alongside those
+    // inside it: it carries the count as the window opened, and without
+    // it a burst straddling the boundary reads as only its tail.
     const cutoff = now - CRASH_LOOP_WINDOW_MS;
-    let firstInWindow = 0;
-    while (
-      firstInWindow + 1 < samples.length &&
-      samples[firstInWindow + 1].at <= cutoff
-    ) {
-      firstInWindow += 1;
+    let anchor = 0;
+    while (anchor + 1 < samples.length && samples[anchor + 1].at <= cutoff) {
+      anchor += 1;
     }
-    if (firstInWindow > 0) samples.splice(0, firstInWindow);
+    if (anchor > 0) samples.splice(0, anchor);
+
+    // The anchor is only usable while the poll is keeping up. When the
+    // sample before this one also predates the window, nothing was
+    // observed inside it at all: the poll stalled, and the restarts
+    // since are real but undatable. Charging them to the last five
+    // minutes would alert on a rate never observed — the very error
+    // reading a raw lifetime count makes. Re-anchor and wait for a
+    // window actually watched.
+    if (samples.length >= 2 && samples[samples.length - 2].at <= cutoff) {
+      restartSamples.set(name, [{ count: restartCount, at: now }]);
+      clear("crashLooping", name);
+      return;
+    }
 
     const oldest = samples[0];
     const restarts = restartCount - oldest.count;
@@ -350,6 +374,10 @@ export function makeDegradationEmitter(
     pollHealth,
     syncDeviceIssues,
     observeRestarts,
+    forgetRestarts: (name: string) => {
+      restartSamples.delete(name);
+      clear("crashLooping", name);
+    },
     setEnabled: (enabled: boolean) => {
       emit = enabled;
     },
