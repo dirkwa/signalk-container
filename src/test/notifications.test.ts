@@ -398,14 +398,43 @@ describe("observeRestarts — crash-loop rate detection", () => {
     assert.match(raises[0].message, /restarted 3 times/);
   });
 
-  it("does not raise when the same delta spans more than the window", () => {
+  it("raises on a burst that straddles a window boundary", () => {
+    const { app, raises } = makeApp();
+    const e = makeDegradationEmitter(app);
+    // One restart late in the first window and two just after it: three
+    // restarts inside two minutes. A tumbling window resets between them
+    // and misses this entirely.
+    e.observeRestarts("questdb", 0, T0);
+    e.observeRestarts("questdb", 1, T0 + 4 * 60_000);
+    e.observeRestarts("questdb", 1, T0 + 5 * 60_000);
+    e.observeRestarts("questdb", 3, T0 + 6 * 60_000);
+    assert.equal(raises.length, 1);
+    assert.match(raises[0].message, /restarted 3 times/);
+  });
+
+  it("drops samples that have aged out of the window", () => {
+    const { app, raises } = makeApp();
+    const e = makeDegradationEmitter(app);
+    // Three restarts, but spread over eleven minutes — never three
+    // inside any single five-minute span.
+    e.observeRestarts("questdb", 0, T0);
+    e.observeRestarts("questdb", 1, T0 + 4 * 60_000);
+    e.observeRestarts("questdb", 2, T0 + 8 * 60_000);
+    e.observeRestarts("questdb", 3, T0 + 11 * 60_000);
+    assert.equal(raises.length, 0);
+  });
+
+  it("still raises across a poll gap longer than the window", () => {
     const { app, raises } = makeApp();
     const e = makeDegradationEmitter(app);
     e.observeRestarts("questdb", 10, T0);
-    // Same three restarts, but observed after the window has expired:
-    // the baseline slides forward instead of alerting.
+    // Two samples six minutes apart: three restarts happened somewhere in
+    // that span, but nothing says when. Pruning keeps the aged-out sample
+    // because it is the only record of the count when the window opened,
+    // so the delta is still visible. At a 60s poll this only arises when
+    // the sweep itself stalled, and alerting is the safer reading.
     e.observeRestarts("questdb", 13, T0 + 6 * 60_000);
-    assert.equal(raises.length, 0);
+    assert.equal(raises.length, 1);
   });
 
   it("re-baselines and clears when the counter goes backwards", () => {

@@ -872,11 +872,17 @@ export default (app: App) => {
    * not evidence of a loop.
    */
   async function sweepRestartCounts(): Promise<void> {
+    // A stop() (or a re-entered start()) landing while an inspect is in
+    // flight retires this sweep: degradation.reset() has already dropped
+    // the sample history, and recording against it afterwards would seed
+    // the next run with counts from before the restart.
+    const generation = startGeneration;
     for (const name of [...lastConfigs.keys()]) {
       try {
         const detail = await getContainerStateDetail(name);
+        if (generation !== startGeneration) return;
         // A container that is gone tells us nothing about a restart rate,
-        // and its baseline is dropped by afterContainerRemoved.
+        // and its samples are dropped by afterContainerRemoved.
         if (detail.state === "missing") continue;
         degradation.observeRestarts(name, detail.restartCount);
       } catch (err) {
