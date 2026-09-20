@@ -884,9 +884,14 @@ export default (app: App) => {
     if (restartPollTimer) return;
     restartPollTimer = setInterval(() => {
       if (restartPollInFlight) return;
+      const generation = startGeneration;
       restartPollInFlight = true;
       void sweepRestartCounts().finally(() => {
-        restartPollInFlight = false;
+        // A sweep retired by stop() must not release the guard: stop()
+        // has already cleared it, a new lifecycle may have armed its own
+        // sweep since, and clearing it again would let the next tick run
+        // a second sweep concurrently with that one.
+        if (generation === startGeneration) restartPollInFlight = false;
       });
     }, RESTART_POLL_MS);
   }
