@@ -148,6 +148,26 @@ describe("sweepRestartsOnce", () => {
     assert.deepEqual(ctl.observed, []);
   });
 
+  it("discards a stale `missing` for a container already replaced", async () => {
+    const ctl = makeDeps(["questdb"], async () => ({
+      state: "missing" as const,
+    }));
+    const deps = {
+      ...ctl.deps,
+      inspect: async (name: string) => {
+        const detail = await ctl.deps.inspect(name);
+        // Removed and recreated under the same name while this inspect
+        // was in flight: the `missing` describes the OLD container.
+        ctl.removeContainer(name);
+        return detail;
+      },
+    };
+    await sweepRestartsOnce(deps);
+    // Acting on it would delete the live replacement's history and clear
+    // a crash-loop alert that belongs to it.
+    assert.deepEqual(ctl.forgotten, []);
+  });
+
   it("passes an absent restart count through untouched", async () => {
     // The emitter owns the "runtime did not report it" rule; the sweep
     // must not substitute a zero that would read as a real observation.

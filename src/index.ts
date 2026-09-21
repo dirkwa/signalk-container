@@ -3972,6 +3972,11 @@ export async function sweepRestartsOnce(deps: RestartSweepDeps): Promise<void> {
       // dropped the sample history; recording against it now would seed
       // the next run with counts from before the restart.
       if (deps.retired()) return;
+      // The container this result describes was removed while the
+      // inspect was in flight, so it says nothing about whatever holds
+      // the name now. This covers BOTH branches below: acting on a stale
+      // `missing` would wipe a live replacement's history and alert.
+      if (deps.emitter.restartEpoch(name) !== epoch) continue;
       // Gone from the runtime — removed through this plugin (where
       // afterContainerRemoved has already cleaned up) or directly by an
       // operator (where nothing else will). Drop the restart history
