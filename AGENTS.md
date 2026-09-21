@@ -305,7 +305,7 @@ the tag and the GitHub Release, then dispatches `publish.yml` on the tag to run
 `npm publish --provenance --access public`.
 
 1. Land the work through a normal PR. No hand-written `chore(release)` PR — release-please writes the bump itself.
-2. Merge the release PR when the version is right. `versioning: always-bump-patch` means every release is a PATCH bump; for a minor or major, add a `Release-As: X.Y.Z` footer to a commit.
+2. Merge the release PR when the version is right. The bump follows the commit type — `feat` minor, `fix`/`perf` patch, `!` or a `BREAKING CHANGE:` footer major. To release a specific version instead, add a `Release-As: X.Y.Z` footer to a commit.
 3. Never merge a release PR without explicit approval — that merge is what publishes to npm.
 
 Pre-release tags (`vX.Y.Z-beta.N`, `vX.Y.Z-rc.N`) are still pushed by hand and
@@ -315,14 +315,15 @@ by `publish.yml`.
 A release only gets proposed when the push carries a commit users get — see the
 `gate` job in `.github/workflows/release-please.yml`.
 
-Commit type drives whether a release is proposed, not how big the bump is:
-`always-bump-patch` makes every release a PATCH. `feat`, `fix`, `perf`, a
-`revert`, any `type!`, a `BREAKING CHANGE:` footer and `build(deps)` all
-propose one; pure `chore`, `docs`, `ci`, `test` and `build(deps-dev)` do not.
+Commit type decides two separate things. Whether a release is proposed at
+all: `feat`, `fix`, `perf`, a `revert`, any `type!`, a `BREAKING CHANGE:`
+footer and `build(deps)` all propose one; pure `chore`, `docs`, `ci`, `test`
+and `build(deps-dev)` do not. And how big the bump is: `feat` minor,
+`fix`/`perf` patch, `!` or a `BREAKING CHANGE:` footer major.
 
-For a minor or major, say so explicitly with a `Release-As: X.Y.Z` footer.
-Dirk may override the bump (e.g. ship a behavior change as minor even if
-technically API-compatible). Ask before assuming.
+A `Release-As: X.Y.Z` footer overrides the derived version when a release
+should carry a different one — Dirk may do that (e.g. ship a behaviour change
+as minor even if technically API-compatible). Ask before assuming.
 
 ## Common Pitfalls
 
