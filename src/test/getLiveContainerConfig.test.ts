@@ -29,6 +29,7 @@ function buildInspect(parts: {
   devices?: Array<Record<string, unknown>> | null;
   deviceCgroupRules?: string[] | null;
   groupAdd?: string[] | null;
+  capAdd?: string[] | null;
 }): Json {
   return {
     Config: {
@@ -45,6 +46,7 @@ function buildInspect(parts: {
       Devices: parts.devices ?? null,
       DeviceCgroupRules: parts.deviceCgroupRules ?? null,
       GroupAdd: parts.groupAdd ?? null,
+      CapAdd: parts.capAdd ?? null,
     },
   };
 }
@@ -465,6 +467,35 @@ describe("getLiveContainerConfig", () => {
     assert.deepEqual(withNulls.devices, []);
     assert.deepEqual(withNulls.deviceCgroupRules, []);
     assert.deepEqual(withNulls.groupAdd, []);
+  });
+
+  it("normalises CapAdd, defaulting null to an empty array", async () => {
+    // The runtimes report either spelling depending on version; the live
+    // side must be normalised the same way the requested side is, or
+    // every reconciliation would see drift and recreate the container.
+    const withValues = await getLiveContainerConfig(
+      dummyRuntime,
+      "x",
+      clientWith(
+        buildInspect({
+          image: "x:1",
+          networkMode: "",
+          capAdd: ["CAP_SYS_ADMIN", "net_raw"],
+        }),
+      ),
+    );
+    assert.ok(withValues);
+    assert.deepEqual(withValues.capAdd, ["CAP_SYS_ADMIN", "CAP_NET_RAW"]);
+
+    const withNulls = await getLiveContainerConfig(
+      dummyRuntime,
+      "x",
+      clientWith(buildInspect({ image: "x:1", networkMode: "" })),
+    );
+    assert.ok(withNulls);
+    // Empty, not undefined: a dropped capability must read as "none
+    // live" so the symmetric diff detects the removal.
+    assert.deepEqual(withNulls.capAdd, []);
   });
 
   it("returns empty user when the container was created without --user", async () => {

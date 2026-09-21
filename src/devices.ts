@@ -468,6 +468,32 @@ function parseEtcGroup(content: string): Map<string, number> {
 }
 
 /**
+ * Normalise a `ContainerConfig.capAdd` list to the `CAP_`-prefixed
+ * upper-case form the runtimes report back.
+ *
+ * `--cap-add SYS_ADMIN` and `--cap-add CAP_SYS_ADMIN` request the same
+ * capability, and a live container may report either spelling depending
+ * on runtime and version. Normalising both the requested and the live
+ * list means drift detection compares capabilities rather than spelling,
+ * so a consumer editing `"SYS_ADMIN"` to `"CAP_SYS_ADMIN"` does not
+ * recreate the container. Blank entries are dropped and duplicates
+ * collapse; order is not significant, so callers compare as sets.
+ *
+ * Unknown names are passed through rather than rejected: the kernel's
+ * capability set grows, and the runtime is the authority on what it
+ * accepts. An invalid name fails loudly at create time.
+ */
+export function normalizeCapabilities(capAdd: ReadonlyArray<string>): string[] {
+  const out: string[] = [];
+  for (const entry of capAdd) {
+    const name = entry.trim().toUpperCase();
+    if (name === "") continue;
+    pushUnique(out, name.startsWith("CAP_") ? name : `CAP_${name}`);
+  }
+  return out;
+}
+
+/**
  * Resolve a `ContainerConfig.groupAdd` list to the numeric-GID strings
  * the runtime should receive in `HostConfig.GroupAdd`.
  *

@@ -54,6 +54,7 @@ import {
   presentLiveDeviceNodes,
   resolveDeviceRequests,
   resolveGroupAdd,
+  normalizeCapabilities,
   unresolvedGroupNames,
   type DeviceNodeSpec,
 } from "./devices.js";
@@ -1564,6 +1565,12 @@ export interface LiveContainerConfig {
   /** `HostConfig.GroupAdd`, `[]` when unset. Both runtimes report it. */
   groupAdd: string[];
   /**
+   * `HostConfig.CapAdd`, `[]` when unset, normalised to the
+   * `CAP_`-prefixed upper-case form so a live value reported in either
+   * spelling compares equal to the requested one.
+   */
+  capAdd: string[];
+  /**
    * `Config.Labels`, `{}` when unset. Not part of drift detection as a
    * field — read for the system labels signalk-container stamps itself,
    * notably `DEVICES_UNRESOLVED_LABEL` (device entries the host rejected
@@ -1620,6 +1627,7 @@ export async function getLiveContainerConfig(
     Devices?: Array<Record<string, unknown>> | null;
     DeviceCgroupRules?: string[] | null;
     GroupAdd?: string[] | null;
+    CapAdd?: string[] | null;
   };
   const rawCmd = config.Cmd ?? null;
   const rawNetworkMode = hostConfig.NetworkMode;
@@ -1631,6 +1639,7 @@ export async function getLiveContainerConfig(
   const rawDevices = hostConfig.Devices ?? null;
   const rawDeviceCgroupRules = hostConfig.DeviceCgroupRules ?? null;
   const rawGroupAdd = hostConfig.GroupAdd ?? null;
+  const rawCapAdd = hostConfig.CapAdd ?? null;
 
   // Split image into image+tag (and optional digest). Config.Image can
   // be `repo:tag`, `repo@sha256:...`, or `repo:tag@sha256:...`.
@@ -1748,6 +1757,11 @@ export async function getLiveContainerConfig(
   const groupAdd = Array.isArray(rawGroupAdd)
     ? rawGroupAdd.filter((g): g is string => typeof g === "string")
     : [];
+  const capAdd = Array.isArray(rawCapAdd)
+    ? normalizeCapabilities(
+        rawCapAdd.filter((c): c is string => typeof c === "string"),
+      )
+    : [];
 
   const labels: Record<string, string> = {};
   if (config.Labels && typeof config.Labels === "object") {
@@ -1770,6 +1784,7 @@ export async function getLiveContainerConfig(
     devices,
     deviceCgroupRules,
     groupAdd,
+    capAdd,
     labels,
   };
 }
@@ -2197,6 +2212,17 @@ export function diffContainerConfig(
     : [];
   if (!sortedStringArraysEqual(expectedGroupAdd, live.groupAdd)) {
     drifted.push("groupAdd");
+  }
+
+  // CapAdd: requested vs live, both normalised to the CAP_ form, as
+  // sorted sets. Both runtimes report HostConfig.CapAdd and nothing else
+  // populates it, so the symmetric comparison detects unsetting without
+  // `prior` — the same property that makes groupAdd restart-safe.
+  const expectedCapAdd = requested.capAdd?.length
+    ? normalizeCapabilities(requested.capAdd)
+    : [];
+  if (!sortedStringArraysEqual(expectedCapAdd, live.capAdd)) {
+    drifted.push("capAdd");
   }
 
   // User/ownership drift. Compute the `User` form the translator would
@@ -2703,6 +2729,15 @@ function buildCreateOptions(
   // half that actually grants device-node access there. Docker never
   // receives the annotation (crun-specific; dockerode's HostConfig
   // typing predates the field, hence the cast).
+  // Capabilities widen what the container may do to the host, so the
+  // emitted set is exactly what the consumer asked for — normalised, but
+  // never extended. Under rootless podman the runtime still bounds these
+  // by the invoking user's own capability set.
+  if (config.capAdd?.length) {
+    const caps = normalizeCapabilities(config.capAdd);
+    if (caps.length > 0) hostConfig.CapAdd = caps;
+  }
+
   if (config.groupAdd?.length) {
     const groups = resolveGroupAdd(config.groupAdd, debug);
     if (groups.length > 0) hostConfig.GroupAdd = groups;

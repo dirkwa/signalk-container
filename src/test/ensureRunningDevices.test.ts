@@ -76,6 +76,7 @@ interface HostConfigShape {
   }>;
   DeviceCgroupRules?: string[];
   GroupAdd?: string[];
+  CapAdd?: string[];
   Binds?: string[];
   Annotations?: Record<string, string>;
 }
@@ -227,6 +228,37 @@ describe("ensureRunning — groupAdd in the create payload", () => {
     });
   });
 
+  it("emits the requested capabilities in the CAP_ form", async () => {
+    const { client, calls } = makeClient();
+    await ensureRunning(
+      docker,
+      "satellite",
+      { ...baseConfig, capAdd: ["SYS_ADMIN", "net_raw"] },
+      () => {},
+      undefined,
+      client,
+    );
+    assert.deepEqual(hostConfigFrom(calls).CapAdd, [
+      "CAP_SYS_ADMIN",
+      "CAP_NET_RAW",
+    ]);
+  });
+
+  it("emits exactly the requested capabilities, never more", async () => {
+    // Each capability widens what the container may do to the host, so
+    // the emitted set must not be extended on the consumer's behalf.
+    const { client, calls } = makeClient();
+    await ensureRunning(
+      podmanRootless,
+      "satellite",
+      { ...baseConfig, capAdd: ["SYS_ADMIN"] },
+      () => {},
+      undefined,
+      client,
+    );
+    assert.deepEqual(hostConfigFrom(calls).CapAdd, ["CAP_SYS_ADMIN"]);
+  });
+
   it("leaves all device/group fields unset when the config doesn't use them", async () => {
     const { client, calls } = makeClient();
     await ensureRunning(
@@ -241,6 +273,7 @@ describe("ensureRunning — groupAdd in the create payload", () => {
     assert.equal(hc.Devices, undefined);
     assert.equal(hc.DeviceCgroupRules, undefined);
     assert.equal(hc.GroupAdd, undefined);
+    assert.equal(hc.CapAdd, undefined);
     assert.equal(hc.Annotations, undefined);
   });
 

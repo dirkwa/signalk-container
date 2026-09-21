@@ -5,6 +5,7 @@ import {
   majorFromRdev,
   parseDeviceEntry,
   resolveDeviceRequests,
+  normalizeCapabilities,
   resolveGroupAdd,
   unresolvedGroupNames,
   type DeviceHostProbe,
@@ -383,5 +384,44 @@ describe("unresolvedGroupNames", () => {
       }),
       [],
     );
+  });
+});
+
+describe("normalizeCapabilities", () => {
+  it("adds the CAP_ prefix and upper-cases", () => {
+    assert.deepEqual(normalizeCapabilities(["sys_admin", "net_raw"]), [
+      "CAP_SYS_ADMIN",
+      "CAP_NET_RAW",
+    ]);
+  });
+
+  it("leaves an already-prefixed name alone", () => {
+    assert.deepEqual(normalizeCapabilities(["CAP_SYS_ADMIN"]), [
+      "CAP_SYS_ADMIN",
+    ]);
+  });
+
+  it("collapses the two spellings of one capability", () => {
+    // The point of normalising: a consumer rewriting SYS_ADMIN as
+    // CAP_SYS_ADMIN must not recreate the container.
+    assert.deepEqual(normalizeCapabilities(["SYS_ADMIN", "CAP_SYS_ADMIN"]), [
+      "CAP_SYS_ADMIN",
+    ]);
+  });
+
+  it("drops blank entries and trims surrounding space", () => {
+    assert.deepEqual(normalizeCapabilities([" sys_admin ", "", "   "]), [
+      "CAP_SYS_ADMIN",
+    ]);
+  });
+
+  it("passes an unknown capability through", () => {
+    // The kernel's set grows; the runtime is the authority on what it
+    // accepts, and an invalid name fails loudly at create time.
+    assert.deepEqual(normalizeCapabilities(["bpf_future"]), ["CAP_BPF_FUTURE"]);
+  });
+
+  it("returns an empty list for no entries", () => {
+    assert.deepEqual(normalizeCapabilities([]), []);
   });
 });

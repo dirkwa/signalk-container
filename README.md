@@ -23,7 +23,7 @@ Instead of each plugin implementing its own container orchestration, they delega
 - **Zero-config container service connectivity** -- `signalkAccessiblePorts` lets the SignalK process connect back to a service running inside a managed container (e.g. an HTTP or TCP server). signalk-container picks the right networking strategy automatically — port binding on the host loopback for bare-metal deployments, or a shared Docker network with DNS for containerised ones. No host ports are exposed unnecessarily.
 - **Host timezone propagation** -- managed containers and one-shot jobs get `TZ=<host zone>` injected automatically, so time-based logic inside them (cron-style Node-RED flows, Grafana/QuestDB time rendering, log timestamps) agrees with the host clock instead of defaulting to UTC. Consumer plugins that set `env.TZ` themselves keep full control; shell-level tools inside minimal images may additionally need the image's `tzdata` package to interpret the zone name. See the [developer guide](doc/plugin-developer-guide.md#host-timezone).
 - **SELinux support** -- `:Z` volume flags for Podman bind mounts on Fedora/RHEL; named volumes are handled correctly (`:Z` is not applied)
-- **Host device access** -- `ContainerConfig.devices` exposes host device nodes or whole device directories (`/dev/snd`, `/dev/input`, …) to a managed container — directory bindings are hot-plug-safe, so a USB replug keeps working without a recreate (individual nodes are attached statically and need one) — and `ContainerConfig.groupAdd` resolves host group names to the GIDs that own those nodes. Works across docker and rootless Podman (on rootless the access comes from the Podman caller's own host groups, so that user must be in the device-owning group); a missing device never blocks container start. See [Exposing host devices](#exposing-host-devices-devices-groupadd).
+- **Host device access** -- `ContainerConfig.devices` exposes host device nodes or whole device directories (`/dev/snd`, `/dev/input`, …) to a managed container — directory bindings are hot-plug-safe, so a USB replug keeps working without a recreate (individual nodes are attached statically and need one) — and `ContainerConfig.groupAdd` resolves host group names to the GIDs that own those nodes. Works across docker and rootless Podman (on rootless the access comes from the Podman caller's own host groups, so that user must be in the device-owning group); a missing device never blocks container start. See [Exposing host devices](#exposing-host-devices-devices-groupadd-capadd).
 - **Read-only volumes** -- `{ source, readOnly: true }` binds a volume `:ro`, for sharing a directory another component owns (charts published by a chart provider, say) without granting write access to it. 1.30.0+.
 - **Per-volume host-source policy** -- volumes accept `{ source, ifMissing: "skip" | "abort" }` for user-managed (USB drives, NFS) or deployment-required (TLS certs) mounts. Plugins subscribe to `onVolumeIssue` events for `'skipped'`, `'aborted'`, and `'recovered'` actions; signalk-container auto-recreates the container when a previously-missing source reappears. See the [developer guide](doc/plugin-developer-guide.md#optional-and-required-volumes).
 - **Container log streaming** -- click **Logs** on any managed-container card to open a live-streaming popup of the container's stdout+stderr (combined, the same shape `podman logs <name>` produces). Plugin authors can also wire `onContainerLog` in `ensureRunning` options to forward the same stream into their plugin's `app.debug` channel — visible in the Signal K server log when debug is enabled. Multiple subscribers share a single underlying log stream. See the [developer guide](doc/plugin-developer-guide.md#streaming-container-logs-into-your-plugins-debug-channel).
@@ -807,7 +807,7 @@ The allocated address is cached for the lifetime of the plugin session, so repea
 > a manual `ports` or `networkMode` entry for the same container — the field takes
 > full ownership of those concerns.
 
-## Exposing host devices (`devices`, `groupAdd`)
+## Exposing host devices (`devices`, `groupAdd`, `capAdd`)
 
 When a managed container needs a host device — a USB speakerphone for a voice assistant, a serial/GPS dongle, a GPU — declare it in the config instead of hand-rolling runtime flags:
 
@@ -834,9 +834,23 @@ On rootless Podman (the recommended deployment) device access is governed by pla
 
 > Note when verifying by hand: some device nodes (e.g. `/dev/snd/timer`) are blocking character devices — a `read` hangs until an event, which looks like a failure. Test access by _opening_ the node (`exec 3</dev/snd/timer`), not by reading it. Inside a rootless container `id` may show the supplementary groups as `nobody`; that is expected — the kernel still checks the caller's real host GIDs against the node, so access works regardless of the display.
 
-Both fields participate in config-drift detection — adding, removing, or changing them recreates the container on the next `ensureRunning` call.
+### Capabilities (`capAdd`)
 
-> Availability: `devices` and `groupAdd` require signalk-container ≥ 1.24.0. Older versions silently ignore the fields — the container still runs, just without the device access.
+Some workloads need a Linux capability rather than (or as well as) a device node. `ContainerConfig.capAdd` maps to `--cap-add`:
+
+```js
+capAdd: ["SYS_ADMIN"], // or "CAP_SYS_ADMIN" — the same capability
+```
+
+Names are accepted with or without the `CAP_` prefix and normalised to the prefixed form the runtimes report, so rewriting one spelling as the other does not recreate the container.
+
+Every capability widens what the container may do to the host, so request the narrowest set that works. `SYS_ADMIN` in particular is close to root — prefer a specific capability, a device passthrough, or `groupAdd` when one of those covers the need.
+
+Capabilities are not a route to privileges the runtime itself lacks: under rootless Podman the container's capabilities are bounded by the invoking user's, so an entry can be accepted at create time and still not grant the access you expected. Verify on the target host rather than assuming. There is deliberately **no `privileged` field** — that is the absence of a boundary rather than a capability.
+
+All three fields participate in config-drift detection — adding, removing, or changing them recreates the container on the next `ensureRunning` call. That includes _removing_ a capability: the container does not keep running with a capability the consumer has dropped.
+
+> Availability: `devices` and `groupAdd` require signalk-container ≥ 1.24.0; `capAdd` requires ≥ 1.34.0. Older versions silently ignore the fields — the container still runs, just without the device access.
 
 ---
 
