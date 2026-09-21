@@ -255,6 +255,7 @@ describe("diffContainerConfig — unresolved-label stickiness", () => {
       devices: [],
       deviceCgroupRules: [],
       groupAdd: [],
+      capAdd: [],
       labels,
     };
   }

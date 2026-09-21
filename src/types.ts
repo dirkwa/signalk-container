@@ -481,6 +481,33 @@ export interface ContainerConfig {
    */
   groupAdd?: (string | number)[];
   /**
+   * Linux capabilities to add to the container (`--cap-add`), mapped to
+   * `HostConfig.CapAdd`. Entries are capability names, with or without
+   * the `CAP_` prefix (`"SYS_ADMIN"` and `"CAP_SYS_ADMIN"` are the same
+   * capability); they are normalised to the `CAP_`-prefixed upper-case
+   * form the runtimes report, so drift detection does not fire on a
+   * spelling change alone.
+   *
+   * Each entry widens what the container may do to the host, so request
+   * the narrowest set that works rather than reaching for the broad
+   * ones. `SYS_ADMIN` in particular is close to root — prefer a specific
+   * capability, a device passthrough, or `groupAdd` when one of those
+   * covers the need.
+   *
+   * Capabilities are NOT a way to obtain host privileges the runtime
+   * itself does not hold. Under rootless podman the container's
+   * capabilities are bounded by the invoking user's, so an entry here
+   * can be accepted at create time and still not grant the access the
+   * consumer expected. There is deliberately no `privileged` field:
+   * that is the absence of a boundary rather than a capability, and it
+   * would belong to signalk-container's own operator config, never to a
+   * consumer-set `ContainerConfig`.
+   *
+   * Part of drift detection: changes (including unsetting) recreate the
+   * container.
+   */
+  capAdd?: string[];
+  /**
    * Resource limits for the container. The consumer plugin sets a
    * sensible default here; the user can override per-container via
    * signalk-container's plugin config (see `containerOverrides`).

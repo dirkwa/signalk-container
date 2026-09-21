@@ -79,6 +79,7 @@ function liveBase(
     devices: [],
     deviceCgroupRules: [],
     groupAdd: [],
+    capAdd: [],
     labels: {},
     ...overrides,
   } as LiveContainerConfig;
@@ -1065,5 +1066,53 @@ describe("diffContainerConfig — cold-start device provenance on podman", () =>
       reqBase({ devices: ["/dev/ttyUSB0"] }),
     );
     assert.ok(!drifted.includes("devices"));
+  });
+});
+
+describe("diffContainerConfig — capAdd", () => {
+  it("no drift when the requested and live spellings differ", () => {
+    // Created from `capAdd: ["SYS_ADMIN"]`; the runtime reports the
+    // CAP_-prefixed form. The same config must not recreate.
+    const { drifted } = diffContainerConfig(
+      reqBase({ capAdd: ["SYS_ADMIN"] }),
+      liveBase({ capAdd: ["CAP_SYS_ADMIN"] }),
+      docker,
+    );
+    assert.ok(!drifted.includes("capAdd"));
+  });
+
+  it("compares as an unordered set", () => {
+    const { drifted } = diffContainerConfig(
+      reqBase({ capAdd: ["NET_RAW", "SYS_ADMIN"] }),
+      liveBase({ capAdd: ["CAP_SYS_ADMIN", "CAP_NET_RAW"] }),
+      docker,
+    );
+    assert.ok(!drifted.includes("capAdd"));
+  });
+
+  it("flags drift when a capability is added", () => {
+    const { drifted } = diffContainerConfig(
+      reqBase({ capAdd: ["SYS_ADMIN", "NET_ADMIN"] }),
+      liveBase({ capAdd: ["CAP_SYS_ADMIN"] }),
+      docker,
+    );
+    assert.ok(drifted.includes("capAdd"));
+  });
+
+  it("flags drift when a previously-set capAdd is unset (no prior needed)", () => {
+    // The security-relevant direction: a consumer dropping a capability
+    // must not leave the container running with it. Detected off the
+    // live container alone, so it survives a Signal K restart.
+    const { drifted } = diffContainerConfig(
+      reqBase(),
+      liveBase({ capAdd: ["CAP_SYS_ADMIN"] }),
+      docker,
+    );
+    assert.ok(drifted.includes("capAdd"));
+  });
+
+  it("no drift when neither side asks for a capability", () => {
+    const { drifted } = diffContainerConfig(reqBase(), liveBase(), docker);
+    assert.ok(!drifted.includes("capAdd"));
   });
 });
