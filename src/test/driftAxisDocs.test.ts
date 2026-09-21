@@ -1,22 +1,23 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 
 /**
- * The drift axes are listed in prose in several docs, by hand. Five of
- * those lists had fallen behind the code at once — `devices`, `groupAdd`,
- * `extraHosts` and `capAdd` all recreate a container without any of them
- * saying so, which reads as a promise that changing those fields is safe.
+ * The drift axes are enumerated in prose in several docs, by hand. A
+ * field that recreates a container but goes unlisted reads as a promise
+ * that changing it leaves the container alone, so every axis
+ * `diffContainerConfig` can report must appear in each list.
  *
- * This reads the axis names straight out of `diffContainerConfig` and
- * asserts every one is mentioned where the behaviour is documented, so a
- * new axis cannot be added without the docs being updated with it.
+ * The axis names are read out of the source rather than restated here:
+ * a copy would be one more list to fall behind.
  */
-const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
+const repoRoot = new URL("../../", import.meta.url);
 
 function read(relative: string): string {
-  return readFileSync(new URL(relative, new URL(repoRoot, "file:///")), "utf8");
+  // Resolved as a URL throughout. Converting to a path first and back
+  // would make a Windows drive letter ("C:\repo\") look like a URL
+  // scheme to the URL constructor.
+  return readFileSync(new URL(relative, repoRoot), "utf8");
 }
 
 /** Every `drifted.push("<axis>")` in the diff, as written. */
