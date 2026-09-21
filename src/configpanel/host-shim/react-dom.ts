@@ -1,7 +1,7 @@
 /// <reference path="./types.d.ts" />
 import type * as ReactDOMNS from "react-dom";
 
-const host = globalThis.__SK_REACT_DOM__;
+const host = window.__SK_REACT_DOM__;
 if (!host) {
   throw new Error(
     "signalk-container: window.__SK_REACT_DOM__ is not set by the host.",

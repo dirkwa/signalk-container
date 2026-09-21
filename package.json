@@ -28,8 +28,9 @@
   "scripts": {
     "clean": "rimraf dist public",
     "build:server": "tsc",
+    "typecheck:panel": "tsc -p src/configpanel --noEmit",
     "build:configpanel": "vite build",
-    "build": "npm run clean && npm run build:server && npm run build:configpanel && npm run check:home-paths",
+    "build": "npm run clean && npm run build:server && npm run typecheck:panel && npm run build:configpanel && npm run check:home-paths",
     "watch": "tsc --watch",
     "prettier": "prettier --write .",
     "lint": "eslint --fix",

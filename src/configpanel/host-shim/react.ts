@@ -6,7 +6,7 @@
 /// <reference path="./types.d.ts" />
 import type ReactNS from "react";
 
-const host = globalThis.__SK_REACT__;
+const host = window.__SK_REACT__;
 if (!host) {
   throw new Error(
     "signalk-container: window.__SK_REACT__ is not set. The host signalk-server admin UI must expose React on window for plugin federation. Requires signalk-server 2.27.0 or newer.",
