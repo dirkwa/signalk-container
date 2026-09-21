@@ -1,0 +1,38 @@
+{
+  // The config panel is a browser bundle, not part of the Node plugin
+  // compile: the root tsconfig excludes this directory so `tsc` emits no
+  // dist/configpanel/. This config typechecks it instead, via
+  // `npm run typecheck:panel` — vite bundles the panel without checking
+  // types, so nothing else does. noEmit: the check never produces output.
+  //
+  // DOM and JSX belong here rather than in the root tsconfig, where they
+  // would let server code reference `document` and still typecheck.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+
+    // "react-jsx" matches @vitejs/plugin-react's automatic runtime, which
+    // vite.config.ts aliases to host-shim/react-jsx-runtime.ts so the panel
+    // shares the host admin UI's React instance.
+    "jsx": "react-jsx",
+
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+
+    // The panel imports from the server tree (../types, ../clipboard,
+    // ../doctorReport), which reference node types.
+    "types": ["node"],
+
+    "strict": true,
+    "noEmit": true,
+
+    // vite compiles one file at a time with no type information, so the
+    // code must be safe to transpile in isolation.
+    "isolatedModules": true,
+
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["."]
+}
