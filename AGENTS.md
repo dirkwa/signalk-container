@@ -215,7 +215,7 @@ Discoverability — `selfDeployment().containerStorage` reports the filesystem b
 
 ### Auto-recreate on config drift
 
-`ensureRunning` compares the requested `ContainerConfig` against the live container's effective config on every call. On drift across `image+tag`, `command`, `networkMode`, `env`, `volumes`, or `ports`, it removes and recreates the container transparently. `resources` follows the existing live-update path. Consumer plugins do not need (and should remove) per-plugin `${dataDir}.container-hash` files — this is centralized.
+`ensureRunning` compares the requested `ContainerConfig` against the live container's effective config on every call. On drift across `image+tag`, `command`, `networkMode`, `env`, `volumes`, `ports`, `extraHosts`, `devices`, `groupAdd`, `capAdd`, or `user`, it removes and recreates the container transparently. (`user` only where the expected form surfaces in `Config.User` — rootless podman's `keep-id` mapping does not, and suppresses it by design.) The authoritative list is `drifted.push(...)` in `diffContainerConfig`; per-field intent lives on `ContainerConfig` in `src/types.ts`. `resources` follows the existing live-update path. Consumer plugins do not need (and should remove) per-plugin `${dataDir}.container-hash` files — this is centralized.
 
 The diff has an optional `prior?: ContainerConfig` parameter for detecting "unset" drift (an env key previously set is now absent, a `command` previously set is now `undefined`). The wrapper in `src/index.ts` reads it from `lastConfigs` before overwriting.
 

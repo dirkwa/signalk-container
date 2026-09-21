@@ -183,7 +183,7 @@ The rules:
 
 ## Container Config Changes
 
-Just call `ensureRunning(name, config)` whenever your plugin starts or its configuration changes. signalk-container compares the requested config against the live container's effective state and automatically removes + recreates when any of `image`, `tag`, `command`, `networkMode`, `env`, `volumes`, or `ports` differ. `resources` changes are applied live where possible (see [Resource Limits](#resource-limits) below).
+Just call `ensureRunning(name, config)` whenever your plugin starts or its configuration changes. signalk-container compares the requested config against the live container's effective state and automatically removes + recreates when any of `image`, `tag`, `command`, `networkMode`, `env`, `volumes`, `ports`, `extraHosts`, `devices`, `groupAdd`, or `capAdd` differ. `resources` changes are applied live where possible (see [Resource Limits](#resource-limits) below).
 
 ```typescript
 await containers.ensureRunning("my-service", {
@@ -483,7 +483,7 @@ Available in signalk-container 1.6.0+.
 
 ### `ensureRunning(name, config, options?): Promise<void>`
 
-Creates and starts a container if missing; starts it if stopped. If the container is already running OR stopped with **drifted config** (image, tag, command, networkMode, env, volumes, or ports differ from the requested config), it is removed and recreated transparently. Resource limits changes are applied live where possible — see [Resource Limits](#resource-limits).
+Creates and starts a container if missing; starts it if stopped. If the container is already running OR stopped with **drifted config** (image, tag, command, networkMode, env, volumes, ports, extraHosts, devices, groupAdd, or capAdd differ from the requested config), it is removed and recreated transparently. Resource limits changes are applied live where possible — see [Resource Limits](#resource-limits).
 
 Volumes accept either a bare host-path string (auto-create — runtime creates the host dir if missing) or a `VolumeSpec` object `{ source, ifMissing: "create" | "skip" | "abort" }` for per-volume policy. `options` is an `EnsureRunningOptions` (a superset of `HealthCheckOptions`) which also accepts an `onVolumeIssue` event handler. See [Optional and required volumes](#optional-and-required-volumes) for the full pattern.
 
