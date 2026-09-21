@@ -369,3 +369,173 @@ describe("degradation emitter — reset", () => {
     assert.equal(raises.length, 1);
   });
 });
+
+describe("observeRestarts — crash-loop rate detection", () => {
+  const T0 = 1_700_000_000_000;
+
+  it("does not raise on the first observation, whatever the count", () => {
+    const { app, raises } = makeApp();
+    const e = makeDegradationEmitter(app);
+    // A container that survived a host reboot can legitimately show a
+    // high lifetime count; we did not witness those restarts.
+    e.observeRestarts("questdb", 250, T0);
+    assert.equal(raises.length, 0);
+  });
+
+  it("raises once the restart delta crosses the threshold in-window", () => {
+    const { app, raises } = makeApp();
+    const e = makeDegradationEmitter(app);
+    e.observeRestarts("questdb", 10, T0);
+    e.observeRestarts("questdb", 11, T0 + 60_000);
+    assert.equal(raises.length, 0, "one restart is not a loop");
+    e.observeRestarts("questdb", 13, T0 + 120_000);
+    assert.equal(raises.length, 1);
+    assert.equal(raises[0].state, "alert");
+    assert.equal(
+      raises[0].path,
+      "notifications.container.questdb.crashLooping",
+    );
+    assert.match(raises[0].message, /restarted 3 times/);
+  });
+
+  it("raises on a burst that straddles a window boundary", () => {
+    const { app, raises } = makeApp();
+    const e = makeDegradationEmitter(app);
+    // One restart late in the first window and two just after it: three
+    // restarts inside two minutes. A tumbling window resets between them
+    // and misses this entirely.
+    e.observeRestarts("questdb", 0, T0);
+    e.observeRestarts("questdb", 1, T0 + 4 * 60_000);
+    e.observeRestarts("questdb", 1, T0 + 5 * 60_000);
+    e.observeRestarts("questdb", 3, T0 + 6 * 60_000);
+    assert.equal(raises.length, 1);
+    assert.match(raises[0].message, /restarted 3 times/);
+  });
+
+  it("drops samples that have aged out of the window", () => {
+    const { app, raises } = makeApp();
+    const e = makeDegradationEmitter(app);
+    // Three restarts, but spread over eleven minutes — never three
+    // inside any single five-minute span.
+    e.observeRestarts("questdb", 0, T0);
+    e.observeRestarts("questdb", 1, T0 + 4 * 60_000);
+    e.observeRestarts("questdb", 2, T0 + 8 * 60_000);
+    e.observeRestarts("questdb", 3, T0 + 11 * 60_000);
+    assert.equal(raises.length, 0);
+  });
+
+  it("treats a gap of exactly the window as observed, not stalled", () => {
+    const { app, raises } = makeApp();
+    const e = makeDegradationEmitter(app);
+    e.observeRestarts("questdb", 10, T0);
+    // Exactly five minutes: the sample sits on the window's edge, which
+    // is still an observation of it rather than a gap past it.
+    e.observeRestarts("questdb", 13, T0 + 5 * 60_000);
+    assert.equal(raises.length, 1);
+  });
+
+  it("re-anchors instead of alerting across a stalled poll", () => {
+    const { app, raises } = makeApp();
+    const e = makeDegradationEmitter(app);
+    e.observeRestarts("questdb", 10, T0);
+    // Two samples six minutes apart: three restarts happened somewhere in
+    // that span, but nothing says when — they may be evenly spread. The
+    // poll runs every 60s, so this means it stalled; charging the
+    // restarts to the last five minutes would alert on an unobserved
+    // rate.
+    e.observeRestarts("questdb", 13, T0 + 6 * 60_000);
+    assert.equal(raises.length, 0);
+    // And the fresh anchor must still be able to catch a real loop.
+    e.observeRestarts("questdb", 16, T0 + 7 * 60_000);
+    assert.equal(raises.length, 1);
+  });
+
+  it("re-baselines and clears when the counter goes backwards", () => {
+    const { app, raises, cleared } = makeApp();
+    const e = makeDegradationEmitter(app);
+    e.observeRestarts("questdb", 10, T0);
+    e.observeRestarts("questdb", 14, T0 + 60_000);
+    assert.equal(raises.length, 1);
+    // Recreated container: lifetime count restarts from zero.
+    e.observeRestarts("questdb", 0, T0 + 120_000);
+    assert.equal(cleared.length, 1, "stale loop alert must be cleared");
+    // And the fresh baseline must not instantly re-raise.
+    e.observeRestarts("questdb", 1, T0 + 180_000);
+    assert.equal(raises.length, 1);
+  });
+
+  it("clears when a quiet window passes with no further restarts", () => {
+    const { app, raises, cleared } = makeApp();
+    const e = makeDegradationEmitter(app);
+    e.observeRestarts("questdb", 10, T0);
+    e.observeRestarts("questdb", 13, T0 + 60_000);
+    assert.equal(raises.length, 1);
+    // Window expires with the count unchanged — the loop has stopped.
+    e.observeRestarts("questdb", 13, T0 + 7 * 60_000);
+    assert.equal(cleared.length, 1);
+  });
+
+  it("ignores an absent or nonsensical count without losing the baseline", () => {
+    const { app, raises } = makeApp();
+    const e = makeDegradationEmitter(app);
+    e.observeRestarts("questdb", 10, T0);
+    // A runtime that omits the field must not read as a counter reset.
+    e.observeRestarts("questdb", undefined, T0 + 30_000);
+    e.observeRestarts("questdb", -1, T0 + 40_000);
+    e.observeRestarts("questdb", 13, T0 + 60_000);
+    assert.equal(raises.length, 1, "baseline survived the gaps");
+  });
+
+  it("tracks containers independently", () => {
+    const { app, raises } = makeApp();
+    const e = makeDegradationEmitter(app);
+    e.observeRestarts("a", 0, T0);
+    e.observeRestarts("b", 0, T0);
+    e.observeRestarts("a", 5, T0 + 60_000);
+    assert.equal(raises.length, 1);
+    assert.equal(raises[0].path, "notifications.container.a.crashLooping");
+  });
+
+  it("ignores an observation stamped with a superseded epoch", () => {
+    const { app, raises } = makeApp();
+    const e = makeDegradationEmitter(app);
+    e.observeRestarts("questdb", 0, T0);
+    const epoch = e.restartEpoch("questdb");
+    // The container is removed; a replacement takes the same name and is
+    // observed fresh, seeding its own history at 0.
+    e.forgetRestarts("questdb");
+    e.observeRestarts("questdb", 0, T0 + 30_000);
+    // Only NOW does the inspect issued before the removal resolve,
+    // carrying the OLD container's lifetime count. Without the epoch
+    // guard this lands as a 40-restart jump against the replacement's
+    // history and raises a crash loop that never happened.
+    e.observeRestarts("questdb", 40, T0 + 60_000, epoch);
+    assert.equal(raises.length, 0);
+  });
+
+  it("accepts an observation stamped with the current epoch", () => {
+    const { app, raises } = makeApp();
+    const e = makeDegradationEmitter(app);
+    e.observeRestarts("questdb", 0, T0, e.restartEpoch("questdb"));
+    e.observeRestarts("questdb", 3, T0 + 60_000, e.restartEpoch("questdb"));
+    assert.equal(raises.length, 1);
+  });
+
+  it("drops the baseline on forgetContainer", () => {
+    const { app, raises } = makeApp();
+    const e = makeDegradationEmitter(app);
+    e.observeRestarts("questdb", 10, T0);
+    e.forgetContainer("questdb");
+    // Next observation is a first sight again, so it cannot raise.
+    e.observeRestarts("questdb", 20, T0 + 60_000);
+    assert.equal(raises.length, 0);
+  });
+
+  it("stays silent while emission is disabled", () => {
+    const { app, raises } = makeApp();
+    const e = makeDegradationEmitter(app, false);
+    e.observeRestarts("questdb", 10, T0);
+    e.observeRestarts("questdb", 20, T0 + 60_000);
+    assert.equal(raises.length, 0);
+  });
+});

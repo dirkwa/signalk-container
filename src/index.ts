@@ -44,6 +44,7 @@ import { detectRuntime, isContainerized, setDisableUserns } from "./runtime.js";
 import { setNamespace, resetNamespace } from "./namespace.js";
 import {
   makeDegradationEmitter,
+  type DegradationEmitter,
   type NotificationApp,
 } from "./notifications.js";
 import {
@@ -203,6 +204,16 @@ const SSE_HEARTBEAT_MS = 30_000;
 const HEALTH_POLL_MS = 60_000;
 
 /**
+ * How often to sample every managed container's restart count to detect a
+ * crash loop. One shared poll rather than a per-container timer: the
+ * check is a single inspect each and applies to every managed container,
+ * including the ones no consumer gave a `healthCheck` — a container dying
+ * on startup never reaches the state where a health check could run, so
+ * the health poll cannot see this class of failure at all.
+ */
+const RESTART_POLL_MS = 60_000;
+
+/**
  * How often to run a container's own `HEALTHCHECK` ourselves where nothing
  * else will. Podman schedules healthchecks as systemd transient timers, so a
  * host with no user systemd session (Venus OS, or any rootless install
@@ -346,6 +357,11 @@ export default (app: App) => {
   const selfHealth = new SelfHealthOwnership();
   // Pending deferred probes, so stop() can cancel one that has not fired.
   const selfHealthProbes = new Map<string, NodeJS.Timeout>();
+  // Single shared crash-loop poll across every managed container, armed on
+  // the first ensureRunning and cleared in stop().
+  let restartPollTimer: NodeJS.Timeout | null = null;
+  // Guards against a slow sweep overlapping the next tick.
+  let restartPollInFlight = false;
   const SETUP: SelfHealthMarker = "setup";
   const IN_FLIGHT: SelfHealthMarker = "inFlight";
   let updateService: UpdateService | null = null;
@@ -847,6 +863,39 @@ export default (app: App) => {
     }
   }
 
+  async function sweepRestartCounts(): Promise<void> {
+    const generation = startGeneration;
+    await sweepRestartsOnce({
+      names: () => lastConfigs.keys(),
+      inspect: (name) => getContainerStateDetail(name),
+      emitter: degradation,
+      retired: () => generation !== startGeneration,
+      onError: (name, err) =>
+        app.debug(
+          `crash-loop poll(${name}) failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        ),
+    });
+  }
+
+  /** Arm the shared crash-loop poll once; idempotent. */
+  function armRestartPoll(): void {
+    if (restartPollTimer) return;
+    restartPollTimer = setInterval(() => {
+      if (restartPollInFlight) return;
+      const generation = startGeneration;
+      restartPollInFlight = true;
+      void sweepRestartCounts().finally(() => {
+        // A sweep retired by stop() must not release the guard: stop()
+        // has already cleared it, a new lifecycle may have armed its own
+        // sweep since, and clearing it again would let the next tick run
+        // a second sweep concurrently with that one.
+        if (generation === startGeneration) restartPollInFlight = false;
+      });
+    }, RESTART_POLL_MS);
+  }
+
   // Shared post-removal teardown for every path that removes a container
   // (`remove`, `removeManagedData`): release reserved host ports, then tear
   // down the log-stream broker so SSE clients get `event: end` and the
@@ -886,6 +935,7 @@ export default (app: App) => {
     degradation.clear("unhealthy", name);
     degradation.clear("deviceUnresolved", name);
     degradation.clear("volumeAborted", name);
+    degradation.clear("crashLooping", name);
     degradation.forgetContainer(name);
   }
 
@@ -1895,6 +1945,10 @@ export default (app: App) => {
           selfHealthProbes.set(name, probe);
         }
       }
+
+      // Every managed container is watched for a crash loop, with or
+      // without a consumer health check.
+      armRestartPoll();
 
       if (options?.healthCheck) {
         const existing = healthTimers.get(name);
@@ -3180,6 +3234,11 @@ export default (app: App) => {
       }
       selfHealthProbes.clear();
       selfHealth.reset();
+      if (restartPollTimer) {
+        clearInterval(restartPollTimer);
+        restartPollTimer = null;
+      }
+      restartPollInFlight = false;
       // Clear every outstanding degradation notification so a plugin stop
       // doesn't strand alerts on the bus, then drop the tracking state.
       degradation.reset();
@@ -3875,6 +3934,64 @@ export function probeVolumeSource(
   // A bind mount makes this container's view of the path the host's view.
   if (coveredByOwnMount(hostPath)) return exists(hostPath);
   return "unknown";
+}
+
+/** Dependencies of one crash-loop sweep, injected so it can be tested. */
+export interface RestartSweepDeps {
+  /** The containers this process is managing right now. */
+  names: () => Iterable<string>;
+  inspect: (name: string) => Promise<ContainerStateDetail>;
+  emitter: Pick<
+    DegradationEmitter,
+    "observeRestarts" | "forgetRestarts" | "restartEpoch"
+  >;
+  /** True once a stop() or re-entered start() has retired this sweep. */
+  retired: () => boolean;
+  onError: (name: string, err: unknown) => void;
+}
+
+/**
+ * One crash-loop sweep: sample every managed container's restart count
+ * and let the emitter decide from the rate of change.
+ *
+ * Failures are isolated per container — an inspect that fails (the
+ * container is mid-recreate, the socket blipped) must not abort the
+ * sweep for the others, and must not raise anything: a missing
+ * observation is not evidence of a loop.
+ */
+export async function sweepRestartsOnce(deps: RestartSweepDeps): Promise<void> {
+  for (const name of [...deps.names()]) {
+    try {
+      // Read before the inspect: a removal landing while it is in flight
+      // bumps the epoch, and passing the stale one to observeRestarts
+      // discards the result rather than seeding history for whatever
+      // holds the name next.
+      const epoch = deps.emitter.restartEpoch(name);
+      const detail = await deps.inspect(name);
+      // A stop() landing while the inspect was in flight has already
+      // dropped the sample history; recording against it now would seed
+      // the next run with counts from before the restart.
+      if (deps.retired()) return;
+      // The container this result describes was removed while the
+      // inspect was in flight, so it says nothing about whatever holds
+      // the name now. This covers BOTH branches below: acting on a stale
+      // `missing` would wipe a live replacement's history and alert.
+      if (deps.emitter.restartEpoch(name) !== epoch) continue;
+      // Gone from the runtime — removed through this plugin (where
+      // afterContainerRemoved has already cleaned up) or directly by an
+      // operator (where nothing else will). Drop the restart history
+      // either way: it describes a container that no longer exists, and
+      // a stale alert would otherwise outlive it. Only the restart state
+      // goes; an ensureRunning may still be managing this name.
+      if (detail.state === "missing") {
+        deps.emitter.forgetRestarts(name);
+        continue;
+      }
+      deps.emitter.observeRestarts(name, detail.restartCount, undefined, epoch);
+    } catch (err) {
+      deps.onError(name, err);
+    }
+  }
 }
 
 export function pluginErrorForDoctor(
