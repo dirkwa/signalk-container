@@ -117,7 +117,16 @@ export interface DegradationEmitter {
     name: string,
     restartCount: number | undefined,
     now?: number,
+    epoch?: number,
   ): void;
+  /**
+   * The container's current restart-tracking epoch, bumped whenever its
+   * history is dropped (removal, or `forgetRestarts`). A poller reads it
+   * before inspecting and passes it back to `observeRestarts`, so a
+   * result that arrives after the container was removed is discarded
+   * rather than re-seeding history for whatever now holds the name.
+   */
+  restartEpoch(name: string): number;
   /**
    * Drop a container's restart history and clear any crash-loop alert,
    * without touching the health or device-issue tracking that
@@ -162,6 +171,12 @@ export function makeDegradationEmitter(
   // and a single baseline cannot answer "three restarts in the last five
   // minutes" across a window boundary — see observeRestarts.
   const restartSamples = new Map<string, { count: number; at: number }[]>();
+  // Per-container restart-tracking epoch, bumped whenever the history is
+  // dropped. Lets a poller discard an inspect that resolved after the
+  // container it described was removed — a replacement taking the same
+  // name is a different container, and mixing their counts would
+  // overcount restarts.
+  const restartEpochs = new Map<string, number>();
   // current health-check message, so a changed reason re-raises rather than
   // leaving the idempotent stale one live.
   const unhealthyReason = new Map<string, string>();
@@ -257,11 +272,22 @@ export function makeDegradationEmitter(
     }
   };
 
+  const bumpRestartEpoch = (name: string): void => {
+    restartEpochs.set(name, (restartEpochs.get(name) ?? 0) + 1);
+  };
+
   const observeRestarts: DegradationEmitter["observeRestarts"] = (
     name,
     restartCount,
     now = Date.now(),
+    epoch,
   ) => {
+    // The container this observation describes has been removed since the
+    // caller read the count; whatever holds the name now is a different
+    // container.
+    if (epoch !== undefined && epoch !== (restartEpochs.get(name) ?? 0)) {
+      return;
+    }
     // A runtime that does not report the field tells us nothing; keep the
     // samples we have so an intermittently-absent value does not read as a
     // counter reset and discard a loop already in progress.
@@ -374,7 +400,9 @@ export function makeDegradationEmitter(
     pollHealth,
     syncDeviceIssues,
     observeRestarts,
+    restartEpoch: (name: string) => restartEpochs.get(name) ?? 0,
     forgetRestarts: (name: string) => {
+      bumpRestartEpoch(name);
       restartSamples.delete(name);
       clear("crashLooping", name);
     },
@@ -386,6 +414,7 @@ export function makeDegradationEmitter(
       health.delete(name);
       unresolvedSig.delete(name);
       unhealthyReason.delete(name);
+      bumpRestartEpoch(name);
       restartSamples.delete(name);
     },
     reset: () => {
@@ -402,6 +431,7 @@ export function makeDegradationEmitter(
       unresolvedSig.clear();
       unhealthyReason.clear();
       restartSamples.clear();
+      restartEpochs.clear();
       // Disable emission until the next start() re-enables via setEnabled().
       // Without this, a raise() from an async startup step (e.g. the
       // deployment doctor) that resolves AFTER stop()+reset() would strand a

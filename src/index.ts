@@ -3941,7 +3941,10 @@ export interface RestartSweepDeps {
   /** The containers this process is managing right now. */
   names: () => Iterable<string>;
   inspect: (name: string) => Promise<ContainerStateDetail>;
-  emitter: Pick<DegradationEmitter, "observeRestarts" | "forgetRestarts">;
+  emitter: Pick<
+    DegradationEmitter,
+    "observeRestarts" | "forgetRestarts" | "restartEpoch"
+  >;
   /** True once a stop() or re-entered start() has retired this sweep. */
   retired: () => boolean;
   onError: (name: string, err: unknown) => void;
@@ -3959,6 +3962,11 @@ export interface RestartSweepDeps {
 export async function sweepRestartsOnce(deps: RestartSweepDeps): Promise<void> {
   for (const name of [...deps.names()]) {
     try {
+      // Read before the inspect: a removal landing while it is in flight
+      // bumps the epoch, and passing the stale one to observeRestarts
+      // discards the result rather than seeding history for whatever
+      // holds the name next.
+      const epoch = deps.emitter.restartEpoch(name);
       const detail = await deps.inspect(name);
       // A stop() landing while the inspect was in flight has already
       // dropped the sample history; recording against it now would seed
@@ -3974,7 +3982,7 @@ export async function sweepRestartsOnce(deps: RestartSweepDeps): Promise<void> {
         deps.emitter.forgetRestarts(name);
         continue;
       }
-      deps.emitter.observeRestarts(name, detail.restartCount);
+      deps.emitter.observeRestarts(name, detail.restartCount, undefined, epoch);
     } catch (err) {
       deps.onError(name, err);
     }

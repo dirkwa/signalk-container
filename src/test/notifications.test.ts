@@ -496,6 +496,31 @@ describe("observeRestarts — crash-loop rate detection", () => {
     assert.equal(raises[0].path, "notifications.container.a.crashLooping");
   });
 
+  it("ignores an observation stamped with a superseded epoch", () => {
+    const { app, raises } = makeApp();
+    const e = makeDegradationEmitter(app);
+    e.observeRestarts("questdb", 0, T0);
+    const epoch = e.restartEpoch("questdb");
+    // The container is removed; a replacement takes the same name and is
+    // observed fresh, seeding its own history at 0.
+    e.forgetRestarts("questdb");
+    e.observeRestarts("questdb", 0, T0 + 30_000);
+    // Only NOW does the inspect issued before the removal resolve,
+    // carrying the OLD container's lifetime count. Without the epoch
+    // guard this lands as a 40-restart jump against the replacement's
+    // history and raises a crash loop that never happened.
+    e.observeRestarts("questdb", 40, T0 + 60_000, epoch);
+    assert.equal(raises.length, 0);
+  });
+
+  it("accepts an observation stamped with the current epoch", () => {
+    const { app, raises } = makeApp();
+    const e = makeDegradationEmitter(app);
+    e.observeRestarts("questdb", 0, T0, e.restartEpoch("questdb"));
+    e.observeRestarts("questdb", 3, T0 + 60_000, e.restartEpoch("questdb"));
+    assert.equal(raises.length, 1);
+  });
+
   it("drops the baseline on forgetContainer", () => {
     const { app, raises } = makeApp();
     const e = makeDegradationEmitter(app);

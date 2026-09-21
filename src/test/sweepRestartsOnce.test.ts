@@ -14,18 +14,29 @@ function makeDeps(
 ) {
   const observed: Observed[] = [];
   const forgotten: string[] = [];
+  const epochs = new Map<string, number>();
   const errors: { name: string; err: unknown }[] = [];
   let retired = false;
   const deps = {
     names: () => names,
     inspect,
     emitter: {
-      observeRestarts: (name: string, count: number | undefined) => {
+      observeRestarts: (
+        name: string,
+        count: number | undefined,
+        _now?: number,
+        epoch?: number,
+      ) => {
+        // Mirror the real emitter: an observation carrying a stale epoch
+        // describes a container that has since been removed.
+        if (epoch !== undefined && epoch !== (epochs.get(name) ?? 0)) return;
         observed.push({ name, count });
       },
       forgetRestarts: (name: string) => {
         forgotten.push(name);
+        epochs.set(name, (epochs.get(name) ?? 0) + 1);
       },
+      restartEpoch: (name: string) => epochs.get(name) ?? 0,
     },
     retired: () => retired,
     onError: (name: string, err: unknown) => {
@@ -39,6 +50,10 @@ function makeDeps(
     errors,
     retire: () => {
       retired = true;
+    },
+    /** Simulate afterContainerRemoved dropping a container's history. */
+    removeContainer: (name: string) => {
+      epochs.set(name, (epochs.get(name) ?? 0) + 1);
     },
   };
 }
@@ -113,6 +128,24 @@ describe("sweepRestartsOnce", () => {
     // reset has already dropped, and the sweep must stop there.
     assert.deepEqual(ctl.observed, []);
     assert.deepEqual(seen, ["a"]);
+  });
+
+  it("discards an inspect for a container removed while it was in flight", async () => {
+    const ctl = makeDeps(["questdb"], async () => running(9));
+    const deps = {
+      ...ctl.deps,
+      inspect: async (name: string) => {
+        const detail = await ctl.deps.inspect(name);
+        // The container is removed (and recreated under the same name)
+        // while this inspect is in flight.
+        ctl.removeContainer(name);
+        return detail;
+      },
+    };
+    await sweepRestartsOnce(deps);
+    // Seeding the new container's history with the old one's count would
+    // let a later sample compare two different container identities.
+    assert.deepEqual(ctl.observed, []);
   });
 
   it("passes an absent restart count through untouched", async () => {
