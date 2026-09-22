@@ -213,6 +213,78 @@ describe("getContainerState", () => {
     const result = await getContainerState(dummyRuntime, "x", client);
     assert.equal(result, "stopped");
   });
+
+  it("returns 'stopped' when a completed FinishedAt outweighs a stale Running/Pid", async () => {
+    // Live-reproduced failure: podman's restart-policy supervisor re-creates
+    // a died container and the OCI create step fails partway (conmon racing
+    // a systemd/D-Bus reload — "Failed to create container: exit status 1").
+    // The container never actually restarted, but Running/Pid are left
+    // holding values from that aborted attempt. FinishedAt was already
+    // committed by the earlier, successful die-handling and is at or after
+    // StartedAt, so it must win over the stale OR-based signals.
+    const client = makeMockClient({
+      containers: {
+        "sk-x": {
+          inspect: {
+            State: {
+              Status: "initialized",
+              Running: true,
+              Pid: 12345,
+              StartedAt: "2026-09-22T10:00:00.000000000Z",
+              FinishedAt: "2026-09-22T10:01:30.908745536Z",
+            },
+          },
+        },
+      },
+    });
+    const result = await getContainerState(dummyRuntime, "x", client);
+    assert.equal(result, "stopped");
+  });
+
+  it("still trusts a live Pid when FinishedAt predates the current StartedAt", async () => {
+    // The ordinary running case: the container was stopped once, then
+    // genuinely restarted. FinishedAt refers to that prior stop and must
+    // not override the current run.
+    const client = makeMockClient({
+      containers: {
+        "sk-x": {
+          inspect: {
+            State: {
+              Status: "running",
+              Running: true,
+              Pid: 54321,
+              StartedAt: "2026-09-22T10:01:31.143107688Z",
+              FinishedAt: "2026-09-22T10:01:30.908745536Z",
+            },
+          },
+        },
+      },
+    });
+    const result = await getContainerState(dummyRuntime, "x", client);
+    assert.equal(result, "running");
+  });
+
+  it("FinishedAt zero-value does not mask a live container", async () => {
+    // A container that has never stopped reports the Go zero-time for
+    // FinishedAt. That must not be misread as "a completed stop".
+    const client = makeMockClient({
+      containers: {
+        "sk-x": {
+          inspect: {
+            State: {
+              Status: "running",
+              Running: true,
+              Pid: 1,
+              StartedAt: "2026-09-22T10:00:00.000000000Z",
+              FinishedAt: "0001-01-01T00:00:00Z",
+            },
+          },
+        },
+      },
+    });
+    const result = await getContainerState(dummyRuntime, "x", client);
+    assert.equal(result, "running");
+  });
 });
 
 describe("getContainerStateDetail", () => {
