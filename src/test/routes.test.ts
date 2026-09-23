@@ -170,6 +170,92 @@ describe("routes", () => {
     assert.equal(res.statusCode, 404);
   });
 
+  it("POST /api/updates/:pluginId/apply pulls and recreates", async () => {
+    const router = new FakeRouter();
+    const service = makeService();
+    const applied: string[] = [];
+    registerUpdateRoutes(
+      router as any,
+      service,
+      () => true,
+      async (id) => {
+        applied.push(id);
+        return { status: "updated", containerName: "c", version: "1.0.1" };
+      },
+    );
+    const res = await router.dispatch("POST", "/api/updates/test-plugin/apply");
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(applied, ["test-plugin"]);
+    assert.equal((res.body as { version: string }).version, "1.0.1");
+  });
+
+  it("POST /api/updates/:pluginId/apply returns 503 when runtime missing", async () => {
+    const router = new FakeRouter();
+    const service = makeService();
+    let called = false;
+    registerUpdateRoutes(
+      router as any,
+      service,
+      () => false,
+      async () => {
+        called = true;
+        return { status: "updated", containerName: "c", version: null };
+      },
+    );
+    const res = await router.dispatch("POST", "/api/updates/test-plugin/apply");
+    assert.equal(res.statusCode, 503);
+    // The container must not be touched when there is no runtime to touch it with.
+    assert.equal(called, false);
+  });
+
+  it("POST /api/updates/:pluginId/apply reports an unknown plugin as 404", async () => {
+    const router = new FakeRouter();
+    const service = makeService();
+    registerUpdateRoutes(
+      router as any,
+      service,
+      () => true,
+      async () => {
+        throw new Error("No registration for plugin nope");
+      },
+    );
+    const res = await router.dispatch("POST", "/api/updates/nope/apply");
+    assert.equal(res.statusCode, 404);
+  });
+
+  it("POST /api/updates/:pluginId/apply refuses a pinned container", async () => {
+    const router = new FakeRouter();
+    const service = makeService();
+    registerUpdateRoutes(
+      router as any,
+      service,
+      () => true,
+      async () => {
+        // What applyContainerUpdate throws for a semver tag: recreating it
+        // would reinstall the pinned version while claiming the newer one.
+        throw new Error("c is pinned to 1.0.0 — set its image tag to 1.0.1");
+      },
+    );
+    const res = await router.dispatch("POST", "/api/updates/test-plugin/apply");
+    assert.equal(res.statusCode, 500);
+    assert.match((res.body as { error: string }).error, /pinned to 1\.0\.0/);
+  });
+
+  it("POST /api/updates/:pluginId/apply reports a pull failure as 500", async () => {
+    const router = new FakeRouter();
+    const service = makeService();
+    registerUpdateRoutes(
+      router as any,
+      service,
+      () => true,
+      async () => {
+        throw new Error("pull failed: registry unreachable");
+      },
+    );
+    const res = await router.dispatch("POST", "/api/updates/test-plugin/apply");
+    assert.equal(res.statusCode, 500);
+  });
+
   it("POST /api/updates/:pluginId/check runs a fresh check", async () => {
     const router = new FakeRouter();
     const service = makeService();

@@ -128,6 +128,7 @@ import {
 import { UpdateService } from "./updates/service.js";
 import { FileUpdateCache } from "./updates/cache.js";
 import { registerUpdateRoutes } from "./updates/routes.js";
+import { planUpdateApply } from "./updates/applyPlan.js";
 import { DIGEST_RE, resolveImage } from "./manifest/resolver.js";
 import { ManifestStore } from "./manifest/store.js";
 import {
@@ -3783,10 +3784,40 @@ export default (app: App) => {
         }
       });
 
+      // Acts on what a check reported: pull the tag the container is
+      // configured for, then recreate on it. The pull is explicit because
+      // ensureRunning only pulls an image it does not already have, and a
+      // floating tag like `latest` is already present at the old digest.
+      // Acts on what a check reported: pull the tag the container is
+      // configured for, then recreate on it. The pull is explicit because
+      // ensureRunning only pulls an image it does not already have, and a
+      // floating tag like `latest` is already present at the old digest.
+      async function applyContainerUpdate(pluginId: string) {
+        if (!updateService) throw new Error(`No registration for ${pluginId}`);
+        const plan = planUpdateApply(
+          pluginId,
+          updateService.getLastResult(pluginId),
+          (name) => lastConfigs.get(name),
+        );
+
+        await api.pullImage(plan.imageRef);
+        await api.recreate(plan.containerName, plan.config);
+        return {
+          status: "updated" as const,
+          containerName: plan.containerName,
+          version: plan.version,
+        };
+      }
+
       // Update detection routes (registered if and only if the
       // service was instantiated in start()).
       if (updateService) {
-        registerUpdateRoutes(router, updateService, () => runtimeInfo !== null);
+        registerUpdateRoutes(
+          router,
+          updateService,
+          () => runtimeInfo !== null,
+          applyContainerUpdate,
+        );
       }
     },
   };
