@@ -1544,6 +1544,51 @@ export default function PluginConfigurationPanel({
     });
   };
 
+  // Recreating restarts the container, so the status line says so while it
+  // runs — a pull of a large image is not quick and the UI would otherwise
+  // look idle.
+  const applyUpdate = async (unprefixedName: string) => {
+    const pluginId = pluginIdByContainer[unprefixedName];
+    if (!pluginId) return;
+
+    setChecking((prev) => {
+      const next = new Set(prev);
+      next.add(unprefixedName);
+      return next;
+    });
+    setActionStatus(`Updating ${unprefixedName} — pulling image...`);
+    setStatusError(false);
+    try {
+      const res = await fetch(
+        `/plugins/signalk-container/api/updates/${encodeURIComponent(pluginId)}/apply`,
+        { method: "POST" },
+      );
+      const data = await res.json().catch(() => ({ error: res.statusText }));
+      if (res.ok) {
+        setActionStatus(
+          `${unprefixedName} updated${data.version ? ` to ${data.version}` : ""}`,
+        );
+        setStatusError(false);
+        // The recreated container reports a new version, so re-check rather
+        // than leaving the banner advertising an update that has happened.
+        await checkForUpdate(unprefixedName);
+      } else {
+        setActionStatus(`Update failed: ${data.error}`);
+        setStatusError(true);
+      }
+    } catch (e) {
+      setActionStatus(
+        `Update error: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      setStatusError(true);
+    }
+    setChecking((prev) => {
+      const next = new Set(prev);
+      next.delete(unprefixedName);
+      return next;
+    });
+  };
+
   const resetLimitsToDefault = async (
     unprefixedName: string,
   ): Promise<ApplyResult> => {
@@ -2053,6 +2098,24 @@ export default function PluginConfigurationPanel({
                       {formatTimeAgo(updateResult.lastSuccessfulCheckAt)}
                     </span>
                   )}
+                  {updateResult?.updateAvailable &&
+                    updateResult.tagKind === "floating" && (
+                      <button
+                        type="button"
+                        onClick={() => applyUpdate(un)}
+                        disabled={isChecking}
+                        title="Pull the new image and recreate this container"
+                        style={{
+                          ...S.editLimitsBtn,
+                          marginLeft: "auto",
+                          ...(isChecking ? S.btnDisabled : {}),
+                        }}
+                      >
+                        {updateResult.latestVersion
+                          ? `Update to ${updateResult.latestVersion} ↑`
+                          : "Update ↑"}
+                      </button>
+                    )}
                   <button
                     type="button"
                     onClick={() => checkForUpdate(un)}
@@ -2060,7 +2123,10 @@ export default function PluginConfigurationPanel({
                     title="Force a fresh update check now"
                     style={{
                       ...S.editLimitsBtn,
-                      marginLeft: "auto",
+                      ...(updateResult?.updateAvailable &&
+                      updateResult.tagKind === "floating"
+                        ? { marginLeft: "0.5rem" }
+                        : { marginLeft: "auto" }),
                       ...(isChecking ? S.btnDisabled : {}),
                     }}
                   >

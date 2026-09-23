@@ -128,6 +128,7 @@ import {
 import { UpdateService } from "./updates/service.js";
 import { FileUpdateCache } from "./updates/cache.js";
 import { registerUpdateRoutes } from "./updates/routes.js";
+import { classifyTag } from "./updates/tagClassifier.js";
 import { DIGEST_RE, resolveImage } from "./manifest/resolver.js";
 import { ManifestStore } from "./manifest/store.js";
 import {
@@ -3783,10 +3784,53 @@ export default (app: App) => {
         }
       });
 
+      // Acts on what a check reported: pull the tag the container is
+      // configured for, then recreate on it. The pull is explicit because
+      // ensureRunning only pulls an image it does not already have, and a
+      // floating tag like `latest` is already present at the old digest.
+      async function applyContainerUpdate(pluginId: string) {
+        if (!updateService) throw new Error(`No registration for ${pluginId}`);
+        const last = updateService.getLastResult(pluginId);
+        if (!last) throw new Error(`No registration for plugin ${pluginId}`);
+
+        const name = last.containerName;
+        const cfg = lastConfigs.get(name);
+        // lastConfigs is in-process, so this is empty for a container whose
+        // plugin has not called ensureRunning since the server started.
+        if (!cfg) {
+          throw new Error(
+            `No container config for ${name} — restart the plugin that owns it, then retry`,
+          );
+        }
+
+        // Only a floating tag resolves to a different image when pulled
+        // again. A pinned one names the version it runs, so recreating it
+        // would reinstall what is already there while reporting the newer
+        // version — the operator has to change the pin first.
+        if (classifyTag(cfg.tag) !== "floating") {
+          throw new Error(
+            `${name} is pinned to ${cfg.tag} — set its image tag to ${last.latestVersion ?? "the new version"} in the owning plugin's settings`,
+          );
+        }
+
+        await api.pullImage(`${cfg.image}:${cfg.tag}`);
+        await api.recreate(name, cfg);
+        return {
+          status: "updated" as const,
+          containerName: name,
+          version: last.latestVersion,
+        };
+      }
+
       // Update detection routes (registered if and only if the
       // service was instantiated in start()).
       if (updateService) {
-        registerUpdateRoutes(router, updateService, () => runtimeInfo !== null);
+        registerUpdateRoutes(
+          router,
+          updateService,
+          () => runtimeInfo !== null,
+          applyContainerUpdate,
+        );
       }
     },
   };
