@@ -1102,24 +1102,57 @@ export async function getContainerState(
   return coarseStateFrom(info.State ?? {});
 }
 
+// The runtime's zero-value timestamp (Go's zero `time.Time`, RFC3339-
+// encoded) for a `StartedAt`/`FinishedAt` that has never been set.
+const ZERO_TIME_PREFIX = "0001-01-01T00:00:00";
+
+function isRealTimestamp(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value !== "" &&
+    !value.startsWith(ZERO_TIME_PREFIX)
+  );
+}
+
 /**
  * The defensive OR shared by `getContainerState` and
  * `getContainerStateDetail`, so a caller asking for detail can never
  * be told something different about running than a caller asking for
  * the coarse state alone.
  *
- * Running if ANY source says so. We'd rather report "running" when the
- * container is actually stopped (worst case: ensureRunning's "already
- * running" fast path skips a start call, which would then fail the
- * subsequent health check and recover) than report "stopped" when it's
- * running (worst case: update service skips legit checks, user sees
- * flap).
+ * Running if ANY source says so — Status, Running, or a positive Pid.
+ * We'd rather report "running" when the container is actually stopped
+ * (worst case: ensureRunning's "already running" fast path skips a
+ * start call) than report "stopped" when it's running (worst case:
+ * update service skips legit checks, user sees flap). But that OR is
+ * itself untrustworthy once the runtime has recorded a completed stop
+ * at or after the last start: a podman restart-policy re-create that
+ * fails partway through (observed live — conmon's OCI create racing a
+ * systemd/D-Bus reload, "Failed to create container: exit status 1")
+ * can leave Running/Pid holding stale values from the aborted attempt
+ * indefinitely, with nothing to ever correct them (no consumer plugin
+ * forces a restart off an unhealthy verdict). FinishedAt is written
+ * synchronously by the runtime's die-handling when the container
+ * actually exits, a step that already completed before any restart
+ * attempt runs, so a failed re-create never gets to roll it back —
+ * checking it first overrides the stale-signal OR instead of feeding
+ * into it.
  */
 function coarseStateFrom(state: {
   Status?: unknown;
   Running?: unknown;
   Pid?: unknown;
+  StartedAt?: unknown;
+  FinishedAt?: unknown;
 }): ContainerState {
+  const startedAt = isRealTimestamp(state.StartedAt) ? state.StartedAt : null;
+  const finishedAt = isRealTimestamp(state.FinishedAt)
+    ? state.FinishedAt
+    : null;
+  if (finishedAt !== null && (startedAt === null || finishedAt >= startedAt)) {
+    return "stopped";
+  }
+
   const status = String(state.Status ?? "")
     .toLowerCase()
     .trim();
