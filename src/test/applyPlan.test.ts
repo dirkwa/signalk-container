@@ -69,6 +69,20 @@ describe("planUpdateApply", () => {
     );
   });
 
+  // ensureRunning recreates on image@digest regardless of the tag, so a
+  // digest-pinned container passes the floating-tag check while never
+  // moving — the same false success the semver refusal exists to prevent.
+  it("refuses a digest pin even when the tag is floating", () => {
+    assert.throws(
+      () =>
+        planUpdateApply("signalk-backup", result(), () => ({
+          ...cfg("latest"),
+          digest: `sha256:${"a".repeat(64)}`,
+        })),
+      /is pinned to sha256:a{64}/,
+    );
+  });
+
   it("refuses a bare-major tag, which pins no more than a floating one resolves", () => {
     // classifyTag calls "3" floating; "3.0" is a pin. Guard the boundary.
     assert.doesNotThrow(() =>

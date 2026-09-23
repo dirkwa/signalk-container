@@ -35,6 +35,15 @@ export function planUpdateApply(
     );
   }
 
+  // A digest names one immutable image, so ensureRunning recreates on
+  // image@digest whatever the tag says — pulling the tag would report a
+  // version the container does not run.
+  if (config.digest) {
+    throw new Error(
+      `${last.containerName} is pinned to ${config.digest} — change the digest in the owning plugin's settings`,
+    );
+  }
+
   // Only a floating tag resolves to a different image when pulled again. A
   // pinned one names the version it runs, so recreating it would reinstall
   // what is already there while reporting the newer version as installed.
