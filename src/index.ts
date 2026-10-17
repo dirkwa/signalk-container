@@ -2593,7 +2593,11 @@ export default (app: App) => {
         // A container that is still there keeps its old limits: resources
         // are not a drift axis, so the ensureRunning below would leave it
         // as it is and this would report a recreate that never happened.
-        if ((await getContainerState(runtimeInfo, name)) !== "missing") {
+        // When the stop went through and only the remove failed, it is
+        // started again so a failed update does not leave it down.
+        const state = await getContainerState(runtimeInfo, name);
+        if (state !== "missing") {
+          if (state === "stopped") await startContainer(runtimeInfo, name);
           throw new Error(
             `Failed to apply new resources for ${name}: ${removeMsg}. ` +
               `The container was not removed and keeps its previous limits.`,
