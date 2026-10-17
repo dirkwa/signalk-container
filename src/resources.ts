@@ -296,9 +296,8 @@ export function withoutDefaultMemorySwap(
  * Measured on rootless podman 5.8.6 whose podman.service runs with
  * `OOMScoreAdjust=200`: every container it starts inspects as
  * `OomScoreAdj` 200. Compared as-is, such a container never equals its
- * request, so ensureRunning sent a live update to every managed container
- * on every server start, and an updateResources with unchanged limits was
- * not a no-op.
+ * request: ensureRunning would send it a live update on every start, and
+ * an updateResources with unchanged limits would not be a no-op.
  */
 export function withoutInjectedResources(
   live: ContainerResourceLimits,

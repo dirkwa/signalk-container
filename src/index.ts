@@ -1927,8 +1927,8 @@ export default (app: App) => {
       //      `memory`/`memorySwap` cap the current config removes.
       //      `undefined` falls back to the plain current-vs-live check
       //      minus runtime-injected fields, so a genuine memory unset
-      //      is still surfaced while the inherited oom_score_adj no
-      //      longer warns on every server start (#216).
+      //      is still surfaced and an inherited oom_score_adj is not
+      //      treated as an unset.
       //
       // The runtime-injected fields nobody requested are left out of
       // `postLimits` altogether, so an inherited oom_score_adj alone does
