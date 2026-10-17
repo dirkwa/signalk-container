@@ -39,6 +39,7 @@ import {
   minimizeOverride,
   resourceLimitsEqual,
   tryLiveUpdate,
+  withoutDefaultMemorySwap,
 } from "./resources.js";
 import { detectRuntime, isContainerized, setDisableUserns } from "./runtime.js";
 import { setNamespace } from "./namespace.js";
@@ -1902,7 +1903,12 @@ export default (app: App) => {
       // detection in ensureRunning recreates the container with
       // filteredMerged already applied) does not trigger a spurious
       // tryLiveUpdate against an already-correct container.
-      const postLimits = await getLiveResources(runtimeInfo, name);
+      const createdWith = await getRequestedResources(name);
+      const postLimits = withoutDefaultMemorySwap(
+        await getLiveResources(runtimeInfo, name),
+        filteredMerged,
+        createdWith,
+      );
       if (!resourceLimitsEqual(postLimits, filteredMerged)) {
         const fullName = prefixedName(name);
 
@@ -1937,8 +1943,7 @@ export default (app: App) => {
         //      minus runtime-injected fields, so a genuine memory unset
         //      is still surfaced while the inherited oom_score_adj no
         //      longer warns on every server start (#216).
-        const priorRequested =
-          priorConfig?.resources ?? (await getRequestedResources(name));
+        const priorRequested = priorConfig?.resources ?? createdWith;
         const cannotUnset = fieldsRequiringRecreateForUnset(
           postLimits,
           filteredMerged,
@@ -2473,7 +2478,11 @@ export default (app: App) => {
       //     the user's intent but the container has the old value
       //   - manual `podman update` from outside Signal K isn't tracked
       // Always compare against truth.
-      const liveBefore = await getLiveResources(runtimeInfo, name);
+      const liveBefore = withoutDefaultMemorySwap(
+        await getLiveResources(runtimeInfo, name),
+        filteredLimits,
+        await getRequestedResources(name),
+      );
 
       // No-op when the live container already matches what's being
       // requested. Verify existence by way of getLiveResources returning

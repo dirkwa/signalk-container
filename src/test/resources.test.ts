@@ -12,6 +12,7 @@ import {
   resourcePayloadForUpdate,
   resourceLimitsEqual,
   tryLiveUpdate,
+  withoutDefaultMemorySwap,
 } from "../resources.js";
 import type { ContainerRuntimeInfo } from "../types.js";
 import { makeMockClient } from "./helpers/mockClient.js";
@@ -1061,6 +1062,111 @@ describe("fieldsRequiringRecreateForUnset (Bug E)", () => {
       );
       assert.deepEqual(oomCold, []);
     });
+  });
+});
+
+describe("withoutDefaultMemorySwap", () => {
+  // getLiveResources' rendering of a podman 5.8.6 container created with
+  // memory 64m and no memorySwap: MemorySwap 134217728 is twice Memory.
+  const created = { memory: "64m" };
+  const podmanDefault = { cpus: 1.5, memory: "64m", memorySwap: "128m" };
+  // The same container after a live update of its memory to 96m: podman
+  // 5.8.6 leaves MemorySwap at 134217728.
+  const afterLiveUpdate = { cpus: 1.5, memory: "96m", memorySwap: "128m" };
+
+  it("drops the runtime's default swap when the target sets none", () => {
+    assert.deepEqual(
+      withoutDefaultMemorySwap(podmanDefault, { memory: "64m" }, created),
+      { cpus: 1.5, memory: "64m" },
+    );
+  });
+
+  it("measures the default from the memory the container was created with", () => {
+    assert.deepEqual(
+      withoutDefaultMemorySwap(afterLiveUpdate, { memory: "96m" }, created),
+      { cpus: 1.5, memory: "96m" },
+    );
+  });
+
+  it("falls back to the live memory without provenance", () => {
+    assert.deepEqual(
+      withoutDefaultMemorySwap(podmanDefault, { memory: "64m" }, undefined),
+      { cpus: 1.5, memory: "64m" },
+    );
+    // Which cannot see through a live memory update.
+    assert.deepEqual(
+      withoutDefaultMemorySwap(afterLiveUpdate, { memory: "96m" }, undefined),
+      afterLiveUpdate,
+    );
+  });
+
+  it("keeps a swap the target asks for, even at the default size", () => {
+    assert.deepEqual(
+      withoutDefaultMemorySwap(
+        podmanDefault,
+        { memory: "64m", memorySwap: "128m" },
+        created,
+      ),
+      podmanDefault,
+    );
+  });
+
+  it("keeps a swap the container was created with", () => {
+    assert.deepEqual(
+      withoutDefaultMemorySwap(
+        podmanDefault,
+        { memory: "64m" },
+        { memory: "64m", memorySwap: "128m" },
+      ),
+      podmanDefault,
+    );
+  });
+
+  it("keeps a swap that is not twice the created memory", () => {
+    const live = { memory: "64m", memorySwap: "100m" };
+    assert.deepEqual(
+      withoutDefaultMemorySwap(live, { memory: "64m" }, created),
+      live,
+    );
+  });
+
+  it("keeps the swap when the provenance memory does not parse", () => {
+    assert.deepEqual(
+      withoutDefaultMemorySwap(
+        podmanDefault,
+        { memory: "64m" },
+        { memory: "64 megs" },
+      ),
+      podmanDefault,
+    );
+  });
+
+  it("compares bytes, not the rendered strings", () => {
+    // bytesToString renders 2 GiB as "2g"; the request said "1024m".
+    assert.deepEqual(
+      withoutDefaultMemorySwap(
+        { memory: "1g", memorySwap: "2g" },
+        {},
+        { memory: "1024m" },
+      ),
+      { memory: "1g" },
+    );
+  });
+
+  it("stops fieldsRequiringRecreateForUnset reporting the default swap", () => {
+    const requested = { cpus: 1.5, memory: "64m" };
+    assert.deepEqual(
+      fieldsRequiringRecreateForUnset(podmanDefault, requested, requested),
+      ["memorySwap"],
+    );
+    assert.deepEqual(
+      fieldsRequiringRecreateForUnset(
+        withoutDefaultMemorySwap(podmanDefault, requested, requested),
+        requested,
+        requested,
+      ),
+      [],
+    );
   });
 });
 
