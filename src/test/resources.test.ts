@@ -13,6 +13,7 @@ import {
   resourceLimitsEqual,
   tryLiveUpdate,
   withoutDefaultMemorySwap,
+  withoutInjectedResources,
 } from "../resources.js";
 import type { ContainerRuntimeInfo } from "../types.js";
 import { makeMockClient } from "./helpers/mockClient.js";
@@ -1166,6 +1167,68 @@ describe("withoutDefaultMemorySwap", () => {
         requested,
       ),
       [],
+    );
+  });
+});
+
+describe("withoutInjectedResources", () => {
+  // getLiveResources' rendering of a container rootless podman 5.8.6
+  // started from a podman.service with OOMScoreAdjust=200, created with
+  // cpus 1.5 and memory 768m.
+  const requested = { cpus: 1.5, memory: "768m" };
+  const live = { cpus: 1.5, memory: "768m", oomScoreAdj: 200 };
+
+  it("drops an oomScoreAdj nobody requested", () => {
+    assert.deepEqual(
+      withoutInjectedResources(live, requested, requested),
+      requested,
+    );
+  });
+
+  it("drops it without provenance too, as the unset check skips it", () => {
+    assert.deepEqual(
+      withoutInjectedResources(live, requested, undefined),
+      requested,
+    );
+  });
+
+  it("makes a container that matches its request compare equal", () => {
+    assert.equal(resourceLimitsEqual(live, requested), false);
+    assert.equal(
+      resourceLimitsEqual(
+        withoutInjectedResources(live, requested, requested),
+        requested,
+      ),
+      true,
+    );
+  });
+
+  it("keeps an oomScoreAdj the target asks for", () => {
+    const target = { ...requested, oomScoreAdj: 500 };
+    assert.deepEqual(withoutInjectedResources(live, target, requested), live);
+  });
+
+  it("keeps an oomScoreAdj requested before, so removing it is still an unset", () => {
+    const prior = { ...requested, oomScoreAdj: 200 };
+    const kept = withoutInjectedResources(live, requested, prior);
+    assert.deepEqual(kept, live);
+    assert.deepEqual(fieldsRequiringRecreateForUnset(kept, requested, prior), [
+      "oomScoreAdj",
+    ]);
+  });
+
+  it("leaves fields the runtime does not inject alone", () => {
+    const withShares = { ...live, cpuShares: 512 };
+    assert.deepEqual(withoutInjectedResources(withShares, requested, {}), {
+      ...requested,
+      cpuShares: 512,
+    });
+  });
+
+  it("returns live itself when there is nothing to drop", () => {
+    assert.equal(
+      withoutInjectedResources(requested, requested, undefined),
+      requested,
     );
   });
 });

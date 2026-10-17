@@ -40,6 +40,7 @@ import {
   resourceLimitsEqual,
   tryLiveUpdate,
   withoutDefaultMemorySwap,
+  withoutInjectedResources,
 } from "./resources.js";
 import { detectRuntime, isContainerized, setDisableUserns } from "./runtime.js";
 import { setNamespace } from "./namespace.js";
@@ -1903,11 +1904,45 @@ export default (app: App) => {
       // detection in ensureRunning recreates the container with
       // filteredMerged already applied) does not trigger a spurious
       // tryLiveUpdate against an already-correct container.
+      //
+      // Provenance ladder — what was actually *requested*, so a field
+      // present in the live limits that never appeared in any request is
+      // recognized as a runtime artifact, not a user unset (notably the
+      // `oom_score_adj` rootless Podman clamps onto a child container
+      // when signalk-server's own oom_score_adj is non-zero):
+      //
+      //   1. Warm cache: the PRIOR ensureRunning's post-filter
+      //      `filteredMerged` (cached in `lastConfigs`, read into
+      //      `priorConfig` above before this call overwrote it). Using
+      //      the prior request (not the current `filteredMerged`) still
+      //      flags a genuine unset: when a user removes a `memory` cap
+      //      from `containerOverrides`, the field was in the prior
+      //      request and the recreate warning fires.
+      //   2. Cold cache (fresh server process): the requested-resources
+      //      label stamped on the container at create time — durable
+      //      provenance that survives restarts.
+      //   3. Neither (container predates the label): `undefined`, NOT
+      //      `{}` — an empty object would assert "nothing was ever
+      //      requested" and silently suppress a real stale
+      //      `memory`/`memorySwap` cap the current config removes.
+      //      `undefined` falls back to the plain current-vs-live check
+      //      minus runtime-injected fields, so a genuine memory unset
+      //      is still surfaced and an inherited oom_score_adj is not
+      //      treated as an unset.
+      //
+      // The runtime-injected fields nobody requested are left out of
+      // `postLimits` altogether, so an inherited oom_score_adj alone does
+      // not count as a difference and send a live update on every start.
       const createdWith = await getRequestedResources(name);
-      const postLimits = withoutDefaultMemorySwap(
-        await getLiveResources(runtimeInfo, name),
+      const priorRequested = priorConfig?.resources ?? createdWith;
+      const postLimits = withoutInjectedResources(
+        withoutDefaultMemorySwap(
+          await getLiveResources(runtimeInfo, name),
+          filteredMerged,
+          createdWith,
+        ),
         filteredMerged,
-        createdWith,
+        priorRequested,
       );
       if (!resourceLimitsEqual(postLimits, filteredMerged)) {
         const fullName = prefixedName(name);
@@ -1918,32 +1953,6 @@ export default (app: App) => {
         // ensureRunning's "already running" branch — that would
         // surprise the consumer plugin. Instead, log a clear warning
         // pointing the user to the explicit recreate path.
-        //
-        // Provenance ladder — what was actually *requested*, so a field
-        // present in `postLimits` that never appeared in any request is
-        // recognized as a runtime artifact, not a user unset (notably the
-        // `oom_score_adj` rootless Podman clamps onto a child container
-        // when signalk-server's own oom_score_adj is non-zero):
-        //
-        //   1. Warm cache: the PRIOR ensureRunning's post-filter
-        //      `filteredMerged` (cached in `lastConfigs`, read into
-        //      `priorConfig` above before this call overwrote it). Using
-        //      the prior request (not the current `filteredMerged`) still
-        //      flags a genuine unset: when a user removes a `memory` cap
-        //      from `containerOverrides`, the field was in the prior
-        //      request and the recreate warning fires.
-        //   2. Cold cache (fresh server process): the requested-resources
-        //      label stamped on the container at create time — durable
-        //      provenance that survives restarts.
-        //   3. Neither (container predates the label): `undefined`, NOT
-        //      `{}` — an empty object would assert "nothing was ever
-        //      requested" and silently suppress a real stale
-        //      `memory`/`memorySwap` cap the current config removes.
-        //      `undefined` falls back to the plain current-vs-live check
-        //      minus runtime-injected fields, so a genuine memory unset
-        //      is still surfaced while the inherited oom_score_adj no
-        //      longer warns on every server start (#216).
-        const priorRequested = priorConfig?.resources ?? createdWith;
         const cannotUnset = fieldsRequiringRecreateForUnset(
           postLimits,
           filteredMerged,
@@ -1956,15 +1965,6 @@ export default (app: App) => {
               `Use POST /plugins/signalk-container/api/containers/${name}/resources to force a recreate.`,
           );
           // Still try to apply the OTHER (settable) fields via live update.
-        } else if (
-          priorRequested === undefined &&
-          postLimits.oomScoreAdj != null &&
-          filteredMerged.oomScoreAdj == null
-        ) {
-          app.debug(
-            `ensureRunning(${name}): ignoring live oomScoreAdj=${postLimits.oomScoreAdj} with no provenance — ` +
-              `runtime-injected (rootless podman inherits the server's oom_score_adj), not a consumer request`,
-          );
         }
 
         const live = await tryLiveUpdate(
@@ -2478,10 +2478,26 @@ export default (app: App) => {
       //     the user's intent but the container has the old value
       //   - manual `podman update` from outside Signal K isn't tracked
       // Always compare against truth.
-      const liveBefore = withoutDefaultMemorySwap(
-        await getLiveResources(runtimeInfo, name),
+      //
+      // Provenance guard: only force a recreate for a field the consumer
+      // actually requested before this update (plugin default ⊕ the
+      // stored override). A field that shows up live purely because the
+      // runtime injected it (a rootless-Podman-inherited oom_score_adj)
+      // was never the user's to unset, so it is left out of `liveBefore`:
+      // it neither breaks the no-op check below nor triggers a (futile,
+      // on rootless) recreate when the override is cleared.
+      const priorRequested = mergeResourceLimits(
+        pluginDefault,
+        currentOverrides[name],
+      );
+      const liveBefore = withoutInjectedResources(
+        withoutDefaultMemorySwap(
+          await getLiveResources(runtimeInfo, name),
+          filteredLimits,
+          await getRequestedResources(name),
+        ),
         filteredLimits,
-        await getRequestedResources(name),
+        priorRequested,
       );
 
       // No-op when the live container already matches what's being
@@ -2511,17 +2527,6 @@ export default (app: App) => {
       // update". Memory limits and oom-score-adj are the offenders —
       // podman/docker can lower or raise them, but not return them to
       // the unlimited/default state without a recreate.
-      //
-      // Provenance guard: only force a recreate for a field the consumer
-      // actually requested before this update (plugin default ⊕ the
-      // stored override). A field that shows up in `liveBefore` purely
-      // because the runtime injected it (a rootless-Podman-inherited
-      // oom_score_adj) was never the user's to unset, so clearing the
-      // override must not trigger a (futile, on rootless) recreate.
-      const priorRequested = mergeResourceLimits(
-        pluginDefault,
-        currentOverrides[name],
-      );
       const mustRecreateForUnset = fieldsRequiringRecreateForUnset(
         liveBefore,
         filteredLimits,
