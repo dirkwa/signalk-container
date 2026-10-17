@@ -128,6 +128,12 @@ describe("ensureRunning — config drift triggers automatic recreate", () => {
     // Assert: stop + remove happened (removeContainer issues both), then a
     // fresh createContainer in the missing branch.
     assert.ok((calls.get("stop") ?? []).length > 0, "stop should be called");
+    // The replacement reuses the container's data, so the old one is
+    // stopped with the runtime's grace period, not killed (`t: 0`).
+    assert.deepEqual(
+      (calls.get("stop") ?? []).map((c) => (c as { opts: unknown }).opts),
+      [{}],
+    );
     assert.ok(
       (calls.get("remove") ?? []).length > 0,
       "remove should be called",

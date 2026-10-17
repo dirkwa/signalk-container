@@ -3076,7 +3076,7 @@ export async function ensureRunning(
   // the config-drift and digest-drift paths so both survive the wedge.
   const recreateUnlessWedged = async (driftDesc: string): Promise<boolean> => {
     try {
-      await removeContainer(runtime, name, client);
+      await removeContainer(runtime, name, client, { graceful: true });
     } catch (err) {
       if (
         err instanceof ContainerRemovalError &&
@@ -3788,21 +3788,49 @@ export async function stopContainer(
   }
 }
 
+export interface RemoveContainerOptions {
+  /**
+   * Stop with the runtime's grace period — SIGTERM, then SIGKILL after the
+   * container's stop timeout (10 s by default) — instead of SIGKILL at
+   * once. Use it where a new container takes over the old one's data, as
+   * a recreate does: SIGKILL gives a database no chance to flush and close
+   * its files.
+   */
+  graceful?: boolean;
+}
+
 export async function removeContainer(
   runtime: ContainerRuntimeInfo,
   name: string,
   client: ContainerClient = getClient(),
+  options: RemoveContainerOptions = {},
 ): Promise<void> {
   const fullName = prefixedName(name);
   await fixVolumePermissions(runtime, name, client).catch(() => {});
-  // `t: 0`: skip the runtime's default 10s SIGTERM grace and SIGKILL
-  // immediately. removeContainer is the destructive primitive — callers
-  // that want graceful shutdown call containers.stop() instead. A
-  // container whose PID 1 ignores SIGTERM (busybox `sleep`, `tail`, …)
-  // would otherwise hold the stop for ~10s. We tolerate stop failures
-  // (already stopped / 304 / not running) and rely on `remove({force})`
-  // as the authoritative step. Works on both podman and docker.
-  await safe(() => client.getContainer(fullName).stop({ t: 0 }));
+  // Without `graceful`, `t: 0` skips the runtime's SIGTERM grace and
+  // SIGKILLs immediately: a container whose PID 1 ignores SIGTERM (busybox
+  // `sleep`, `tail`, …) would otherwise hold the stop for the full stop
+  // timeout. We tolerate stop failures (already stopped / 304 / not
+  // running) and rely on `remove({force})` as the authoritative step.
+  // Works on both podman and docker.
+  const stopped = await safe(() =>
+    client.getContainer(fullName).stop(options.graceful ? {} : { t: 0 }),
+  );
+  // Except after a graceful stop the runtime refused: `remove({force})`
+  // would then kill the still-running container, which is what `graceful`
+  // asked to avoid. The stop error carries its kind like a remove error, so
+  // a rootless wedge (EPERM) still reaches the caller as `permission`.
+  if (
+    options.graceful &&
+    !stopped.ok &&
+    (await getContainerState(runtime, name, client)) === "running"
+  ) {
+    throw new ContainerRemovalError(
+      `Failed to stop ${fullName}: ${messageWithRaw(stopped.error.userMessage, stopped.error.raw)}`,
+      stopped.error.kind,
+      { cause: stopped.error },
+    );
+  }
   const result = await safe(() =>
     client.getContainer(fullName).remove({ force: true }),
   );

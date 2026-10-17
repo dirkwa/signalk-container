@@ -2109,14 +2109,18 @@ export default (app: App) => {
       if (!runtimeInfo) throw new Error("No container runtime available");
       // Always attempt remove. `removeContainer` is idempotent on truly-
       // missing containers (stop errors are swallowed, `rm -f` returns 0),
-      // and api.remove's cache evictions / broker teardown are no-ops on
-      // a name nobody registered. No need to precondition on getState —
-      // that would only add a TOCTOU window before the actual remove.
-      // If the runtime does report a real failure, re-check state: a
-      // benign disappearance (someone else removed it concurrently) is
-      // acceptable; anything else propagates.
+      // and afterContainerRemoved's cache evictions / broker teardown are
+      // no-ops on a name nobody registered. No need to precondition on
+      // getState — that would only add a TOCTOU window before the actual
+      // remove. If the runtime does report a real failure, re-check state:
+      // a benign disappearance (someone else removed it concurrently) is
+      // acceptable; anything else propagates. The stop is graceful because
+      // the new container takes over the old one's data.
       try {
-        await api.remove(name);
+        await removeContainer(runtimeInfo, name, undefined, {
+          graceful: true,
+        });
+        afterContainerRemoved(name);
       } catch (err) {
         const now = await getContainerState(runtimeInfo, name);
         if (now !== "missing") throw err;
@@ -2581,11 +2585,22 @@ export default (app: App) => {
       // target — it's what the consumer plugin most recently asked
       // for, minus our new resources. (Bug A fix.)
       try {
-        await removeContainer(runtimeInfo, name);
+        await removeContainer(runtimeInfo, name, undefined, {
+          graceful: true,
+        });
       } catch (err) {
-        warnings.push(
-          `remove during recreate: ${err instanceof Error ? err.message : String(err)}`,
-        );
+        const removeMsg = err instanceof Error ? err.message : String(err);
+        // A container that is still there keeps its old limits: resources
+        // are not a drift axis, so the ensureRunning below would leave it
+        // as it is and this would report a recreate that never happened.
+        if ((await getContainerState(runtimeInfo, name)) !== "missing") {
+          throw new Error(
+            `Failed to apply new resources for ${name}: ${removeMsg}. ` +
+              `The container was not removed and keeps its previous limits.`,
+            { cause: err },
+          );
+        }
+        warnings.push(`remove during recreate: ${removeMsg}`);
       }
 
       // A resource-update recreate re-runs ensureRunning, which re-fires

@@ -1347,8 +1347,8 @@ export interface ContainerManagerApi {
   ): Promise<void>;
   /**
    * Force-recreate a managed container: remove the existing one
-   * (running or stopped) if present, then create it fresh from
-   * `config`. Unlike `ensureRunning` — which short-circuits on
+   * (running or stopped) if present, stopping it with the runtime's
+   * grace period, then create it fresh from `config`. Unlike `ensureRunning` — which short-circuits on
    * "already running with matching config" — `recreate` always
    * replaces the container, briefly interrupting it.
    *
