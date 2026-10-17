@@ -480,6 +480,14 @@ export default (app: App) => {
       aborted: Array<{ containerPath: string; source: string }>;
     }
   >();
+  // The owning plugin each container was last brought up with. A call that
+  // omits options.pluginId, such as an update applied from the config
+  // panel, records under that owner instead of the synthetic
+  // `container:<name>` id, which would give the container a second manifest.
+  const containerOwners = new Map<
+    string,
+    { pluginId: string; pluginVersion?: string }
+  >();
   // Device-passthrough events from the most recent ensureRunning() call
   // per container, feeding the doctor's devicePassthrough section. The
   // inner ensureRunning fires events at create time and re-fires
@@ -1764,10 +1772,17 @@ export default (app: App) => {
             `ensureRunning(${name}): live digest probe failed: ${err instanceof Error ? err.message : String(err)}`,
           );
         }
+        if (options?.pluginId) {
+          containerOwners.set(name, {
+            pluginId: options.pluginId,
+            pluginVersion: options.pluginVersion,
+          });
+        }
+        const owner = options?.pluginId ? options : containerOwners.get(name);
         manifestStore
           .recordResolution({
-            pluginId: options?.pluginId ?? `container:${name}`,
-            pluginVersion: options?.pluginVersion ?? "unknown",
+            pluginId: owner?.pluginId ?? `container:${name}`,
+            pluginVersion: owner?.pluginVersion ?? "unknown",
             containerName: name,
             config: {
               image: effectiveConfig.image,
@@ -3274,6 +3289,7 @@ export default (app: App) => {
       manifestStore = null;
       lastConfigs.clear();
       lastVolumeIssues.clear();
+      containerOwners.clear();
       // Force-close every broker; SSE clients still attached receive
       // `event: end` and disconnect.  `podman logs -f` children get
       // SIGTERM via the broker's stop-tail path.
