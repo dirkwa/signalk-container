@@ -285,6 +285,117 @@ describe("getContainerState", () => {
     const result = await getContainerState(dummyRuntime, "x", client);
     assert.equal(result, "running");
   });
+
+  it("compares timestamps as instants when their fractions differ in width", async () => {
+    // Docker trims trailing zeros, so as text "…00.21Z" sorts before
+    // "…00.2Z" although it is the later instant.
+    const client = makeMockClient({
+      containers: {
+        "sk-x": {
+          inspect: {
+            State: {
+              Status: "exited",
+              Running: true,
+              Pid: 12345,
+              StartedAt: "2026-09-22T10:00:00.2Z",
+              FinishedAt: "2026-09-22T10:00:00.21Z",
+            },
+          },
+        },
+      },
+    });
+    const result = await getContainerState(dummyRuntime, "x", client);
+    assert.equal(result, "stopped");
+  });
+
+  it("compares timestamps as instants when their offsets differ", async () => {
+    // Podman writes the host's local offset. Across the NZ daylight-saving
+    // fallback, the stop at 02:50+13:00 (13:50Z) came before the start in
+    // the repeated hour at 02:20+12:00 (14:20Z), although as text it sorts
+    // after it. With Status flaking, only the instants keep this running
+    // container running.
+    const client = makeMockClient({
+      containers: {
+        "sk-x": {
+          inspect: {
+            State: {
+              Status: "",
+              Running: true,
+              Pid: 54321,
+              StartedAt: "2026-04-05T02:20:00.123456789+12:00",
+              FinishedAt: "2026-04-05T02:50:00.987654321+13:00",
+            },
+          },
+        },
+      },
+    });
+    const result = await getContainerState(dummyRuntime, "x", client);
+    assert.equal(result, "running");
+  });
+
+  it("orders a stop and a start within the same millisecond", async () => {
+    // Both fall in millisecond .123, which is all Date.parse keeps; the
+    // stop came first, so this container restarted and is running.
+    const client = makeMockClient({
+      containers: {
+        "sk-x": {
+          inspect: {
+            State: {
+              Status: "",
+              Running: true,
+              Pid: 54321,
+              StartedAt: "2026-09-22T10:00:00.123456789Z",
+              FinishedAt: "2026-09-22T10:00:00.123400000Z",
+            },
+          },
+        },
+      },
+    });
+    const result = await getContainerState(dummyRuntime, "x", client);
+    assert.equal(result, "running");
+  });
+
+  it("stays 'running' when Status says so, even with FinishedAt after StartedAt", async () => {
+    // A host clock stepped back between a stop and the next start leaves
+    // a running container with a StartedAt before its last FinishedAt.
+    const client = makeMockClient({
+      containers: {
+        "sk-x": {
+          inspect: {
+            State: {
+              Status: "running",
+              Running: true,
+              Pid: 54321,
+              StartedAt: "2026-09-22T09:31:00.000000000Z",
+              FinishedAt: "2026-09-22T09:50:00.000000000Z",
+            },
+          },
+        },
+      },
+    });
+    const result = await getContainerState(dummyRuntime, "x", client);
+    assert.equal(result, "running");
+  });
+
+  it("ignores a FinishedAt that does not parse", async () => {
+    const client = makeMockClient({
+      containers: {
+        "sk-x": {
+          inspect: {
+            State: {
+              Status: "",
+              Running: true,
+              Pid: 54321,
+              StartedAt: "2026-09-22T10:00:00Z",
+              FinishedAt: "not a timestamp",
+            },
+          },
+        },
+      },
+    });
+    const result = await getContainerState(dummyRuntime, "x", client);
+    assert.equal(result, "running");
+  });
 });
 
 describe("getContainerStateDetail", () => {
