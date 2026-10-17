@@ -711,6 +711,13 @@ export interface ContainerInfo {
   created: string;
   ports: string[];
   managedBy: string;
+  /**
+   * Set when the plugin recorded as this container's owner is no longer
+   * installed: that plugin's id. Such a container is stopped and left for
+   * the user to remove. Only a container whose owner passed
+   * `EnsureRunningOptions.pluginId` can carry it.
+   */
+  uninstalledOwner?: string;
 }
 
 export interface ContainerJobConfig {

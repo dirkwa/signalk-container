@@ -27,7 +27,8 @@ const MAX_HISTORY = 20;
  * match modern npm (which lowercases names on publish).
  */
 const SEGMENT = "[a-z0-9][a-z0-9._-]*";
-const SYNTHETIC_PREFIX = "container:";
+/** Prefix of the id a container is recorded under when no owner is known. */
+export const SYNTHETIC_PREFIX = "container:";
 const PLUGIN_ID_RE = new RegExp(
   `^(?:${SEGMENT}|@${SEGMENT}/${SEGMENT}|${SYNTHETIC_PREFIX}${SEGMENT})$`,
 );
@@ -212,6 +213,35 @@ export class ManifestStore {
       );
     });
     for (const key of keys) this.queue.set(key, tail);
+    return op;
+  }
+
+  /**
+   * Drop one container's record from a plugin's manifest, for a container
+   * that is gone for good. Serialized with that plugin's other writes.
+   */
+  async forgetContainer(
+    pluginId: string,
+    containerName: string,
+  ): Promise<void> {
+    if (!PLUGIN_ID_RE.test(pluginId)) {
+      throw new Error(
+        `Invalid pluginId for manifest: ${JSON.stringify(pluginId)} (must be an npm package name, "@scope/name", or "container:<name>")`,
+      );
+    }
+    const prev = this.queue.get(pluginId) ?? Promise.resolve();
+    const op = prev
+      .catch(() => undefined)
+      .then(async () => {
+        const manifest = await this.get(pluginId);
+        if (manifest?.containers[containerName]) {
+          this.dropEntry(pluginId, manifest, containerName);
+        }
+      });
+    this.queue.set(
+      pluginId,
+      op.catch(() => undefined),
+    );
     return op;
   }
 

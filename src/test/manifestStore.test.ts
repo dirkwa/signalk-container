@@ -292,6 +292,24 @@ describe("ManifestStore", () => {
     );
   });
 
+  it("forgetContainer drops one record and deletes an emptied manifest", async () => {
+    const store = new ManifestStore(baseDir, () => {});
+    await store.recordResolution(commonParams(DIGEST_A));
+    await store.recordResolution(
+      commonParams(DIGEST_A, { containerName: "grafana" }),
+    );
+
+    await store.forgetContainer("signalk-questdb", "questdb");
+    assert.deepEqual(
+      Object.keys((await store.get("signalk-questdb"))?.containers ?? {}),
+      ["grafana"],
+    );
+
+    await store.forgetContainer("signalk-questdb", "grafana");
+    assert.equal(await store.get("signalk-questdb"), null);
+    assert.equal(existsSync(join(baseDir, "signalk-questdb.json")), false);
+  });
+
   it("a takeover waits for a synthetic write already queued", async () => {
     const store = new ManifestStore(baseDir, () => {});
     const synthetic = store.recordResolution({

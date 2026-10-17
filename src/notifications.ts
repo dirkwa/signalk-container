@@ -42,7 +42,8 @@ export type DegradationCondition =
   | "deviceUnresolved"
   | "volumeAborted"
   | "deploymentDegraded"
-  | "crashLooping";
+  | "crashLooping"
+  | "ownerUninstalled";
 
 /** Minimal slice of the host `app` the emitter needs. */
 export interface NotificationApp {

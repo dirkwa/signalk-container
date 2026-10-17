@@ -132,7 +132,8 @@ import { FileUpdateCache } from "./updates/cache.js";
 import { registerUpdateRoutes } from "./updates/routes.js";
 import { planUpdateApply } from "./updates/applyPlan.js";
 import { DIGEST_RE, resolveImage } from "./manifest/resolver.js";
-import { ManifestStore } from "./manifest/store.js";
+import { ManifestStore, SYNTHETIC_PREFIX } from "./manifest/store.js";
+import { findOrphans, ORPHAN_CHECK_DELAY_MS } from "./orphans.js";
 import {
   CPU_PRIORITIES,
   DEFAULT_CONTAINER_CPU_PRIORITY,
@@ -170,6 +171,13 @@ interface App {
     [key: string]: unknown;
   };
   handleMessage?: (pluginId: string, delta: unknown) => void;
+  /**
+   * The plugins the server has loaded, installed whether enabled or not.
+   * Not declared by the pinned `@signalk/server-api` type; the running
+   * server provides it. Read to notice a container whose owning plugin was
+   * uninstalled.
+   */
+  getPluginsList?: () => Promise<Array<{ id: string }>>;
   /**
    * Persist the plugin's configuration to plugin-config-data/signalk-container.json.
    * Signal K server-api declares this; we optionally use it from updateResources()
@@ -371,6 +379,10 @@ export default (app: App) => {
   // Single shared crash-loop poll across every managed container, armed on
   // the first ensureRunning and cleared in stop().
   let restartPollTimer: NodeJS.Timeout | null = null;
+  let orphanCheckTimer: NodeJS.Timeout | null = null;
+  // Unprefixed container name → id of its uninstalled owner, for the
+  // containers checkOrphans() stopped. Read by listContainers().
+  const orphanOwners = new Map<string, string>();
   // Guards against a slow sweep overlapping the next tick.
   let restartPollInFlight = false;
   const SETUP: SelfHealthMarker = "setup";
@@ -955,7 +967,80 @@ export default (app: App) => {
     degradation.clear("deviceUnresolved", name);
     degradation.clear("volumeAborted", name);
     degradation.clear("crashLooping", name);
+    degradation.clear("ownerUninstalled", name);
     degradation.forgetContainer(name);
+    // An uninstalled plugin's container is gone for good once removed, so
+    // its manifest record goes with it.
+    const uninstalledOwner = orphanOwners.get(name);
+    if (uninstalledOwner !== undefined) {
+      orphanOwners.delete(name);
+      manifestStore
+        ?.forgetContainer(uninstalledOwner, name)
+        .catch((err: unknown) =>
+          app.debug(
+            `forgetting the manifest record of ${name} failed: ${err instanceof Error ? err.message : String(err)}`,
+          ),
+        );
+    }
+  }
+
+  /**
+   * Stop the managed containers whose recorded owner is no longer installed
+   * and flag them for the user to remove. See `src/orphans.ts`.
+   */
+  async function checkOrphans(runtime: ContainerRuntimeInfo): Promise<void> {
+    const store = manifestStore;
+    if (!store || typeof app.getPluginsList !== "function") return;
+    const installed = new Set(
+      (await app.getPluginsList()).map((plugin) => plugin.id),
+    );
+    const owners = new Map<string, string>();
+    for (const manifest of await store.list()) {
+      if (manifest.pluginId.startsWith(SYNTHETIC_PREFIX)) continue;
+      for (const name of Object.keys(manifest.containers)) {
+        owners.set(name, manifest.pluginId);
+      }
+    }
+    const containers = await listContainers(runtime);
+    const configPath = app.config?.configPath;
+    const orphans = findOrphans({
+      owners,
+      present: containers.map((c) => c.unprefixedName),
+      installedPluginIds: installed,
+      claimed: new Set(lastConfigs.keys()),
+      packageInstalled: (pkg) =>
+        configPath !== undefined &&
+        existsSync(path.join(configPath, "node_modules", pkg, "package.json")),
+    });
+    for (const { name, owner } of orphans) {
+      // Each stop below awaits, and a consumer may claim its container in
+      // the meantime.
+      if (lastConfigs.has(name)) continue;
+      let stopped = false;
+      if (
+        containers.find((c) => c.unprefixedName === name)?.state === "running"
+      ) {
+        try {
+          await stopContainer(runtime, name);
+          stopped = true;
+        } catch (err) {
+          app.error(
+            `Could not stop ${name}, left behind by uninstalled plugin ${owner}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+      orphanOwners.set(name, owner);
+      app.error(
+        `Container ${name} belongs to ${owner}, which is no longer installed${stopped ? "; stopped it" : ""}. Remove it in the Container Manager if it is no longer needed.`,
+      );
+      degradation.raise(
+        "ownerUninstalled",
+        name,
+        "warn",
+        `${name}: its plugin ${owner} is no longer installed${stopped ? ", so the container was stopped" : ""}. Remove it in the Container Manager if it is no longer needed.`,
+        { owner },
+      );
+    }
   }
 
   const effectiveResources = new Map<string, ContainerResourceLimits>();
@@ -1682,6 +1767,10 @@ export default (app: App) => {
       // Reaching here means the container started with nothing aborted, so
       // clear any prior volumeAborted alert (the missing source reappeared).
       degradation.clear("volumeAborted", name);
+      // Its plugin is back and running it, so it is not left over.
+      if (orphanOwners.delete(name)) {
+        degradation.clear("ownerUninstalled", name);
+      }
 
       // Commit port-address mappings only after the container has been
       // successfully started.  Populating portAddressMap before this
@@ -2280,7 +2369,11 @@ export default (app: App) => {
 
     async listContainers(): Promise<ContainerInfo[]> {
       if (!runtimeInfo) return [];
-      return listContainers(runtimeInfo);
+      const containers = await listContainers(runtimeInfo);
+      return containers.map((c) => {
+        const uninstalledOwner = orphanOwners.get(c.unprefixedName);
+        return uninstalledOwner === undefined ? c : { ...c, uninstalledOwner };
+      });
     },
 
     async execInContainer(name: string, command: string[]) {
@@ -3247,6 +3340,17 @@ export default (app: App) => {
           pruneScheduler.start();
         }
 
+        if (orphanCheckTimer) clearTimeout(orphanCheckTimer);
+        orphanCheckTimer = setTimeout(() => {
+          orphanCheckTimer = null;
+          if (generation !== startGeneration || !runtimeInfo) return;
+          checkOrphans(runtimeInfo).catch((err: unknown) =>
+            app.error(
+              `Checking for containers of uninstalled plugins failed: ${err instanceof Error ? err.message : String(err)}`,
+            ),
+          );
+        }, ORPHAN_CHECK_DELAY_MS);
+
         app.debug("Container manager started");
       }
     },
@@ -3256,6 +3360,11 @@ export default (app: App) => {
         pruneScheduler.stop();
         pruneScheduler = null;
       }
+      if (orphanCheckTimer) {
+        clearTimeout(orphanCheckTimer);
+        orphanCheckTimer = null;
+      }
+      orphanOwners.clear();
       for (const timer of healthTimers.values()) {
         clearInterval(timer);
       }
