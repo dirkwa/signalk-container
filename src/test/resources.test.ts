@@ -12,6 +12,7 @@ import {
   resourcePayloadForUpdate,
   resourceLimitsEqual,
   tryLiveUpdate,
+  withoutDefaultMemorySwap,
 } from "../resources.js";
 import type { ContainerRuntimeInfo } from "../types.js";
 import { makeMockClient } from "./helpers/mockClient.js";
@@ -1061,6 +1062,58 @@ describe("fieldsRequiringRecreateForUnset (Bug E)", () => {
       );
       assert.deepEqual(oomCold, []);
     });
+  });
+});
+
+describe("withoutDefaultMemorySwap", () => {
+  // getLiveResources' rendering of a podman 5.8.6 container created with
+  // memory 768m and no memorySwap: MemorySwap 1610612736 is twice Memory.
+  const podmanDefault = { cpus: 1.5, memory: "768m", memorySwap: "1536m" };
+
+  it("drops the runtime's default swap when the target sets none", () => {
+    assert.deepEqual(
+      withoutDefaultMemorySwap(podmanDefault, { cpus: 1.5, memory: "768m" }),
+      { cpus: 1.5, memory: "768m" },
+    );
+  });
+
+  it("keeps a swap the target asks for, even at the default size", () => {
+    assert.deepEqual(
+      withoutDefaultMemorySwap(podmanDefault, {
+        memory: "768m",
+        memorySwap: "1536m",
+      }),
+      podmanDefault,
+    );
+  });
+
+  it("keeps a swap that is not twice the live memory", () => {
+    const live = { memory: "768m", memorySwap: "1g" };
+    assert.deepEqual(withoutDefaultMemorySwap(live, { memory: "768m" }), live);
+  });
+
+  it("compares bytes, not the rendered strings", () => {
+    // bytesToString renders 2 GiB as "2g" and 1 GiB as "1g".
+    assert.deepEqual(
+      withoutDefaultMemorySwap({ memory: "1g", memorySwap: "2g" }, {}),
+      { memory: "1g" },
+    );
+  });
+
+  it("stops fieldsRequiringRecreateForUnset reporting the default swap", () => {
+    const requested = { cpus: 1.5, memory: "768m" };
+    assert.deepEqual(
+      fieldsRequiringRecreateForUnset(podmanDefault, requested, requested),
+      ["memorySwap"],
+    );
+    assert.deepEqual(
+      fieldsRequiringRecreateForUnset(
+        withoutDefaultMemorySwap(podmanDefault, requested),
+        requested,
+        requested,
+      ),
+      [],
+    );
   });
 });
 

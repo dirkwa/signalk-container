@@ -229,6 +229,44 @@ export function fieldsRequiringRecreateForUnset(
 }
 
 /**
+ * How the runtime sizes memory+swap for a container created with
+ * `memory` and no `memorySwap`. Measured on podman 5.8.6: a create with
+ * Memory 768m and no MemorySwap inspects as MemorySwap 1610612736, twice
+ * its Memory of 805306368.
+ */
+const DEFAULT_MEMORY_SWAP_FACTOR = 2;
+
+/**
+ * `live` without a `memorySwap` that is only the runtime's default for
+ * its `memory`, when `target` does not ask for a `memorySwap` either.
+ *
+ * Nobody requested that value, but `getLiveResources` reports it like
+ * any other limit. Compared as-is, a target without `memorySwap` would
+ * look like it unsets one: `fieldsRequiringRecreateForUnset` would name
+ * `memorySwap` for a memory-capped container, so each start would log
+ * "cannot live-unset fields memorySwap" and every `updateResources` on
+ * that container would force a recreate.
+ */
+export function withoutDefaultMemorySwap(
+  live: ContainerResourceLimits,
+  target: ContainerResourceLimits,
+): ContainerResourceLimits {
+  if (
+    isSet(target.memorySwap) ||
+    !isSet(live.memory) ||
+    !isSet(live.memorySwap)
+  ) {
+    return live;
+  }
+  const memoryBytes = parseMemoryToBytes(live.memory as string);
+  const swapBytes = parseMemoryToBytes(live.memorySwap as string);
+  if (swapBytes !== DEFAULT_MEMORY_SWAP_FACTOR * memoryBytes) return live;
+  const withoutSwap = { ...live };
+  delete withoutSwap.memorySwap;
+  return withoutSwap;
+}
+
+/**
  * Parse a requested-resources provenance label value back into
  * ContainerResourceLimits. The value crosses a system boundary (it is
  * read back from container runtime state and could have been written
