@@ -871,6 +871,10 @@ export interface ContainerJobResult {
 
 export interface PruneResult {
   imagesRemoved: number;
+  /**
+   * The space freed, for display: decimal units with at most one decimal,
+   * e.g. "64.8 MB".
+   */
   spaceReclaimed: string;
 }
 
