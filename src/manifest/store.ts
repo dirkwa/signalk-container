@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, existsSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { Check } from "typebox/value";
 import type {
@@ -27,8 +27,9 @@ const MAX_HISTORY = 20;
  * match modern npm (which lowercases names on publish).
  */
 const SEGMENT = "[a-z0-9][a-z0-9._-]*";
+const SYNTHETIC_PREFIX = "container:";
 const PLUGIN_ID_RE = new RegExp(
-  `^(?:${SEGMENT}|@${SEGMENT}/${SEGMENT}|container:${SEGMENT})$`,
+  `^(?:${SEGMENT}|@${SEGMENT}/${SEGMENT}|${SYNTHETIC_PREFIX}${SEGMENT})$`,
 );
 
 /**
@@ -44,6 +45,22 @@ function encodeForFilename(pluginId: string): string {
 
 function decodeFromFilename(filename: string): string {
   return filename.replace(/%2F/g, "/").replace(/%3A/g, ":");
+}
+
+/**
+ * Two histories of one container in time order, without the entries both
+ * hold, trimmed to the newest MAX_HISTORY.
+ */
+function mergeHistory(a: HistoryEntry[], b: HistoryEntry[]): HistoryEntry[] {
+  const seen = new Set<string>();
+  const merged: HistoryEntry[] = [];
+  for (const entry of [...a, ...b].sort((x, y) => x.ts.localeCompare(y.ts))) {
+    const key = `${entry.ts}|${entry.to}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(entry);
+  }
+  return merged.slice(-MAX_HISTORY);
 }
 
 /**
@@ -122,10 +139,10 @@ export class ManifestStore {
 
   async getContainerHistory(containerName: string): Promise<HistoryEntry[]> {
     // Collect every manifest that owns an entry for this containerName.
-    // Multiple manifests *can* coexist (e.g. a synthetic
-    // `container:<name>` entry from a prior session plus a real
-    // `signalk-foo` entry from a later session), and silently
-    // returning one would hide the conflict.
+    // Multiple manifests *can* coexist (e.g. two plugins recording the
+    // same container name), and silently returning one would hide the
+    // conflict. A synthetic `container:<name>` entry is not one of them
+    // for long: its real owner takes it over on the next record.
     const matches: Array<{ pluginId: string; history: HistoryEntry[] }> = [];
     for (const manifest of await this.list()) {
       const entry = manifest.containers[containerName];
@@ -176,17 +193,36 @@ export class ManifestStore {
     // failure doesn't poison subsequent writes; the caller still gets
     // the original rejecting promise, so a `.catch()` on the wrapper
     // side observes the actual error.
-    const prev = this.queue.get(params.pluginId) ?? Promise.resolve();
-    const op = prev.catch(() => undefined).then(() => this.doRecord(params));
-    this.queue.set(
-      params.pluginId,
-      op.catch((err) => {
-        this.debug(
-          `[manifest] ${params.pluginId}: record failed (${err instanceof Error ? err.message : err})`,
-        );
-      }),
+    //
+    // A real owner's record may take over the synthetic manifest of the
+    // same container (see doRecord), so it also waits for, and holds up,
+    // writes to that synthetic id.
+    const keys = [params.pluginId];
+    const syntheticId = this.takeoverCandidate(params);
+    if (syntheticId) keys.push(syntheticId);
+    const prev = Promise.all(
+      keys.map((key) =>
+        (this.queue.get(key) ?? Promise.resolve()).catch(() => undefined),
+      ),
     );
+    const op = prev.then(() => this.doRecord(params));
+    const tail = op.catch((err) => {
+      this.debug(
+        `[manifest] ${params.pluginId}: record failed (${err instanceof Error ? err.message : err})`,
+      );
+    });
+    for (const key of keys) this.queue.set(key, tail);
     return op;
+  }
+
+  /** The synthetic id a real owner's record may take over, if any. */
+  private takeoverCandidate(params: {
+    pluginId: string;
+    containerName: string;
+  }): string | null {
+    if (params.pluginId.startsWith(SYNTHETIC_PREFIX)) return null;
+    const syntheticId = `${SYNTHETIC_PREFIX}${params.containerName}`;
+    return PLUGIN_ID_RE.test(syntheticId) ? syntheticId : null;
   }
 
   private async doRecord(params: {
@@ -206,7 +242,24 @@ export class ManifestStore {
       return;
     }
 
-    const priorEntry = existing?.containers[params.containerName];
+    // A container recorded before its consumer passed a pluginId lives in
+    // the synthetic `container:<name>` manifest. The real owner takes over
+    // that entry, history included, so the switch does not read as a fresh
+    // install and the container ends up with exactly one owner.
+    const syntheticId = this.takeoverCandidate(params);
+    const synthetic = syntheticId ? await this.get(syntheticId) : null;
+    const adopted = synthetic?.containers[params.containerName];
+
+    const ownEntry = existing?.containers[params.containerName];
+    // Both can exist when an older signalk-container recorded the container
+    // under each id; keep every recorded transition rather than either side.
+    const priorEntry =
+      ownEntry && adopted
+        ? {
+            ...ownEntry,
+            history: mergeHistory(adopted.history, ownEntry.history),
+          }
+        : (ownEntry ?? adopted);
     const from = priorEntry?.resolvedDigest ?? null;
     const to = params.resolved.resolvedDigest;
     const ts = this.now();
@@ -258,6 +311,26 @@ export class ManifestStore {
       },
     };
     atomicWriteJson(path, manifest);
+
+    // Only after the real owner's write: a crash in between leaves a
+    // duplicate this step removes on the next record, never a lost history.
+    if (syntheticId && synthetic && adopted) {
+      this.dropEntry(syntheticId, synthetic, params.containerName);
+    }
+  }
+
+  private dropEntry(
+    pluginId: string,
+    manifest: ConsumerManifest,
+    containerName: string,
+  ): void {
+    const rest = { ...manifest.containers };
+    delete rest[containerName];
+    if (Object.keys(rest).length === 0) {
+      rmSync(this.pathFor(pluginId), { force: true });
+      return;
+    }
+    atomicWriteJson(this.pathFor(pluginId), { ...manifest, containers: rest });
   }
 
   private pathFor(pluginId: string): string {

@@ -200,16 +200,110 @@ describe("ManifestStore", () => {
     // Two plugins both record an entry for the same containerName.
     await store.recordResolution({
       ...commonParams(DIGEST_A),
-      pluginId: "container:questdb",
+      pluginId: "signalk-questdb",
     });
     await store.recordResolution({
       ...commonParams(DIGEST_B),
-      pluginId: "signalk-questdb",
+      pluginId: "other-questdb-plugin",
     });
     await assert.rejects(
       () => store.getContainerHistory("questdb"),
       /Ambiguous container history/,
     );
+  });
+
+  it("the real owner takes over a synthetic entry, history included", async () => {
+    const store = new ManifestStore(baseDir, () => {});
+    await store.recordResolution({
+      ...commonParams(DIGEST_A),
+      pluginId: "container:questdb",
+    });
+    await store.recordResolution(commonParams(DIGEST_A));
+
+    assert.equal(await store.get("container:questdb"), null);
+    assert.equal(
+      existsSync(join(baseDir, "container%3Aquestdb.json")),
+      false,
+      "the emptied synthetic manifest is deleted",
+    );
+    // Same digest under the new owner: still the one install, not a second.
+    const history = await store.getContainerHistory("questdb");
+    assert.equal(history.length, 1);
+    assert.equal(history[0].reason, "plugin-install");
+    const owned = await store.get("signalk-questdb");
+    assert.ok(owned?.containers.questdb);
+  });
+
+  it("a digest change at takeover extends the adopted history", async () => {
+    const store = new ManifestStore(baseDir, () => {});
+    await store.recordResolution({
+      ...commonParams(DIGEST_A),
+      pluginId: "container:questdb",
+    });
+    await store.recordResolution(commonParams(DIGEST_B));
+
+    const history = await store.getContainerHistory("questdb");
+    assert.deepEqual(
+      history.map((h) => [h.from, h.to]),
+      [
+        [null, DIGEST_A],
+        [DIGEST_A, DIGEST_B],
+      ],
+    );
+  });
+
+  it("a synthetic manifest for another container is left alone", async () => {
+    const store = new ManifestStore(baseDir, () => {});
+    await store.recordResolution({
+      ...commonParams(DIGEST_A, { containerName: "grafana" }),
+      pluginId: "container:grafana",
+    });
+    await store.recordResolution(commonParams(DIGEST_A));
+
+    assert.ok((await store.get("container:grafana"))?.containers.grafana);
+  });
+
+  it("merges the histories when the container is recorded under both ids", async () => {
+    // The state an older signalk-container leaves behind: the real owner and
+    // the synthetic id each hold a record of the container.
+    let tick = 0;
+    const store = new ManifestStore(
+      baseDir,
+      () => {},
+      () => new Date(Date.UTC(2026, 0, 1, 0, 0, ++tick)).toISOString(),
+    );
+    await store.recordResolution(commonParams(DIGEST_A));
+    await store.recordResolution({
+      ...commonParams(DIGEST_B),
+      pluginId: "container:questdb",
+    });
+
+    await store.recordResolution(commonParams(DIGEST_B));
+
+    assert.equal(await store.get("container:questdb"), null);
+    const history = await store.getContainerHistory("questdb");
+    assert.deepEqual(
+      history.map((h) => [h.from, h.to]),
+      [
+        [null, DIGEST_A],
+        [null, DIGEST_B],
+        [DIGEST_A, DIGEST_B],
+      ],
+    );
+  });
+
+  it("a takeover waits for a synthetic write already queued", async () => {
+    const store = new ManifestStore(baseDir, () => {});
+    const synthetic = store.recordResolution({
+      ...commonParams(DIGEST_A),
+      pluginId: "container:questdb",
+    });
+    const real = store.recordResolution(commonParams(DIGEST_A));
+    await Promise.all([synthetic, real]);
+
+    assert.equal(await store.get("container:questdb"), null);
+    const history = await store.getContainerHistory("questdb");
+    assert.equal(history.length, 1);
   });
 
   it("synthetic pluginId fallback (container:<name>) works as a key", async () => {

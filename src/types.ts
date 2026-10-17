@@ -1276,8 +1276,9 @@ export interface EnsureRunningOptions extends HealthCheckOptions {
    *
    * Optional for backward compatibility — when absent, the manifest is
    * keyed under the synthetic id `container:<name>`, so the
-   * per-container history view continues to work. Strongly recommended
-   * for any plugin adopting digest pinning.
+   * per-container history view continues to work. A plugin that starts
+   * passing it takes over that synthetic record, history included.
+   * Strongly recommended for any plugin adopting digest pinning.
    */
   pluginId?: string;
   /**
