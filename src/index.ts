@@ -41,14 +41,16 @@ import {
   tryLiveUpdate,
 } from "./resources.js";
 import { detectRuntime, isContainerized, setDisableUserns } from "./runtime.js";
-import { setNamespace, resetNamespace } from "./namespace.js";
+import { setNamespace } from "./namespace.js";
 import {
   makeDegradationEmitter,
   type DegradationEmitter,
   type NotificationApp,
 } from "./notifications.js";
 import {
+  type ContainerClient,
   getClient,
+  getSocketPath,
   inspectForHealthSchedule,
   libpodRunHealthcheck,
   resetClient,
@@ -326,6 +328,14 @@ export function shouldSurfaceDetectStatus(
 
 export default (app: App) => {
   let runtimeInfo: ContainerRuntimeInfo | null = null;
+  // A server shutdown stops every plugin at once, so a consumer's own stop()
+  // can reach api.stop() after this plugin's stop() has dropped the runtime.
+  // stop() keeps what stopping a container needs here, until the next start(),
+  // so that consumer still stops its container instead of failing silently.
+  let retiredRuntime: {
+    runtime: ContainerRuntimeInfo;
+    client: ContainerClient;
+  } | null = null;
   let runtimePreference: RuntimePreference = "auto";
   let pruneScheduler: PruneScheduler | null = null;
   // Pending runtime re-probe, so stop() can cancel one that has not fired.
@@ -2133,8 +2143,17 @@ export default (app: App) => {
     },
 
     async stop(name: string) {
-      if (!runtimeInfo) throw new Error("No container runtime available");
-      await stopContainer(runtimeInfo, name);
+      if (runtimeInfo) {
+        await stopContainer(runtimeInfo, name);
+      } else if (retiredRuntime) {
+        await stopContainer(
+          retiredRuntime.runtime,
+          name,
+          retiredRuntime.client,
+        );
+      } else {
+        throw new Error("No container runtime available");
+      }
       evictContainerAddresses(name);
     },
 
@@ -2874,7 +2893,8 @@ export default (app: App) => {
       // namespace (production parity); the devcontainer sets
       // `SIGNALK_CONTAINER_NAMESPACE=devpod` so its managed containers and
       // job reaper can't touch a production `sk-*` stack on the same host.
-      // Reset on stop() below so a restart re-reads the environment cleanly.
+      // Re-read on every start, so a restart picks up a changed environment.
+      retiredRuntime = null;
       setNamespace(process.env.SIGNALK_CONTAINER_NAMESPACE, (value) =>
         app.error(
           `Ignoring invalid SIGNALK_CONTAINER_NAMESPACE=${JSON.stringify(
@@ -3276,9 +3296,10 @@ export default (app: App) => {
       // left it disabled so a late raise() from an in-flight startup step
       // can't strand a notification after stop(). The next start() re-enables
       // it from config via degradation.setEnabled(...).
-      // Restore the default namespace symmetrically; start() re-reads the
-      // env var, so this only matters as a defensive reset.
-      resetNamespace();
+      // The namespace is deliberately NOT reset: a stop through
+      // retiredRuntime must resolve the same prefixed name, or a dev instance
+      // would stop production's `sk-<name>`. start() re-reads the env var
+      // before anything else.
       cachedDataSource = null;
       pendingDataSource = null;
       cachedConfigRootSource = null;
@@ -3298,6 +3319,10 @@ export default (app: App) => {
       // flight. The generation bump above already keeps that detection from
       // touching state when it finally returns.
       settleReady();
+      retiredRuntime =
+        runtimeInfo && getSocketPath() !== undefined
+          ? { runtime: runtimeInfo, client: getClient() }
+          : null;
       // Drop the cached dockerode client so a future start() re-probes the
       // socket (it may have moved, or the runtime may have changed).
       resetClient();
