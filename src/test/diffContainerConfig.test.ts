@@ -68,6 +68,7 @@ function liveBase(
     digest: null,
     command: null,
     networkMode: "bridge",
+    networks: [],
     env: new Map(),
     binds: [],
     portBindings: new Map(),
@@ -214,6 +215,37 @@ describe("diffContainerConfig — networkMode canonicalization", () => {
       docker,
     );
     assert.ok(!drifted.includes("networkMode"));
+  });
+
+  // Podman reports NetworkMode "bridge" for a container on a user-defined
+  // network; the network's name appears only in NetworkSettings.Networks.
+  it("no drift on podman when live 'bridge' is attached to the requested network", () => {
+    const { drifted } = diffContainerConfig(
+      reqBase({ networkMode: "sk-network" }),
+      liveBase({ networkMode: "bridge", networks: ["sk-network"] }),
+      podman,
+    );
+    assert.ok(!drifted.includes("networkMode"));
+  });
+
+  it("drift on podman when live 'bridge' is attached to a different network", () => {
+    const { drifted } = diffContainerConfig(
+      reqBase({ networkMode: "sk-network" }),
+      liveBase({ networkMode: "bridge", networks: ["podman"] }),
+      podman,
+    );
+    assert.ok(drifted.includes("networkMode"));
+  });
+
+  it("drift on docker when live 'bridge' is merely connected to the requested network", () => {
+    // The attached-network fallback is podman-only; docker keeps the plain
+    // mode comparison.
+    const { drifted } = diffContainerConfig(
+      reqBase({ networkMode: "sk-network" }),
+      liveBase({ networkMode: "bridge", networks: ["bridge", "sk-network"] }),
+      docker,
+    );
+    assert.ok(drifted.includes("networkMode"));
   });
 });
 

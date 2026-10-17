@@ -59,10 +59,16 @@ function buildLiveInspect(parts: {
   extraHosts?: string[] | null;
   user?: string;
   labels?: Record<string, string> | null;
+  networks?: string[];
 }): Json {
   const st = parts.state ?? { status: "running", running: true, pid: LIVE_PID };
   return {
     State: { Status: st.status, Running: st.running, Pid: st.pid },
+    NetworkSettings: {
+      Networks: Object.fromEntries(
+        (parts.networks ?? []).map((name) => [name, {}]),
+      ),
+    },
     Config: {
       Image: parts.image,
       Cmd: parts.cmd ?? null,
@@ -610,6 +616,42 @@ describe("ensureRunning — config drift triggers automatic recreate", () => {
       client,
     );
     assert.equal((calls.get("stop") ?? []).length, 0);
+    assert.equal((calls.get("remove") ?? []).length, 0);
+    assert.equal((calls.get("createContainer") ?? []).length, 0);
+    assert.ok(
+      debugLines.some((l) => l.includes("already running")),
+      `expected 'already running' in debug, got: ${debugLines.join(" | ")}`,
+    );
+  });
+
+  it("does NOT recreate a podman container that is on its requested network", async () => {
+    // Podman reports a container on a user-defined network as
+    // NetworkMode "bridge" and names the network only under
+    // NetworkSettings.Networks — the inspect shape of a questdb container
+    // created with networkMode "sk-network" on podman 5.8.6.
+    const calls = new Map<string, unknown[]>();
+    const client = makeMockClient({
+      containers: {
+        "sk-questdb": {
+          inspect: buildLiveInspect({
+            image: "questdb/questdb:9.0.0",
+            env: ["FOO=2"],
+            networkMode: "bridge",
+            networks: ["sk-network"],
+          }),
+        },
+      },
+      calls,
+    });
+    const debugLines: string[] = [];
+    await ensureRunning(
+      rootlessPodman,
+      "questdb",
+      { ...requested, networkMode: "sk-network" },
+      (m) => debugLines.push(m),
+      undefined,
+      client,
+    );
     assert.equal((calls.get("remove") ?? []).length, 0);
     assert.equal((calls.get("createContainer") ?? []).length, 0);
     assert.ok(

@@ -247,6 +247,7 @@ describe("diffContainerConfig — unresolved-label stickiness", () => {
       digest: null,
       command: null,
       networkMode: "",
+      networks: [],
       env: new Map<string, string>(),
       binds: [],
       portBindings: new Map(),

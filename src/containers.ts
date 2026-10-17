@@ -1607,6 +1607,14 @@ export interface LiveContainerConfig {
   digest: string | null;
   command: string[] | null;
   networkMode: string;
+  /**
+   * Names of the networks the container is attached to, the keys of
+   * `NetworkSettings.Networks`; `[]` when none are reported. Podman
+   * reports `networkMode` as `"bridge"` for a container on a user-defined
+   * network, so this is where that network's name shows up (see
+   * `networkModeMatches`).
+   */
+  networks: string[];
   env: Map<string, string>;
   binds: Array<{ host: string; container: string; readOnly?: boolean }>;
   portBindings: Map<string, PortBinding[]>;
@@ -1727,6 +1735,7 @@ export async function getLiveContainerConfig(
   if (Array.isArray(rawCmd)) command = rawCmd.map((s) => String(s));
 
   const networkMode = (rawNetworkMode ?? "").trim();
+  const networks = Object.keys(info.NetworkSettings?.Networks ?? {});
 
   const binds: Array<{ host: string; container: string; readOnly?: boolean }> =
     [];
@@ -1834,6 +1843,7 @@ export async function getLiveContainerConfig(
     digest,
     command,
     networkMode,
+    networks,
     env,
     binds,
     portBindings,
@@ -1894,6 +1904,30 @@ const RUNTIME_DEFAULT_NETWORK_MODES = new Set([
 function canonicalNetworkMode(mode: string | undefined): string {
   const m = (mode ?? "").trim();
   return RUNTIME_DEFAULT_NETWORK_MODES.has(m) ? "" : m;
+}
+
+/**
+ * Whether the live container is on the network `requested` names.
+ *
+ * Podman reports `HostConfig.NetworkMode` as `"bridge"` for a container on
+ * a user-defined network too: one created over the compat API with
+ * `NetworkMode: "sk-network"` inspects as `"bridge"`, with `sk-network`
+ * only under `NetworkSettings.Networks` (measured on podman 5.8.6,
+ * aarch64). Comparing the mode alone would report drift and recreate such
+ * a container on every `ensureRunning`. On podman a requested network
+ * therefore also matches when the container is attached to it.
+ */
+function networkModeMatches(
+  requested: string | undefined,
+  live: LiveContainerConfig,
+  runtime: ContainerRuntimeInfo,
+): boolean {
+  const want = canonicalNetworkMode(requested);
+  const have = canonicalNetworkMode(live.networkMode);
+  if (want === have) return true;
+  return (
+    runtime.runtime === "podman" && have === "" && live.networks.includes(want)
+  );
 }
 
 /**
@@ -1993,6 +2027,9 @@ function sortedStringArraysEqual(a: string[], b: string[]): boolean {
  *     told apart from "image's baked CMD" so we skip.
  *   - networkMode: runtime defaults (`bridge`, `slirp4netns`, etc.) are
  *     normalized to `""` and compared as equivalent to requested undefined.
+ *     On podman, which reports `bridge` for user-defined networks as well,
+ *     a requested network also matches when the container is attached to
+ *     it (`networkModeMatches`).
  *   - env: requested keys must match live values. Additionally, any key
  *     present in the prior env but absent from `requested.env` is treated
  *     as drift (the user is unsetting it). Image-baked env keys in neither
@@ -2062,10 +2099,7 @@ export function diffContainerConfig(
     drifted.push("command");
   }
 
-  if (
-    canonicalNetworkMode(requested.networkMode) !==
-    canonicalNetworkMode(live.networkMode)
-  ) {
+  if (!networkModeMatches(requested.networkMode, live, runtime)) {
     drifted.push("networkMode");
   }
 
