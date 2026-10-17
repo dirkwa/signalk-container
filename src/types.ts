@@ -1333,6 +1333,13 @@ export interface ContainerManagerApi {
    * live (e.g. cpuset on some kernels). The container's effective
    * limits become the field-level merge of `limits` on top of the
    * config last passed to `ensureRunning`.
+   *
+   * The fallback stops the container with the runtime's grace period.
+   * If the container is still there after a failed removal, the call
+   * rejects and the container keeps its previous limits; one the stop
+   * already took down is started again first, and if that start fails
+   * too the error names both failures and the container stays stopped.
+   * A container that is gone despite the error is recreated as usual.
    */
   updateResources(
     name: string,
@@ -1351,10 +1358,15 @@ export interface ContainerManagerApi {
   ): Promise<void>;
   /**
    * Force-recreate a managed container: remove the existing one
-   * (running or stopped) if present, then create it fresh from
-   * `config`. Unlike `ensureRunning` — which short-circuits on
-   * "already running with matching config" — `recreate` always
-   * replaces the container, briefly interrupting it.
+   * (running or stopped) if present, stopping it with the runtime's
+   * grace period, then create it fresh from `config`. Unlike
+   * `ensureRunning` — which short-circuits on "already running with
+   * matching config" — `recreate` always replaces the container,
+   * briefly interrupting it.
+   *
+   * If the runtime refuses that stop while the container keeps running,
+   * the call rejects with the stop error and leaves the container
+   * running on its previous config instead of killing it.
    *
    * Use this when the caller knows the desired state differs from
    * live and wants to apply it now without depending on drift

@@ -134,6 +134,12 @@ describe("ensureRunning — config drift triggers automatic recreate", () => {
     // Assert: stop + remove happened (removeContainer issues both), then a
     // fresh createContainer in the missing branch.
     assert.ok((calls.get("stop") ?? []).length > 0, "stop should be called");
+    // The replacement reuses the container's data, so the old one is
+    // stopped with the runtime's grace period, not killed (`t: 0`).
+    assert.deepEqual(
+      (calls.get("stop") ?? []).map((c) => (c as { opts: unknown }).opts),
+      [{}],
+    );
     assert.ok(
       (calls.get("remove") ?? []).length > 0,
       "remove should be called",
@@ -199,6 +205,57 @@ describe("ensureRunning — config drift triggers automatic recreate", () => {
       debugLines.some((l) => l.includes("keeping it and")),
       `expected the keep-and-defer debug line, got: ${debugLines.join(" | ")}`,
     );
+  });
+
+  it("keeps a running container whose graceful stop the runtime refuses", async () => {
+    // The wedge as the graceful stop meets it: stop() fails with EPERM and
+    // the container is still running. Force-removing it would kill it, so
+    // the recreate is deferred exactly as for a refused remove.
+    _clearAnnouncedWedgedForTesting();
+    const calls = new Map<string, unknown[]>();
+    const client = makeMockClient({
+      containers: {
+        "sk-questdb": {
+          inspect: () =>
+            Promise.resolve(
+              buildLiveInspect({
+                image: "questdb/questdb:9.0.0",
+                env: ["FOO=1"],
+              }),
+            ),
+          stop: () =>
+            Promise.reject(
+              new Error(
+                "sending SIGTERM to container: operation not permitted",
+              ),
+            ),
+        },
+      },
+      images: { "questdb/questdb:9.0.0": { Id: "sha256:abc" } },
+      calls,
+    });
+    const wedged: ContainerWedged[] = [];
+    const debugLines: string[] = [];
+    await ensureRunning(
+      rootlessPodman,
+      "questdb",
+      requested,
+      (m) => debugLines.push(m),
+      {
+        onContainerWedged: (e: ContainerWedged) => {
+          wedged.push(e);
+        },
+      },
+      client,
+    );
+    assert.equal((calls.get("remove") ?? []).length, 0, "must not remove");
+    assert.equal((calls.get("createContainer") ?? []).length, 0);
+    assert.ok(
+      debugLines.some((l) => l.includes("keeping it and")),
+      `expected the keep-and-defer debug line, got: ${debugLines.join(" | ")}`,
+    );
+    assert.equal(wedged.length, 1);
+    assert.match(wedged[0].reason, /operation not permitted/);
   });
 
   // A container with a host bind mount, so the data-safety note applies.
