@@ -230,9 +230,10 @@ export function fieldsRequiringRecreateForUnset(
 
 /**
  * How the runtime sizes memory+swap for a container created with
- * `memory` and no `memorySwap`, and keeps it: measured on podman 5.8.6, a
- * create with Memory 64m inspects as MemorySwap 134217728, twice Memory,
- * and a live update of Memory to 96m leaves MemorySwap at 134217728.
+ * `memory` and no `memorySwap`, and keeps it: measured on podman 5.8.6
+ * and docker 28.0.4, a create with Memory 64m inspects as MemorySwap
+ * 134217728, twice Memory, and a live update of Memory to 96m leaves
+ * MemorySwap at 134217728.
  */
 const DEFAULT_MEMORY_SWAP_FACTOR = 2;
 
