@@ -18,7 +18,8 @@ import type {
  * Rootless podman gives a container the oom_score_adj of the service that
  * starts it. Read back as a limit, it made every start of an unchanged
  * container send a live resource update. What the runtime sets is
- * reported; that the plugin sends no update is asserted.
+ * reported; where it sets a value, that the plugin sends no update is
+ * asserted, and the test is skipped where it sets none.
  */
 
 async function hasContainerRuntime(): Promise<ContainerRuntimeInfo | null> {
@@ -132,6 +133,10 @@ describe("a runtime-injected oomScoreAdj", () => {
       .inspect();
     const oom = (info.HostConfig as { OomScoreAdj?: number }).OomScoreAdj;
     t.diagnostic(`created with no oomScoreAdj requested: OomScoreAdj=${oom}`);
+    if (typeof oom !== "number" || oom === 0) {
+      t.skip("the runtime set no OomScoreAdj, so there is nothing to ignore");
+      return;
+    }
 
     // A second start in the same process: the warm-cache provenance path.
     await booted.api.ensureRunning(CONTAINER, CONFIG);
