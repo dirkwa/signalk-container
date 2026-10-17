@@ -1348,9 +1348,10 @@ export interface ContainerManagerApi {
   /**
    * Force-recreate a managed container: remove the existing one
    * (running or stopped) if present, stopping it with the runtime's
-   * grace period, then create it fresh from `config`. Unlike `ensureRunning` — which short-circuits on
-   * "already running with matching config" — `recreate` always
-   * replaces the container, briefly interrupting it.
+   * grace period, then create it fresh from `config`. Unlike
+   * `ensureRunning` — which short-circuits on "already running with
+   * matching config" — `recreate` always replaces the container,
+   * briefly interrupting it.
    *
    * Use this when the caller knows the desired state differs from
    * live and wants to apply it now without depending on drift
