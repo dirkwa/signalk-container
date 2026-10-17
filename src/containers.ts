@@ -1488,6 +1488,28 @@ function bytesToString(bytes: number): string {
   return `${bytes}b`;
 }
 
+/** Decimal size units, as podman and docker print reclaimed space. */
+const DISPLAY_SIZE_UNITS = ["B", "kB", "MB", "GB", "TB"];
+const DISPLAY_SIZE_BASE = 1000;
+
+/**
+ * A byte count for people to read: "64.8 MB", "1.2 GB", "512 B". One
+ * decimal at most, dropped when it is zero. Unlike `bytesToString`, which
+ * must round-trip a memory limit exactly, this rounds.
+ */
+export function formatByteSize(bytes: number): string {
+  let value = bytes;
+  let unit = 0;
+  while (
+    unit < DISPLAY_SIZE_UNITS.length - 1 &&
+    Math.round(value * 10) / 10 >= DISPLAY_SIZE_BASE
+  ) {
+    value /= DISPLAY_SIZE_BASE;
+    unit++;
+  }
+  return `${Number(value.toFixed(1))} ${DISPLAY_SIZE_UNITS[unit]}`;
+}
+
 /**
  * One host-side endpoint for a single container port. Mirror of the
  * `{ HostIp, HostPort }` shape that podman/docker emit under
@@ -4087,7 +4109,7 @@ export async function pruneImages(
   ).length;
   return {
     imagesRemoved: removed,
-    spaceReclaimed: bytesToString(result.value.SpaceReclaimed ?? 0),
+    spaceReclaimed: formatByteSize(result.value.SpaceReclaimed ?? 0),
   };
 }
 
@@ -4244,7 +4266,9 @@ export async function reapSupersededImages(
   client: ContainerClient = getClient(),
 ): Promise<PruneResult> {
   const listed = await safe(() => client.listImages());
-  if (!listed.ok) return { imagesRemoved: 0, spaceReclaimed: "0b" };
+  if (!listed.ok) {
+    return { imagesRemoved: 0, spaceReclaimed: formatByteSize(0) };
+  }
 
   // The `Containers` field on a listImages summary is unreliable across
   // runtimes — Docker returns -1 ("not computed") by default, which would
@@ -4299,7 +4323,7 @@ export async function reapSupersededImages(
     }
   }
 
-  return { imagesRemoved: removed, spaceReclaimed: bytesToString(reclaimed) };
+  return { imagesRemoved: removed, spaceReclaimed: formatByteSize(reclaimed) };
 }
 
 export interface PruneRunLogger {

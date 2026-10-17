@@ -59,7 +59,7 @@ describe("reapSupersededImages", () => {
     );
     assert.deepEqual(removed, ["id-0.6.5"]);
     assert.equal(result.imagesRemoved, 1);
-    assert.equal(result.spaceReclaimed, "2k");
+    assert.equal(result.spaceReclaimed, "2 kB");
   });
 
   it("returns a zero result and removes nothing when listImages fails", async () => {
@@ -72,7 +72,7 @@ describe("reapSupersededImages", () => {
     );
 
     assert.equal(result.imagesRemoved, 0);
-    assert.equal(result.spaceReclaimed, "0b");
+    assert.equal(result.spaceReclaimed, "0 B");
     assert.equal(calls.get("image.remove"), undefined);
   });
 
