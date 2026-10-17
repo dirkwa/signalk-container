@@ -22,6 +22,11 @@ import type {
  * the old one must get SIGTERM and its stop timeout, not SIGKILL. The
  * container here touches a file in its bind mount from a TERM trap: the
  * file exists after the old container is gone only if SIGTERM reached it.
+ *
+ * What a plain `removeContainer` (`stop` with `t: 0`) leaves differs by
+ * runtime, so it is reported, not asserted: podman 5.8.6 kills without
+ * SIGTERM and leaves no file, while docker 28.0.4 sends SIGTERM and kills
+ * right after, and the trap can still win that race.
  */
 
 // detectRuntime() resolves AND caches the dockerode client singleton, so
@@ -114,7 +119,7 @@ describe("a recreate stops the old container with SIGTERM", () => {
     );
   });
 
-  it("a plain removeContainer still kills at once (the marker discriminates)", async (t) => {
+  it("reports whether a plain removeContainer let the trap run", async (t) => {
     if (!runtime) {
       t.skip("no container runtime available");
       return;
@@ -128,9 +133,11 @@ describe("a recreate stops the old container with SIGTERM", () => {
       () => {},
     );
     await removeContainer(runtime, KILL_CONTAINER);
-    assert.ok(
-      !existsSync(join(hostDir, MARK_FILE)),
-      "SIGKILL left a marker, so the marker cannot tell the two stops apart",
+    t.diagnostic(
+      `${runtime.runtime} ${runtime.version}: stop with t: 0 ` +
+        (existsSync(join(hostDir, MARK_FILE))
+          ? "let the TERM trap run"
+          : "killed before the TERM trap ran"),
     );
   });
 });
