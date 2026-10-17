@@ -230,15 +230,21 @@ export function fieldsRequiringRecreateForUnset(
 
 /**
  * How the runtime sizes memory+swap for a container created with
- * `memory` and no `memorySwap`. Measured on podman 5.8.6: a create with
- * Memory 768m and no MemorySwap inspects as MemorySwap 1610612736, twice
- * its Memory of 805306368.
+ * `memory` and no `memorySwap`, and keeps it: measured on podman 5.8.6, a
+ * create with Memory 64m inspects as MemorySwap 134217728, twice Memory,
+ * and a live update of Memory to 96m leaves MemorySwap at 134217728.
  */
 const DEFAULT_MEMORY_SWAP_FACTOR = 2;
 
 /**
- * `live` without a `memorySwap` that is only the runtime's default for
- * its `memory`, when `target` does not ask for a `memorySwap` either.
+ * `live` without a `memorySwap` that is only the runtime's default, when
+ * `target` does not ask for a `memorySwap` either.
+ *
+ * The default is twice the memory the container was created with, which
+ * `createdWith` — its requested-resources provenance label — records; a
+ * live memory update does not move it. Without provenance the live
+ * memory stands in for the created one, which holds until the first live
+ * memory update.
  *
  * Nobody requested that value, but `getLiveResources` reports it like
  * any other limit. Compared as-is, a target without `memorySwap` would
@@ -250,17 +256,30 @@ const DEFAULT_MEMORY_SWAP_FACTOR = 2;
 export function withoutDefaultMemorySwap(
   live: ContainerResourceLimits,
   target: ContainerResourceLimits,
+  createdWith: ContainerResourceLimits | undefined,
 ): ContainerResourceLimits {
   if (
     isSet(target.memorySwap) ||
-    !isSet(live.memory) ||
-    !isSet(live.memorySwap)
+    !isSet(live.memorySwap) ||
+    isSet(createdWith?.memorySwap)
   ) {
     return live;
   }
-  const memoryBytes = parseMemoryToBytes(live.memory as string);
-  const swapBytes = parseMemoryToBytes(live.memorySwap as string);
-  if (swapBytes !== DEFAULT_MEMORY_SWAP_FACTOR * memoryBytes) return live;
+  const createdMemory = isSet(createdWith?.memory)
+    ? createdWith?.memory
+    : live.memory;
+  if (!isSet(createdMemory)) return live;
+  let isDefault: boolean;
+  try {
+    isDefault =
+      parseMemoryToBytes(live.memorySwap as string) ===
+      DEFAULT_MEMORY_SWAP_FACTOR * parseMemoryToBytes(createdMemory as string);
+  } catch {
+    // A provenance label is read back from runtime state and may hold
+    // anything; a value that does not parse proves nothing about the swap.
+    return live;
+  }
+  if (!isDefault) return live;
   const withoutSwap = { ...live };
   delete withoutSwap.memorySwap;
   return withoutSwap;
