@@ -287,6 +287,40 @@ export function withoutDefaultMemorySwap(
 }
 
 /**
+ * `live` without the `RUNTIME_INJECTED_FIELDS` that neither `target` nor
+ * `priorRequested` asks for: values the runtime set on its own. With no
+ * provenance (`priorRequested` undefined) such a value cannot be traced to
+ * a request either, so it is dropped as well — the same values
+ * `fieldsRequiringRecreateForUnset` skips.
+ *
+ * Measured on rootless podman 5.8.6 whose podman.service runs with
+ * `OOMScoreAdjust=200`: every container it starts inspects as
+ * `OomScoreAdj` 200. Compared as-is, such a container never equals its
+ * request, so ensureRunning sent a live update to every managed container
+ * on every server start, and an updateResources with unchanged limits was
+ * not a no-op.
+ */
+export function withoutInjectedResources(
+  live: ContainerResourceLimits,
+  target: ContainerResourceLimits,
+  priorRequested: ContainerResourceLimits | undefined,
+): ContainerResourceLimits {
+  let out = live;
+  for (const field of RUNTIME_INJECTED_FIELDS) {
+    if (
+      !isSet(live[field]) ||
+      isSet(target[field]) ||
+      isSet(priorRequested?.[field])
+    ) {
+      continue;
+    }
+    if (out === live) out = { ...live };
+    delete out[field];
+  }
+  return out;
+}
+
+/**
  * Parse a requested-resources provenance label value back into
  * ContainerResourceLimits. The value crosses a system boundary (it is
  * read back from container runtime state and could have been written
