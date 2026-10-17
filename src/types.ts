@@ -1353,6 +1353,10 @@ export interface ContainerManagerApi {
    * matching config" — `recreate` always replaces the container,
    * briefly interrupting it.
    *
+   * If the runtime refuses that stop while the container keeps running,
+   * the call rejects with the stop error and leaves the container
+   * running on its previous config instead of killing it.
+   *
    * Use this when the caller knows the desired state differs from
    * live and wants to apply it now without depending on drift
    * detection — for example after a consumer plugin bumps the image

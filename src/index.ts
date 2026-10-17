@@ -2108,14 +2108,16 @@ export default (app: App) => {
     ) {
       if (!runtimeInfo) throw new Error("No container runtime available");
       // Always attempt remove. `removeContainer` is idempotent on truly-
-      // missing containers (stop errors are swallowed, `rm -f` returns 0),
-      // and afterContainerRemoved's cache evictions / broker teardown are
+      // missing containers (a failed stop of a container that is gone is
+      // tolerated, and `rm -f` treats not-found as success), and
+      // afterContainerRemoved's cache evictions / broker teardown are
       // no-ops on a name nobody registered. No need to precondition on
       // getState — that would only add a TOCTOU window before the actual
       // remove. If the runtime does report a real failure, re-check state:
       // a benign disappearance (someone else removed it concurrently) is
-      // acceptable; anything else propagates. The stop is graceful because
-      // the new container takes over the old one's data.
+      // acceptable; anything else propagates, including a graceful stop
+      // the runtime refused while the container kept running. The stop is
+      // graceful because the new container takes over the old one's data.
       try {
         await removeContainer(runtimeInfo, name, undefined, {
           graceful: true,
@@ -2597,10 +2599,18 @@ export default (app: App) => {
         // started again so a failed update does not leave it down.
         const state = await getContainerState(runtimeInfo, name);
         if (state !== "missing") {
-          if (state === "stopped") await startContainer(runtimeInfo, name);
+          let restartNote = "";
+          if (state === "stopped") {
+            try {
+              await startContainer(runtimeInfo, name);
+            } catch (startErr) {
+              restartNote = ` Starting it again also failed: ${startErr instanceof Error ? startErr.message : String(startErr)}`;
+            }
+          }
           throw new Error(
             `Failed to apply new resources for ${name}: ${removeMsg}. ` +
-              `The container was not removed and keeps its previous limits.`,
+              `The container was not removed and keeps its previous limits.` +
+              restartNote,
             { cause: err },
           );
         }
