@@ -212,6 +212,11 @@ const S: Record<string, CSSProperties> = {
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
   },
+  uninstalledOwnerNote: {
+    marginTop: 4,
+    fontSize: 11,
+    color: "#92400e",
+  },
   containerActions: {
     display: "flex",
     gap: 6,
@@ -1991,6 +1996,12 @@ export default function PluginConfigurationPanel({
                       ? ` · ${ct.ports.join(", ")}`
                       : ""}
                   </div>
+                  {ct.uninstalledOwner && (
+                    <div style={S.uninstalledOwnerNote}>
+                      Its plugin, {ct.uninstalledOwner}, is no longer installed.
+                      Remove the container if you no longer need it.
+                    </div>
+                  )}
                 </div>
                 <div style={S.containerActions}>
                   {ct.state === "stopped" && (
