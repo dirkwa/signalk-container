@@ -80,6 +80,7 @@ describe("getLiveContainerConfig", () => {
     assert.equal(result.tag, "latest");
     assert.equal(result.command, null);
     assert.equal(result.networkMode, "");
+    assert.deepEqual(result.networks, []);
     assert.equal(result.env.size, 0);
     assert.deepEqual(result.binds, []);
     assert.equal(result.portBindings.size, 0);
@@ -88,6 +89,25 @@ describe("getLiveContainerConfig", () => {
     assert.deepEqual(result.devices, []);
     assert.deepEqual(result.deviceCgroupRules, []);
     assert.deepEqual(result.groupAdd, []);
+  });
+
+  it("lists the attached networks from NetworkSettings.Networks", async () => {
+    // Podman 5.8.6 inspect of a container created with NetworkMode
+    // "sk-network": the mode reads "bridge" and the network's name is
+    // only a key under NetworkSettings.Networks.
+    const result = await getLiveContainerConfig(
+      dummyRuntime,
+      "x",
+      clientWith({
+        ...buildInspect({ image: "x:1", networkMode: "bridge" }),
+        NetworkSettings: {
+          Networks: { "sk-network": { IPAddress: "10.89.0.11" } },
+        },
+      }),
+    );
+    assert.ok(result);
+    assert.equal(result.networkMode, "bridge");
+    assert.deepEqual(result.networks, ["sk-network"]);
   });
 
   it("splits image:tag on the LAST colon (so registry ports survive)", async () => {

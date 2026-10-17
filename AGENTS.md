@@ -176,6 +176,8 @@ When we need to read live container state, call `getContainer(name).inspect()` o
 
 Docker reports `HostConfig.NetworkMode` as `"default"` or `"bridge"` when no `--network` was passed. Podman rootless reports `"slirp4netns"` or `"pasta"`. These are runtime defaults equivalent to "user did not request a specific network." `canonicalNetworkMode()` in `src/containers.ts` normalizes all of them to `""` so comparison against a requested `undefined`/`""` is correct. Any new comparison of `networkMode` between requested and live state must go through this helper.
 
+Podman also reports `"bridge"` for a container on a user-defined network: one created with `NetworkMode: "sk-network"` inspects as `"bridge"`, and `sk-network` appears only as a key of `NetworkSettings.Networks` (measured over the compat API on podman 5.8.6, aarch64). Comparing the mode alone would recreate every such container on each `ensureRunning`, so `networkModeMatches()` also accepts, on podman, a live `"bridge"` container that is attached to the requested network. Docker keeps the plain mode comparison: its report of this case has not been measured.
+
 ### Device access (`devices` / `groupAdd` / `capAdd`)
 
 Three runtime quirks shape this feature; all were verified live on rootless Podman 5.4.2 and are load-bearing:
