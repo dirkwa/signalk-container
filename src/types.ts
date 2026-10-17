@@ -1329,6 +1329,13 @@ export interface ContainerManagerApi {
    * live (e.g. cpuset on some kernels). The container's effective
    * limits become the field-level merge of `limits` on top of the
    * config last passed to `ensureRunning`.
+   *
+   * The fallback stops the container with the runtime's grace period.
+   * If the container is still there after a failed removal, the call
+   * rejects and the container keeps its previous limits; one the stop
+   * already took down is started again first, and if that start fails
+   * too the error names both failures and the container stays stopped.
+   * A container that is gone despite the error is recreated as usual.
    */
   updateResources(
     name: string,
