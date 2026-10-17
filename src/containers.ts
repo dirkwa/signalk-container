@@ -1102,27 +1102,85 @@ export async function getContainerState(
   return coarseStateFrom(info.State ?? {});
 }
 
+// The runtime's zero-value timestamp (Go's zero `time.Time`, RFC3339-
+// encoded) for a `StartedAt`/`FinishedAt` that has never been set.
+const ZERO_TIME_PREFIX = "0001-01-01T00:00:00";
+
+const NS_PER_MS = 1_000_000n;
+const SUB_MS_DIGITS = 6;
+
+/**
+ * A `StartedAt`/`FinishedAt` as epoch nanoseconds, or null when it was
+ * never set or does not parse. Compared as instants, never as text: Docker
+ * trims trailing zeros from the fraction (`…05.9Z` sorts after `…05.95Z`)
+ * and Podman writes the host's local offset, which changes with daylight
+ * saving or a timezone change between a stop and the next start.
+ * `Date.parse` keeps milliseconds only, and a restart can stop and start
+ * within one, so the fraction's remaining digits are added back.
+ */
+function timestampNs(value: unknown): bigint | null {
+  if (
+    typeof value !== "string" ||
+    value === "" ||
+    value.startsWith(ZERO_TIME_PREFIX)
+  ) {
+    return null;
+  }
+  const ms = Date.parse(value);
+  if (!Number.isFinite(ms)) return null;
+  const fraction = /\.(\d+)/.exec(value)?.[1] ?? "";
+  const subMs = fraction.slice(3, 3 + SUB_MS_DIGITS).padEnd(SUB_MS_DIGITS, "0");
+  return BigInt(ms) * NS_PER_MS + BigInt(subMs);
+}
+
 /**
  * The defensive OR shared by `getContainerState` and
  * `getContainerStateDetail`, so a caller asking for detail can never
  * be told something different about running than a caller asking for
  * the coarse state alone.
  *
- * Running if ANY source says so. We'd rather report "running" when the
- * container is actually stopped (worst case: ensureRunning's "already
- * running" fast path skips a start call, which would then fail the
- * subsequent health check and recover) than report "stopped" when it's
- * running (worst case: update service skips legit checks, user sees
- * flap).
+ * Running if ANY source says so — Status, Running, or a positive Pid.
+ * We'd rather report "running" when the container is actually stopped
+ * (worst case: ensureRunning's "already running" fast path skips a
+ * start call) than report "stopped" when it's running (worst case:
+ * update service skips legit checks, user sees flap). But that OR is
+ * itself untrustworthy once the runtime has recorded a completed stop
+ * at or after the last start: a podman restart-policy re-create that
+ * fails partway through (conmon's OCI create racing a systemd/D-Bus
+ * reload, "Failed to create container: exit status 1") can leave
+ * Running/Pid holding stale values from the aborted attempt
+ * indefinitely, with nothing to ever correct them (no consumer plugin
+ * forces a restart off an unhealthy verdict). FinishedAt is written
+ * synchronously by the runtime's die-handling when the container
+ * actually exits, a step that already completed before any restart
+ * attempt runs, so a failed re-create never gets to roll it back.
+ *
+ * The timestamps decide only when Status does not say running. Status
+ * is the signal that failure leaves correct, and a host clock stepped
+ * back between a stop and the next start (a Pi without a real-time
+ * clock booting on a saved time after a power cut) records a StartedAt
+ * before the last FinishedAt on a container that is running.
  */
 function coarseStateFrom(state: {
   Status?: unknown;
   Running?: unknown;
   Pid?: unknown;
+  StartedAt?: unknown;
+  FinishedAt?: unknown;
 }): ContainerState {
   const status = String(state.Status ?? "")
     .toLowerCase()
     .trim();
+  const startedAt = timestampNs(state.StartedAt);
+  const finishedAt = timestampNs(state.FinishedAt);
+  if (
+    status !== "running" &&
+    finishedAt !== null &&
+    (startedAt === null || finishedAt >= startedAt)
+  ) {
+    return "stopped";
+  }
+
   const runningFlag = state.Running === true;
   const pid = Number(state.Pid ?? 0);
   const hasLivePid = Number.isFinite(pid) && pid > 0;
