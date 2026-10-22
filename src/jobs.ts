@@ -38,8 +38,8 @@ const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
 // How long a job container's force-remove may take before runJob stops
 // waiting for it, so a daemon that stops answering cannot keep a job pending.
 const REMOVE_TIMEOUT_MS = 10_000;
-// How long a job that exited before its deadline may still wait for its log
-// stream to attach once the deadline has passed.
+// How long a job that has exited may still wait for its log stream: to attach
+// once the deadline has passed, and to end once the container is gone.
 const LOG_ATTACH_GRACE_MS = 10_000;
 
 /**
@@ -298,8 +298,19 @@ export async function runJob(
           ?.StatusCode ?? 0)
       : 1;
     // Let the log stream finish flushing before we report — the follow
-    // stream's `end` can lag the container's exit by a tick.
-    if (!timedOut) await drained;
+    // stream's `end` can lag the container's exit by a tick. Bounded, so a
+    // stream that never ends cannot hold back the result and the cleanup;
+    // removing the container below closes it.
+    if (!timedOut) {
+      let drainTimer: NodeJS.Timeout | undefined;
+      await Promise.race([
+        drained,
+        new Promise<void>((resolve) => {
+          drainTimer = setTimeout(resolve, LOG_ATTACH_GRACE_MS);
+        }),
+      ]);
+      clearTimeout(drainTimer);
+    }
 
     result.log = log;
     result.completedAt = new Date().toISOString();

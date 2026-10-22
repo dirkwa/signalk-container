@@ -180,6 +180,43 @@ describe("runJob timeout", () => {
     }
   });
 
+  it("reports a job whose log stream never ends once the drain bound passes", async () => {
+    const client = makeMockClient({
+      images: { "alpine:3.19": {} },
+      defaultContainer: {
+        logs: () => {
+          const logs = new PassThrough();
+          logs.write(Buffer.from("kept\n"));
+          return Promise.resolve(logs);
+        },
+        wait: { StatusCode: 0 },
+      },
+    });
+
+    mock.timers.enable({ apis: ["setTimeout", "Date"] });
+    try {
+      const promise = runJob(
+        docker,
+        { image: "alpine:3.19", command: ["true"] },
+        client,
+      );
+      let settled = false;
+      void promise.then(() => {
+        settled = true;
+      });
+      for (let i = 0; i < 200 && !settled; i++) {
+        await new Promise((r) => setImmediate(r));
+        mock.timers.tick(100);
+      }
+
+      const result = await promise;
+      assert.equal(result.status, "completed");
+      assert.deepEqual(result.log, ["kept"]);
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
   it("treats a container that is already gone at the deadline as removed", async () => {
     const client = makeMockClient({
       images: { "alpine:3.19": {} },
@@ -252,10 +289,17 @@ describe("runJob timeout", () => {
 
   it("keeps the exit outcome of a job aborted after it exited", async () => {
     const logs = new PassThrough();
+    let logsRequested: () => void = () => {};
+    const requested = new Promise<void>((r) => {
+      logsRequested = r;
+    });
     const client = makeMockClient({
       images: { "alpine:3.19": {} },
       defaultContainer: {
-        logs: () => Promise.resolve(logs),
+        logs: () => {
+          logsRequested();
+          return Promise.resolve(logs);
+        },
         wait: { StatusCode: 0 },
       },
     });
@@ -266,7 +310,10 @@ describe("runJob timeout", () => {
       { image: "alpine:3.19", command: ["true"], signal: controller.signal },
       client,
     );
-    await new Promise((r) => setTimeout(r, 20));
+    // logs() is requested after the abort listener is in place and the
+    // resolved wait() has been observed.
+    await requested;
+    await new Promise((r) => setImmediate(r));
     controller.abort();
     logs.end();
 
