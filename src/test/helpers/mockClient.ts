@@ -244,8 +244,8 @@ export function makeMockClient(spec: MockClientSpec = {}): ContainerClient {
         source: NodeJS.ReadableStream,
         stdout: NodeJS.WritableStream,
       ) => {
+        // Like docker-modem, forward frames but never end the sinks.
         source.on("data", (c: Buffer) => stdout.write(c));
-        source.on("end", () => stdout.end());
       },
     },
   };

@@ -444,9 +444,9 @@ export function startDeadline(
  * stderr callbacks. dockerode multiplexes stdout/stderr with 8-byte frame
  * headers, so we split via `modem.demuxStream` and line-buffer each side.
  *
- * Returns a promise that resolves when the source stream ends, so `runJob`
- * can await full log drain before returning (the stream can outlive
- * `container.wait()` by a tick).
+ * `drained` resolves once the source stream has ended and every buffered
+ * line has been flushed, so `runJob` can await full log drain before
+ * returning (the stream can outlive `container.wait()` by a tick).
  */
 function wireJobLogStream(
   client: ContainerClient,
@@ -494,12 +494,20 @@ function wireJobLogStream(
   };
   lineBuffer(stdout, onStdoutLine);
   lineBuffer(stderr, onStderrLine);
+  const drained = Promise.all([
+    new Promise<void>((resolve) => stdout.on("end", resolve)),
+    new Promise<void>((resolve) => stderr.on("end", resolve)),
+  ]).then(() => undefined);
   client.modem.demuxStream(stream, stdout, stderr);
-  const drained = new Promise<void>((resolve) => {
-    stream.on("end", resolve);
-    stream.on("close", resolve);
-    stream.on("error", () => resolve());
-  });
+  // demuxStream writes frames into the sinks but never ends them, so the
+  // trailing unterminated line would never be flushed without this.
+  const endSinks = () => {
+    if (!stdout.writableEnded) stdout.end();
+    if (!stderr.writableEnded) stderr.end();
+  };
+  stream.on("end", endSinks);
+  stream.on("close", endSinks);
+  stream.on("error", endSinks);
   return {
     drained,
     stop: () => {

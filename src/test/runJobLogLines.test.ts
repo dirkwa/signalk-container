@@ -68,6 +68,10 @@ describe("runJob log line length", () => {
     assert.deepEqual(result.log, ["café"]);
   });
 
+  it("keeps a last line that has no newline", async () => {
+    assert.deepEqual(await linesFrom(["first\nlast"]), ["first", "last"]);
+  });
+
   it("passes output without newlines on in bounded pieces", async () => {
     const chunk = "x".repeat(10 * 1024);
     const lines = await linesFrom(Array.from({ length: 10 }, () => chunk));
