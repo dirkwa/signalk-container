@@ -224,6 +224,77 @@ describe("runJob timeout", () => {
     }
   });
 
+  it("closes a log stream that answers only after the deadline", async () => {
+    const late = new PassThrough();
+    let answer: (s: PassThrough) => void = () => {};
+    const client = makeMockClient({
+      images: { "alpine:3.19": {} },
+      defaultContainer: {
+        logs: () =>
+          new Promise((resolve) => {
+            answer = resolve;
+          }),
+        wait: () => new Promise<never>(() => {}),
+      },
+    });
+
+    const result = await runJob(
+      docker,
+      { image: "alpine:3.19", command: ["sleep", "60"], timeout: 0.01 },
+      client,
+    );
+    assert.equal(result.status, "failed");
+
+    answer(late);
+    await new Promise((r) => setImmediate(r));
+    assert.equal(late.destroyed, true);
+  });
+
+  it("still removes the container when a log callback throws on the last line", async () => {
+    const calls = new Map<string, unknown[]>();
+    const client = makeMockClient({
+      images: { "alpine:3.19": {} },
+      calls,
+      defaultContainer: {
+        logs: () => {
+          const logs = new PassThrough();
+          logs.write(Buffer.from("unterminated"));
+          return Promise.resolve(logs);
+        },
+        wait: { StatusCode: 0 },
+      },
+    });
+
+    mock.timers.enable({ apis: ["setTimeout", "Date"] });
+    try {
+      const promise = runJob(
+        docker,
+        {
+          image: "alpine:3.19",
+          command: ["true"],
+          onProgress: () => {
+            throw new Error("consumer bug");
+          },
+        },
+        client,
+      );
+      let settled = false;
+      void promise.then(() => {
+        settled = true;
+      });
+      for (let i = 0; i < 200 && !settled; i++) {
+        await new Promise((r) => setImmediate(r));
+        mock.timers.tick(100);
+      }
+
+      const result = await promise;
+      assert.equal(result.status, "completed");
+      assert.ok((calls.get("remove") ?? []).length >= 1);
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
   it("treats a container that is already gone at the deadline as removed", async () => {
     const client = makeMockClient({
       images: { "alpine:3.19": {} },

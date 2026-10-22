@@ -272,11 +272,20 @@ export async function runJob(
     // container's buffered output from the beginning, so nothing is missed.
     // Raced against the deadline so a log request that never answers cannot
     // keep a timed-out job pending.
+    const logsRequest = container.logs({
+      follow: true,
+      stdout: true,
+      stderr: true,
+    });
     const stream = await Promise.race([
-      container.logs({ follow: true, stdout: true, stderr: true }),
+      logsRequest,
       deadlineReached.then(() => null),
     ]);
-    if (stream === null && timedOut) throw new Error(timedOutError());
+    if (stream === null) {
+      // Release a stream that answers after we stopped waiting for it.
+      logsRequest.then(destroyStream, () => {});
+      if (timedOut) throw new Error(timedOutError());
+    }
     let drained = Promise.resolve();
     if (stream !== null) {
       const wired = wireJobLogStream(
@@ -486,14 +495,25 @@ function wireJobLogStream(
     drained,
     stop: () => {
       if (stopped) return;
-      for (const flush of flushes) flush();
+      for (const flush of flushes) {
+        try {
+          flush();
+        } catch {
+          // A throwing consumer callback must not skip the cleanup below or
+          // the container removal after it.
+        }
+      }
       stopped = true;
       // Release a stream the daemon left open, so it holds no connection.
-      (stream as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.();
+      destroyStream(stream);
       stdout.destroy();
       stderr.destroy();
     },
   };
+}
+
+function destroyStream(stream: NodeJS.ReadableStream): void {
+  (stream as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.();
 }
 
 /**
