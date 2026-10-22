@@ -61,7 +61,7 @@ describe("runJob timeout", () => {
       images: { "alpine:3.19": {} },
       calls,
       defaultContainer: {
-        logs: () => Promise.resolve(streamFrom("")),
+        logs: () => Promise.resolve(streamFrom("early line\n")),
         wait: () => new Promise<never>(() => {}),
         remove: () => Promise.reject(new Error("daemon unreachable")),
       },
@@ -78,6 +78,7 @@ describe("runJob timeout", () => {
       result.error ?? "",
       /^Job timed out after 0\.01s, and its container could not be removed: .*daemon unreachable/,
     );
+    assert.deepEqual(result.log, ["early line"]);
   });
 
   it("resolves as timed out when the log request never answers", async () => {

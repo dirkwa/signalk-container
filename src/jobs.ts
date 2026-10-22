@@ -278,7 +278,9 @@ export async function runJob(
     // stream drains.
     cancelDeadline();
     const exitCode = waitResult.ok
-      ? ((waitResult.value as { StatusCode?: number }).StatusCode ?? 0)
+      ? // undefined when the deadline won the race
+        ((waitResult.value as { StatusCode?: number } | undefined)
+          ?.StatusCode ?? 0)
       : 1;
     // Let the log stream finish flushing before we report — the follow
     // stream's `end` can lag the container's exit by a tick.
