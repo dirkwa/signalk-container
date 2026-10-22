@@ -250,6 +250,31 @@ describe("runJob timeout", () => {
     assert.equal(result.status, "cancelled");
   });
 
+  it("keeps the exit outcome of a job aborted after it exited", async () => {
+    const logs = new PassThrough();
+    const client = makeMockClient({
+      images: { "alpine:3.19": {} },
+      defaultContainer: {
+        logs: () => Promise.resolve(logs),
+        wait: { StatusCode: 0 },
+      },
+    });
+    const controller = new AbortController();
+
+    const promise = runJob(
+      docker,
+      { image: "alpine:3.19", command: ["true"], signal: controller.signal },
+      client,
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    controller.abort();
+    logs.end();
+
+    const result = await promise;
+    assert.equal(result.status, "completed");
+    assert.equal(result.exitCode, 0);
+  });
+
   for (const timeout of [0, -5, Number.NaN]) {
     it(`sets no deadline for timeout ${timeout}`, async () => {
       const calls = new Map<string, unknown[]>();

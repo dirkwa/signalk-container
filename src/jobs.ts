@@ -85,6 +85,7 @@ export async function runJob(
   // stopped instead of the exit status the force-remove produces.
   let timedOut = false;
   let cancelDeadline = () => {};
+  let graceTimer: NodeJS.Timeout | undefined;
   // Settles when the deadline fires, so a job whose force-remove fails (and
   // whose wait() therefore never returns) still resolves.
   let deadlineReached = new Promise<void>(() => {});
@@ -238,7 +239,7 @@ export async function runJob(
           if (hasExited) {
             // The job finished in time; give a log request still attaching a
             // last bounded chance rather than reporting a timeout.
-            setTimeout(resolve, LOG_ATTACH_GRACE_MS).unref();
+            graceTimer = setTimeout(resolve, LOG_ATTACH_GRACE_MS);
             return;
           }
           timedOut = true;
@@ -255,6 +256,8 @@ export async function runJob(
     // The `aborted` flag distinguishes that from a genuine wait() failure.
     if (config.signal) {
       onAbort = () => {
+        // A job that already exited keeps its own outcome.
+        if (hasExited) return;
         aborted = true;
         void safe(() => client.getContainer(jobName).remove({ force: true }));
       };
@@ -338,6 +341,7 @@ export async function runJob(
     }
   } finally {
     cancelDeadline();
+    clearTimeout(graceTimer);
     if (config.signal && onAbort) {
       config.signal.removeEventListener("abort", onAbort);
     }
