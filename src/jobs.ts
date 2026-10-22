@@ -32,6 +32,10 @@ import { describeError, messageWithRaw } from "./errors.js";
 export { userMappingFlags, _setCurrentHostIdsForTesting } from "./runtime.js";
 
 const JOB_LOG_MAX_LINES = 200;
+// A job that writes without newlines would otherwise grow the pending line
+// inside the Signal K process without bound; longer runs are passed on in
+// pieces of this many characters.
+const JOB_LOG_MAX_LINE_LENGTH = 16 * 1024;
 // setTimeout fires at once for any delay above 2^31-1 ms (~24.8 days), so a
 // longer run-phase timeout is re-armed in steps of at most this size.
 const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
@@ -472,13 +476,18 @@ function wireJobLogStream(
       buf = "";
     };
     flushes.push(flush);
-    sink.on("data", (chunk: Buffer) => {
-      buf += chunk.toString("utf8");
+    // Decode across chunks, so a character split between two log frames
+    // survives intact.
+    sink.setEncoding("utf8");
+    sink.on("data", (chunk: string) => {
+      buf += chunk;
       const parts = buf.split(/\r\n|\r|\n/);
       buf = parts.pop() ?? "";
-      for (const part of parts) {
+      const pending = splitLongLine(buf);
+      buf = pending.pop() ?? "";
+      for (const part of [...parts, ...pending]) {
         if (part.length === 0) continue;
-        emit(part, onLine);
+        for (const piece of splitLongLine(part)) emit(piece, onLine);
       }
     });
     sink.on("end", flush);
@@ -514,6 +523,40 @@ function wireJobLogStream(
 
 function destroyStream(stream: NodeJS.ReadableStream): void {
   (stream as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.();
+}
+
+/**
+ * Cut `line` into pieces of at most `max` UTF-16 code units, never between
+ * the two halves of a surrogate pair. The last piece is whatever remains and
+ * may be shorter (or empty).
+ *
+ * Exposed for unit tests.
+ */
+export function splitLongLine(
+  line: string,
+  max: number = JOB_LOG_MAX_LINE_LENGTH,
+): string[] {
+  if (!Number.isInteger(max) || max < 1) {
+    throw new RangeError(`max must be a positive integer, got ${max}`);
+  }
+  const pieces: string[] = [];
+  let start = 0;
+  while (line.length - start > max) {
+    let end = start + max;
+    // Step back only when the piece keeps at least one code unit, so a
+    // limit too small for the pair still advances.
+    if (end - 1 > start && isHighSurrogate(line.charCodeAt(end - 1))) {
+      end -= 1;
+    }
+    pieces.push(line.slice(start, end));
+    start = end;
+  }
+  pieces.push(line.slice(start));
+  return pieces;
+}
+
+function isHighSurrogate(code: number): boolean {
+  return code >= 0xd800 && code <= 0xdbff;
 }
 
 /**
