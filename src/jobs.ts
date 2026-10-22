@@ -38,6 +38,9 @@ const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
 // How long a job container's force-remove may take before runJob stops
 // waiting for it, so a daemon that stops answering cannot keep a job pending.
 const REMOVE_TIMEOUT_MS = 10_000;
+// How long a job that exited before its deadline may still wait for its log
+// stream to attach once the deadline has passed.
+const LOG_ATTACH_GRACE_MS = 10_000;
 
 /**
  * Run a one-shot helper container to completion, streaming progress.
@@ -232,7 +235,12 @@ export async function runJob(
       const seconds = config.timeout;
       deadlineReached = new Promise<void>((resolve) => {
         cancelDeadline = startDeadline(seconds, () => {
-          if (hasExited) return;
+          if (hasExited) {
+            // The job finished in time; give a log request still attaching a
+            // last bounded chance rather than reporting a timeout.
+            setTimeout(resolve, LOG_ATTACH_GRACE_MS).unref();
+            return;
+          }
           timedOut = true;
           void removeJobContainer(client, jobName).then((failure) => {
             timeoutRemoveError = failure;
@@ -262,15 +270,18 @@ export async function runJob(
       container.logs({ follow: true, stdout: true, stderr: true }),
       deadlineReached.then(() => null),
     ]);
-    if (stream === null) throw new Error(timedOutError());
-    const drained = wireJobLogStream(
-      client,
-      stream,
-      pushLog,
-      config.onProgress,
-      config.onStdoutLine,
-      config.onStderrLine,
-    );
+    if (stream === null && timedOut) throw new Error(timedOutError());
+    const drained =
+      stream === null
+        ? Promise.resolve()
+        : wireJobLogStream(
+            client,
+            stream,
+            pushLog,
+            config.onProgress,
+            config.onStdoutLine,
+            config.onStderrLine,
+          );
 
     const waitResult = await safe(() =>
       Promise.race([exited, deadlineReached]),
@@ -360,7 +371,9 @@ export async function removeJobContainer(
   });
   const removed = safe(() =>
     client.getContainer(jobName).remove({ force: true }),
-  ).then((r) => (r.ok ? undefined : r.error.raw));
+  ).then((r) =>
+    r.ok || r.error.kind === "not-found" ? undefined : r.error.raw,
+  );
   try {
     return await Promise.race([removed, gaveUp]);
   } finally {

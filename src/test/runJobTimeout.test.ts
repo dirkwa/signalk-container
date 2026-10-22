@@ -146,6 +146,62 @@ describe("runJob timeout", () => {
     assert.equal(result.exitCode, 0);
   });
 
+  it("reports the exit of a job whose log request never answers", async () => {
+    const client = makeMockClient({
+      images: { "alpine:3.19": {} },
+      defaultContainer: {
+        logs: () => new Promise<never>(() => {}),
+        wait: { StatusCode: 3 },
+      },
+    });
+
+    mock.timers.enable({ apis: ["setTimeout", "Date"] });
+    try {
+      const promise = runJob(
+        docker,
+        { image: "alpine:3.19", command: ["false"], timeout: 1 },
+        client,
+      );
+      let settled = false;
+      void promise.then(() => {
+        settled = true;
+      });
+      for (let i = 0; i < 200 && !settled; i++) {
+        await new Promise((r) => setImmediate(r));
+        mock.timers.tick(100);
+      }
+
+      const result = await promise;
+      assert.equal(result.status, "failed");
+      assert.equal(result.exitCode, 3);
+      assert.equal(result.error, "Container exited with code 3");
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  it("treats a container that is already gone at the deadline as removed", async () => {
+    const client = makeMockClient({
+      images: { "alpine:3.19": {} },
+      defaultContainer: {
+        logs: () => Promise.resolve(streamFrom("")),
+        wait: () => new Promise<never>(() => {}),
+        remove: () =>
+          Promise.reject(
+            Object.assign(new Error("no such container"), { statusCode: 404 }),
+          ),
+      },
+    });
+
+    const result = await runJob(
+      docker,
+      { image: "alpine:3.19", command: ["sleep", "60"], timeout: 0.01 },
+      client,
+    );
+    assert.equal(result.status, "failed");
+    assert.equal(result.error, "Job timed out after 0.01s");
+  });
+
   it("leaves a job that finishes in time alone", async () => {
     const calls = new Map<string, unknown[]>();
     const client = makeMockClient({
@@ -262,6 +318,21 @@ describe("removeJobContainer", () => {
     assert.equal(
       await removeJobContainer(client, "sk-job-test", 10),
       "no answer within 0.01s",
+    );
+  });
+
+  it("resolves undefined when the container is already gone", async () => {
+    const client = makeMockClient({
+      defaultContainer: {
+        remove: () =>
+          Promise.reject(
+            Object.assign(new Error("no such container"), { statusCode: 404 }),
+          ),
+      },
+    });
+    assert.equal(
+      await removeJobContainer(client, "sk-job-test", 10),
+      undefined,
     );
   });
 
