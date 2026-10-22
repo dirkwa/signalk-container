@@ -32,6 +32,15 @@ import { describeError, messageWithRaw } from "./errors.js";
 export { userMappingFlags, _setCurrentHostIdsForTesting } from "./runtime.js";
 
 const JOB_LOG_MAX_LINES = 200;
+// setTimeout fires at once for any delay above 2^31-1 ms (~24.8 days), so a
+// longer run-phase timeout is re-armed in steps of at most this size.
+const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
+// How long a job container's force-remove may take before runJob stops
+// waiting for it, so a daemon that stops answering cannot keep a job pending.
+const REMOVE_TIMEOUT_MS = 10_000;
+// How long a job that has exited may still wait for its log stream: to attach
+// once the deadline has passed, and to end once the container is gone.
+const LOG_ATTACH_GRACE_MS = 10_000;
 
 /**
  * Run a one-shot helper container to completion, streaming progress.
@@ -72,6 +81,22 @@ export async function runJob(
   // rather than the synthetic exit-1 "failed" that force-removing produces.
   let aborted = false;
   let onAbort: (() => void) | undefined;
+  // Same idea for the run-phase deadline: a timed-out job reports why it
+  // stopped instead of the exit status the force-remove produces.
+  let timedOut = false;
+  let cancelDeadline = () => {};
+  let graceTimer: NodeJS.Timeout | undefined;
+  // Once runJob has reported, no further log line reaches the result or the
+  // caller's callbacks.
+  let stopLogs = () => {};
+  // Settles when the deadline fires, so a job whose force-remove fails (and
+  // whose wait() therefore never returns) still resolves.
+  let deadlineReached = new Promise<void>(() => {});
+  let timeoutRemoveError: string | undefined;
+  const timedOutError = () =>
+    timeoutRemoveError === undefined
+      ? `Job timed out after ${config.timeout}s`
+      : `Job timed out after ${config.timeout}s, and its container could not be removed: ${timeoutRemoveError}`;
 
   try {
     const exists = await safeInspect(() => client.getImage(image).inspect());
@@ -195,12 +220,47 @@ export async function runJob(
 
     const container = await client.createContainer(createOpts);
     await container.start();
+    // Await the exit from here on, not only once the log stream is attached,
+    // so a deadline that fires while the logs attach can tell a job that has
+    // already exited from one that overran.
+    const exited = container.wait();
+    let hasExited = false;
+    exited.then(
+      () => {
+        hasExited = true;
+      },
+      () => {},
+    );
+    if (
+      config.timeout !== undefined &&
+      Number.isFinite(config.timeout) &&
+      config.timeout > 0
+    ) {
+      const seconds = config.timeout;
+      deadlineReached = new Promise<void>((resolve) => {
+        cancelDeadline = startDeadline(seconds, () => {
+          if (hasExited) {
+            // The job finished in time; give a log request still attaching a
+            // last bounded chance rather than reporting a timeout.
+            graceTimer = setTimeout(resolve, LOG_ATTACH_GRACE_MS);
+            return;
+          }
+          timedOut = true;
+          void removeJobContainer(client, jobName).then((failure) => {
+            timeoutRemoveError = failure;
+            resolve();
+          });
+        });
+      });
+    }
     // Cancellation: force-removing the running container makes the pending
     // wait() below reject — the same path a daemon-side disappearance takes —
     // so an aborted job unwinds through the existing wait-failure handling.
     // The `aborted` flag distinguishes that from a genuine wait() failure.
     if (config.signal) {
       onAbort = () => {
+        // A job that already exited keeps its own outcome.
+        if (hasExited) return;
         aborted = true;
         void safe(() => client.getContainer(jobName).remove({ force: true }));
       };
@@ -210,27 +270,61 @@ export async function runJob(
     // not-yet-started container comes back empty/immediately-closed on podman
     // (verified live), losing all output; opening it post-start replays the
     // container's buffered output from the beginning, so nothing is missed.
-    const stream = await container.logs({
+    // Raced against the deadline so a log request that never answers cannot
+    // keep a timed-out job pending.
+    const logsRequest = container.logs({
       follow: true,
       stdout: true,
       stderr: true,
     });
-    const drained = wireJobLogStream(
-      client,
-      stream,
-      pushLog,
-      config.onProgress,
-      config.onStdoutLine,
-      config.onStderrLine,
-    );
+    const stream = await Promise.race([
+      logsRequest,
+      deadlineReached.then(() => null),
+    ]);
+    if (stream === null) {
+      // Release a stream that answers after we stopped waiting for it.
+      logsRequest.then(destroyStream, () => {});
+      if (timedOut) throw new Error(timedOutError());
+    }
+    let drained = Promise.resolve();
+    if (stream !== null) {
+      const wired = wireJobLogStream(
+        client,
+        stream,
+        pushLog,
+        config.onProgress,
+        config.onStdoutLine,
+        config.onStderrLine,
+      );
+      drained = wired.drained;
+      stopLogs = wired.stop;
+    }
 
-    const waitResult = await safe(() => container.wait());
+    const waitResult = await safe(() =>
+      Promise.race([exited, deadlineReached]),
+    );
+    // A job that exited in time must not be marked timed out while its log
+    // stream drains.
+    cancelDeadline();
     const exitCode = waitResult.ok
-      ? ((waitResult.value as { StatusCode?: number }).StatusCode ?? 0)
+      ? // undefined when the deadline won the race
+        ((waitResult.value as { StatusCode?: number } | undefined)
+          ?.StatusCode ?? 0)
       : 1;
     // Let the log stream finish flushing before we report — the follow
-    // stream's `end` can lag the container's exit by a tick.
-    await drained;
+    // stream's `end` can lag the container's exit by a tick. Bounded, so a
+    // stream that never ends cannot hold back the result and the cleanup;
+    // removing the container below closes it.
+    if (!timedOut) {
+      let drainTimer: NodeJS.Timeout | undefined;
+      await Promise.race([
+        drained,
+        new Promise<void>((resolve) => {
+          drainTimer = setTimeout(resolve, LOG_ATTACH_GRACE_MS);
+        }),
+      ]);
+      clearTimeout(drainTimer);
+    }
 
     result.log = log;
     result.completedAt = new Date().toISOString();
@@ -240,6 +334,9 @@ export async function runJob(
       // synthetic exit code is meaningless here, so don't surface it.
       result.status = "cancelled";
       result.error = "Job cancelled";
+    } else if (timedOut) {
+      result.status = "failed";
+      result.error = timedOutError();
     } else {
       result.exitCode = exitCode;
       result.status = exitCode === 0 ? "completed" : "failed";
@@ -257,6 +354,9 @@ export async function runJob(
     if (aborted) {
       result.status = "cancelled";
       result.error = "Job cancelled";
+    } else if (timedOut) {
+      result.status = "failed";
+      result.error = timedOutError();
     } else {
       result.status = "failed";
       // `safe()`/`safeInspect()` flatten the error to a generic userMessage and
@@ -265,6 +365,9 @@ export async function runJob(
       result.error = describeError(err);
     }
   } finally {
+    cancelDeadline();
+    clearTimeout(graceTimer);
+    stopLogs();
     if (config.signal && onAbort) {
       config.signal.removeEventListener("abort", onAbort);
     }
@@ -272,10 +375,64 @@ export async function runJob(
     // the happy path and a create-but-never-started failure; `force: true`
     // stops it first if still running, and a 404 (already gone) is benign.
     // `safe()` never throws — it returns a result — so no catch is needed.
-    await safe(() => client.getContainer(jobName).remove({ force: true }));
+    await removeJobContainer(client, jobName);
   }
 
   return result;
+}
+
+/**
+ * Force-remove a job container, giving up after `timeoutMs`. Resolves with
+ * the reason it failed, or `undefined` once it is gone (a 404 counts).
+ *
+ * Exposed for unit tests.
+ */
+export async function removeJobContainer(
+  client: ContainerClient,
+  jobName: string,
+  timeoutMs: number = REMOVE_TIMEOUT_MS,
+): Promise<string | undefined> {
+  let timer: NodeJS.Timeout | undefined;
+  const gaveUp = new Promise<string>((resolve) => {
+    timer = setTimeout(
+      () => resolve(`no answer within ${timeoutMs / 1000}s`),
+      timeoutMs,
+    );
+  });
+  const removed = safe(() =>
+    client.getContainer(jobName).remove({ force: true }),
+  ).then((r) =>
+    r.ok || r.error.kind === "not-found" ? undefined : r.error.raw,
+  );
+  try {
+    return await Promise.race([removed, gaveUp]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Call `onElapsed` once `seconds` have passed, re-arming the timer across
+ * setTimeout's maximum delay. Returns a function that cancels it.
+ *
+ * Exposed for unit tests.
+ */
+export function startDeadline(
+  seconds: number,
+  onElapsed: () => void,
+): () => void {
+  const at = Date.now() + seconds * 1000;
+  let timer: NodeJS.Timeout | undefined;
+  const arm = () => {
+    const remaining = at - Date.now();
+    if (remaining <= 0) {
+      onElapsed();
+      return;
+    }
+    timer = setTimeout(arm, Math.min(remaining, MAX_TIMER_DELAY_MS));
+  };
+  arm();
+  return () => clearTimeout(timer);
 }
 
 /**
@@ -294,41 +451,69 @@ function wireJobLogStream(
   onProgress?: (line: string) => void,
   onStdoutLine?: (line: string) => void,
   onStderrLine?: (line: string) => void,
-): Promise<void> {
+): { drained: Promise<void>; stop: () => void } {
   const stdout = new PassThrough();
   const stderr = new PassThrough();
+  let stopped = false;
+  const emit = (line: string, onLine: ((line: string) => void) | undefined) => {
+    if (stopped) return;
+    pushLog(line);
+    onProgress?.(line);
+    onLine?.(line);
+  };
+  const flushes: Array<() => void> = [];
   const lineBuffer = (
     sink: PassThrough,
     onLine: ((line: string) => void) | undefined,
   ) => {
     let buf = "";
+    const flush = () => {
+      if (buf.length > 0) emit(buf, onLine);
+      buf = "";
+    };
+    flushes.push(flush);
     sink.on("data", (chunk: Buffer) => {
       buf += chunk.toString("utf8");
       const parts = buf.split(/\r\n|\r|\n/);
       buf = parts.pop() ?? "";
       for (const part of parts) {
         if (part.length === 0) continue;
-        pushLog(part);
-        onProgress?.(part);
-        onLine?.(part);
+        emit(part, onLine);
       }
     });
-    sink.on("end", () => {
-      if (buf.length > 0) {
-        pushLog(buf);
-        onProgress?.(buf);
-        onLine?.(buf);
-      }
-    });
+    sink.on("end", flush);
   };
   lineBuffer(stdout, onStdoutLine);
   lineBuffer(stderr, onStderrLine);
   client.modem.demuxStream(stream, stdout, stderr);
-  return new Promise<void>((resolve) => {
+  const drained = new Promise<void>((resolve) => {
     stream.on("end", resolve);
     stream.on("close", resolve);
     stream.on("error", () => resolve());
   });
+  return {
+    drained,
+    stop: () => {
+      if (stopped) return;
+      for (const flush of flushes) {
+        try {
+          flush();
+        } catch {
+          // A throwing consumer callback must not skip the cleanup below or
+          // the container removal after it.
+        }
+      }
+      stopped = true;
+      // Release a stream the daemon left open, so it holds no connection.
+      destroyStream(stream);
+      stdout.destroy();
+      stderr.destroy();
+    },
+  };
+}
+
+function destroyStream(stream: NodeJS.ReadableStream): void {
+  (stream as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.();
 }
 
 /**
