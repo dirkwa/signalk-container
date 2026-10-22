@@ -86,6 +86,9 @@ export async function runJob(
   let timedOut = false;
   let cancelDeadline = () => {};
   let graceTimer: NodeJS.Timeout | undefined;
+  // Once runJob has reported, no further log line reaches the result or the
+  // caller's callbacks.
+  let stopLogs = () => {};
   // Settles when the deadline fires, so a job whose force-remove fails (and
   // whose wait() therefore never returns) still resolves.
   let deadlineReached = new Promise<void>(() => {});
@@ -274,17 +277,19 @@ export async function runJob(
       deadlineReached.then(() => null),
     ]);
     if (stream === null && timedOut) throw new Error(timedOutError());
-    const drained =
-      stream === null
-        ? Promise.resolve()
-        : wireJobLogStream(
-            client,
-            stream,
-            pushLog,
-            config.onProgress,
-            config.onStdoutLine,
-            config.onStderrLine,
-          );
+    let drained = Promise.resolve();
+    if (stream !== null) {
+      const wired = wireJobLogStream(
+        client,
+        stream,
+        pushLog,
+        config.onProgress,
+        config.onStdoutLine,
+        config.onStderrLine,
+      );
+      drained = wired.drained;
+      stopLogs = wired.stop;
+    }
 
     const waitResult = await safe(() =>
       Promise.race([exited, deadlineReached]),
@@ -353,6 +358,7 @@ export async function runJob(
   } finally {
     cancelDeadline();
     clearTimeout(graceTimer);
+    stopLogs();
     if (config.signal && onAbort) {
       config.signal.removeEventListener("abort", onAbort);
     }
@@ -436,9 +442,16 @@ function wireJobLogStream(
   onProgress?: (line: string) => void,
   onStdoutLine?: (line: string) => void,
   onStderrLine?: (line: string) => void,
-): Promise<void> {
+): { drained: Promise<void>; stop: () => void } {
   const stdout = new PassThrough();
   const stderr = new PassThrough();
+  let stopped = false;
+  const emit = (line: string, onLine: ((line: string) => void) | undefined) => {
+    if (stopped) return;
+    pushLog(line);
+    onProgress?.(line);
+    onLine?.(line);
+  };
   const lineBuffer = (
     sink: PassThrough,
     onLine: ((line: string) => void) | undefined,
@@ -450,27 +463,27 @@ function wireJobLogStream(
       buf = parts.pop() ?? "";
       for (const part of parts) {
         if (part.length === 0) continue;
-        pushLog(part);
-        onProgress?.(part);
-        onLine?.(part);
+        emit(part, onLine);
       }
     });
     sink.on("end", () => {
-      if (buf.length > 0) {
-        pushLog(buf);
-        onProgress?.(buf);
-        onLine?.(buf);
-      }
+      if (buf.length > 0) emit(buf, onLine);
     });
   };
   lineBuffer(stdout, onStdoutLine);
   lineBuffer(stderr, onStderrLine);
   client.modem.demuxStream(stream, stdout, stderr);
-  return new Promise<void>((resolve) => {
+  const drained = new Promise<void>((resolve) => {
     stream.on("end", resolve);
     stream.on("close", resolve);
     stream.on("error", () => resolve());
   });
+  return {
+    drained,
+    stop: () => {
+      stopped = true;
+    },
+  };
 }
 
 /**

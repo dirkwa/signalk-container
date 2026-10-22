@@ -185,19 +185,24 @@ describe("runJob timeout", () => {
       images: { "alpine:3.19": {} },
       defaultContainer: {
         logs: () => {
-          const logs = new PassThrough();
           logs.write(Buffer.from("kept\n"));
           return Promise.resolve(logs);
         },
         wait: { StatusCode: 0 },
       },
     });
+    const logs = new PassThrough();
+    const progress: string[] = [];
 
     mock.timers.enable({ apis: ["setTimeout", "Date"] });
     try {
       const promise = runJob(
         docker,
-        { image: "alpine:3.19", command: ["true"] },
+        {
+          image: "alpine:3.19",
+          command: ["true"],
+          onProgress: (line) => progress.push(line),
+        },
         client,
       );
       let settled = false;
@@ -212,6 +217,11 @@ describe("runJob timeout", () => {
       const result = await promise;
       assert.equal(result.status, "completed");
       assert.deepEqual(result.log, ["kept"]);
+
+      logs.write(Buffer.from("late\n"));
+      await new Promise((r) => setImmediate(r));
+      assert.deepEqual(result.log, ["kept"]);
+      assert.deepEqual(progress, ["kept"]);
     } finally {
       mock.timers.reset();
     }
