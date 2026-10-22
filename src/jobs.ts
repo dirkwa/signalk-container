@@ -35,6 +35,9 @@ const JOB_LOG_MAX_LINES = 200;
 // setTimeout fires at once for any delay above 2^31-1 ms (~24.8 days), so a
 // longer run-phase timeout is re-armed in steps of at most this size.
 const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
+// How long a job container's force-remove may take before runJob stops
+// waiting for it, so a daemon that stops answering cannot keep a job pending.
+const REMOVE_TIMEOUT_MS = 10_000;
 
 /**
  * Run a one-shot helper container to completion, streaming progress.
@@ -231,10 +234,8 @@ export async function runJob(
         cancelDeadline = startDeadline(seconds, () => {
           if (hasExited) return;
           timedOut = true;
-          void safe(() =>
-            client.getContainer(jobName).remove({ force: true }),
-          ).then((removed) => {
-            if (!removed.ok) timeoutRemoveError = removed.error.raw;
+          void removeJobContainer(client, jobName).then((failure) => {
+            timeoutRemoveError = failure;
             resolve();
           });
         });
@@ -333,10 +334,38 @@ export async function runJob(
     // the happy path and a create-but-never-started failure; `force: true`
     // stops it first if still running, and a 404 (already gone) is benign.
     // `safe()` never throws — it returns a result — so no catch is needed.
-    await safe(() => client.getContainer(jobName).remove({ force: true }));
+    await removeJobContainer(client, jobName);
   }
 
   return result;
+}
+
+/**
+ * Force-remove a job container, giving up after `timeoutMs`. Resolves with
+ * the reason it failed, or `undefined` once it is gone (a 404 counts).
+ *
+ * Exposed for unit tests.
+ */
+export async function removeJobContainer(
+  client: ContainerClient,
+  jobName: string,
+  timeoutMs: number = REMOVE_TIMEOUT_MS,
+): Promise<string | undefined> {
+  let timer: NodeJS.Timeout | undefined;
+  const gaveUp = new Promise<string>((resolve) => {
+    timer = setTimeout(
+      () => resolve(`no answer within ${timeoutMs / 1000}s`),
+      timeoutMs,
+    );
+  });
+  const removed = safe(() =>
+    client.getContainer(jobName).remove({ force: true }),
+  ).then((r) => (r.ok ? undefined : r.error.raw));
+  try {
+    return await Promise.race([removed, gaveUp]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**

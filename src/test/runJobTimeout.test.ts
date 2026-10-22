@@ -1,6 +1,6 @@
 import { describe, it, mock } from "node:test";
 import assert from "node:assert/strict";
-import { runJob, startDeadline } from "../jobs.js";
+import { removeJobContainer, runJob, startDeadline } from "../jobs.js";
 import { makeMockClient, streamFrom } from "./helpers/mockClient.js";
 import { PassThrough } from "node:stream";
 import type { ContainerRuntimeInfo } from "../types.js";
@@ -251,5 +251,25 @@ describe("startDeadline", () => {
     } finally {
       mock.timers.reset();
     }
+  });
+});
+
+describe("removeJobContainer", () => {
+  it("gives up on a removal that never answers", async () => {
+    const client = makeMockClient({
+      defaultContainer: { remove: () => new Promise<never>(() => {}) },
+    });
+    assert.equal(
+      await removeJobContainer(client, "sk-job-test", 10),
+      "no answer within 0.01s",
+    );
+  });
+
+  it("resolves undefined once the container is removed", async () => {
+    const client = makeMockClient({});
+    assert.equal(
+      await removeJobContainer(client, "sk-job-test", 10),
+      undefined,
+    );
   });
 });
