@@ -737,6 +737,13 @@ export interface ContainerJobConfig {
    * host timezone the same way it does for `ContainerConfig.env`.
    */
   env?: Record<string, string>;
+  /**
+   * Wall-clock limit for the run phase, in seconds; the image pull does not
+   * count. When it elapses runJob force-removes the job container and the
+   * job resolves with `status: "failed"` and a timed-out `error`. Omitted
+   * or not a positive number means no limit — chart conversions can
+   * legitimately run for hours.
+   */
   timeout?: number;
   /**
    * Called for every line on stdout *or* stderr — the historical single-stream
