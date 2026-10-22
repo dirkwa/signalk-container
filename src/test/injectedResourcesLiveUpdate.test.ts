@@ -1,4 +1,4 @@
-import { describe, it, afterEach } from "node:test";
+import { describe, it, afterEach, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -122,6 +122,16 @@ function count(calls: Map<string, unknown[]>, op: string): number {
 
 describe("a runtime-injected oomScoreAdj", () => {
   const savedNamespace = process.env.SIGNALK_CONTAINER_NAMESPACE;
+  const savedContainer = process.env.container;
+
+  // `isContainerized()` reads `process.env.container`, and firejail sets
+  // `container=firejail` (the plugin registry runs the suite under it). The
+  // start-up deployment doctor would then report an unresolved self ID through
+  // app.error, which the no-warning assertion below would count against
+  // ensureRunning.
+  beforeEach(() => {
+    delete process.env.container;
+  });
 
   afterEach(() => {
     _setDetectRuntimeForTesting(null);
@@ -130,6 +140,11 @@ describe("a runtime-injected oomScoreAdj", () => {
       delete process.env.SIGNALK_CONTAINER_NAMESPACE;
     } else {
       process.env.SIGNALK_CONTAINER_NAMESPACE = savedNamespace;
+    }
+    if (savedContainer === undefined) {
+      delete process.env.container;
+    } else {
+      process.env.container = savedContainer;
     }
   });
 
