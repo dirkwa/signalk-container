@@ -749,6 +749,13 @@ export interface ContainerJobConfig {
    * Called for every line on stdout *or* stderr — the historical single-stream
    * progress callback.  Stays available for callers that don't care about
    * which stream a line came from (image-pull progress, simple logging).
+   *
+   * For the container's stdout and stderr, all three line callbacks and the
+   * job's `log` receive a line longer than 16,384 characters (UTF-16 code
+   * units) as consecutive pieces of at most that length, so a job printing
+   * without newlines cannot grow memory in the Signal K process. Image-pull
+   * progress is passed on as the runtime reports it. The callbacks get every
+   * piece; `ContainerJobResult.log` keeps only the last 200.
    */
   onProgress?: (msg: string) => void;
   /**
@@ -868,6 +875,7 @@ export interface ContainerJobResult {
   command: string[];
   label?: string;
   exitCode?: number;
+  /** The last 200 output lines (or line pieces); older ones are dropped. */
   log: string[];
   error?: string;
   createdAt: string;

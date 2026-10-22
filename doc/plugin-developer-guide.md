@@ -647,7 +647,9 @@ const result = await containers.runJob({
   onProgress: (line) => console.log(line),
   // Optional per-stream callbacks. Both fire alongside onProgress, so use
   // them only when you need to distinguish stdout (e.g. structured progress
-  // markers) from stderr (e.g. tool diagnostics).
+  // markers) from stderr (e.g. tool diagnostics). A line longer than 16,384
+  // characters (UTF-16 code units) arrives as consecutive pieces of at most
+  // that length.
   onStdoutLine: (line) => parseStructuredProgress(line),
   onStderrLine: (line) => captureDiagnostic(line),
   // Optional cgroup limits applied via --cpus / --memory / --pids-limit etc.
