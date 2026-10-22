@@ -185,7 +185,7 @@ describe("runJob timeout", () => {
       images: { "alpine:3.19": {} },
       defaultContainer: {
         logs: () => {
-          logs.write(Buffer.from("kept\n"));
+          logs.write(Buffer.from("kept\npartial"));
           return Promise.resolve(logs);
         },
         wait: { StatusCode: 0 },
@@ -216,12 +216,9 @@ describe("runJob timeout", () => {
 
       const result = await promise;
       assert.equal(result.status, "completed");
-      assert.deepEqual(result.log, ["kept"]);
-
-      logs.write(Buffer.from("late\n"));
-      await new Promise((r) => setImmediate(r));
-      assert.deepEqual(result.log, ["kept"]);
-      assert.deepEqual(progress, ["kept"]);
+      assert.deepEqual(result.log, ["kept", "partial"]);
+      assert.equal(logs.destroyed, true);
+      assert.deepEqual(progress, ["kept", "partial"]);
     } finally {
       mock.timers.reset();
     }

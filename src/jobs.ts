@@ -452,11 +452,17 @@ function wireJobLogStream(
     onProgress?.(line);
     onLine?.(line);
   };
+  const flushes: Array<() => void> = [];
   const lineBuffer = (
     sink: PassThrough,
     onLine: ((line: string) => void) | undefined,
   ) => {
     let buf = "";
+    const flush = () => {
+      if (buf.length > 0) emit(buf, onLine);
+      buf = "";
+    };
+    flushes.push(flush);
     sink.on("data", (chunk: Buffer) => {
       buf += chunk.toString("utf8");
       const parts = buf.split(/\r\n|\r|\n/);
@@ -466,9 +472,7 @@ function wireJobLogStream(
         emit(part, onLine);
       }
     });
-    sink.on("end", () => {
-      if (buf.length > 0) emit(buf, onLine);
-    });
+    sink.on("end", flush);
   };
   lineBuffer(stdout, onStdoutLine);
   lineBuffer(stderr, onStderrLine);
@@ -481,7 +485,13 @@ function wireJobLogStream(
   return {
     drained,
     stop: () => {
+      if (stopped) return;
+      for (const flush of flushes) flush();
       stopped = true;
+      // Release a stream the daemon left open, so it holds no connection.
+      (stream as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.();
+      stdout.destroy();
+      stderr.destroy();
     },
   };
 }
