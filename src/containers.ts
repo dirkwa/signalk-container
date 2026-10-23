@@ -1679,10 +1679,10 @@ export interface LiveContainerConfig {
    */
   user: string;
   /**
-   * The image's own `Config.User`, read only when `user` is non-empty;
-   * `null` otherwise and when the image cannot be inspected. A container
-   * created without `--user` inherits it, so a `user` that differs from it
-   * was set at create time.
+   * The image's own `Config.User`, read only on rootless podman for a
+   * non-empty `user`; `null` otherwise and when the image cannot be
+   * inspected. A container created without `--user` inherits it, so a
+   * `user` that differs from it was set at create time.
    */
   imageUser?: string | null;
 }
@@ -1840,7 +1840,12 @@ export async function getLiveContainerConfig(
   }
 
   const user = (rawUser ?? "").trim();
-  const imageUser = user === "" ? null : await imageUserOf(client, info.Image);
+  // Only rootless podman's keep-id branch compares against the image's user;
+  // Docker and rootful podman compare with the User they would emit.
+  const imageUser =
+    user !== "" && runtime.runtime === "podman" && runtime.isRootless === true
+      ? await imageUserOf(client, info.Image)
+      : null;
 
   const devices: DeviceNodeSpec[] = [];
   if (Array.isArray(rawDevices)) {

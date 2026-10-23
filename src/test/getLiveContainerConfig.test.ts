@@ -539,6 +539,13 @@ describe("getLiveContainerConfig", () => {
 });
 
 describe("getLiveContainerConfig — image user", () => {
+  const podmanRootless: ContainerRuntimeInfo = {
+    runtime: "podman",
+    version: "5.4.2",
+    isPodmanDockerShim: false,
+    isRootless: true,
+  };
+
   it("reads the image's own user when the container has one", async () => {
     const client = makeMockClient({
       defaultContainer: {
@@ -546,7 +553,7 @@ describe("getLiveContainerConfig — image user", () => {
       },
       images: { "sha256:q": { Config: { User: "" } } },
     });
-    const result = await getLiveContainerConfig(dummyRuntime, "x", client);
+    const result = await getLiveContainerConfig(podmanRootless, "x", client);
     assert.equal(result?.user, "1000:1000");
     assert.equal(result?.imageUser, "");
   });
@@ -559,7 +566,7 @@ describe("getLiveContainerConfig — image user", () => {
       },
       images: { "sha256:q": { Config: { User: "root" } } },
     });
-    const result = await getLiveContainerConfig(dummyRuntime, "x", client);
+    const result = await getLiveContainerConfig(podmanRootless, "x", client);
     assert.equal(result?.imageUser, null);
   });
 
@@ -569,7 +576,24 @@ describe("getLiveContainerConfig — image user", () => {
         inspect: { ...buildInspect({ user: "mayara" }), Image: "sha256:gone" },
       },
     });
-    const result = await getLiveContainerConfig(dummyRuntime, "x", client);
+    const result = await getLiveContainerConfig(podmanRootless, "x", client);
+    assert.equal(result?.imageUser, null);
+  });
+
+  it("does not inspect the image on docker, which never compares it", async () => {
+    const docker: ContainerRuntimeInfo = {
+      runtime: "docker",
+      version: "27.0.0",
+      isPodmanDockerShim: false,
+      isRootless: false,
+    };
+    const client = makeMockClient({
+      defaultContainer: {
+        inspect: { ...buildInspect({ user: "1000:1000" }), Image: "sha256:q" },
+      },
+      images: { "sha256:q": { Config: { User: "root" } } },
+    });
+    const result = await getLiveContainerConfig(docker, "x", client);
     assert.equal(result?.imageUser, null);
   });
 });
