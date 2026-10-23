@@ -146,6 +146,7 @@ function makeService(opts: {
   app?: AppDeps;
   backgroundChecks?: boolean;
   errorStrikeLimit?: number;
+  deferBackground?: () => boolean;
 }): {
   service: UpdateService;
   clock: FakeClock;
@@ -164,6 +165,7 @@ function makeService(opts: {
     cache,
     backgroundChecks: opts.backgroundChecks ?? false,
     errorStrikeLimit: opts.errorStrikeLimit ?? 5,
+    deferBackground: opts.deferBackground,
   });
   return { service, clock, cache, appCalls: calls };
 }
@@ -1048,5 +1050,58 @@ describe("UpdateService — unregister", () => {
       () => service.checkOne("test-plugin"),
       /No registration/,
     );
+  });
+});
+
+describe("UpdateService — restricted uplink", () => {
+  function countingSource(): { source: VersionSource; calls: () => number } {
+    let n = 0;
+    return {
+      source: {
+        fetch: async () => {
+          n++;
+          return { kind: "version", latest: "1.0.0" };
+        },
+      },
+      calls: () => n,
+    };
+  }
+
+  it("skips a scheduled check while the uplink is metered and looks again later", async () => {
+    let restricted = true;
+    const { source, calls } = countingSource();
+    const { service, clock } = makeService({
+      backgroundChecks: true,
+      deferBackground: () => restricted,
+    });
+    service.register(basicReg({ versionSource: source }));
+
+    clock.fireNext();
+    await new Promise((r) => setImmediate(r));
+    assert.equal(calls(), 0, "no network call while restricted");
+    const retry = clock.timers.find((t) => !t.fired);
+    assert.ok(retry, "expected the deferred check to be rescheduled");
+    assert.ok(
+      retry.delayMs < MIN_RECURRING_DELAY_MS,
+      `deferred check should look again well before a full interval, got ${retry.delayMs}ms`,
+    );
+
+    restricted = false;
+    clock.fireNext(); // deferral timer re-arms the short first-check delay
+    clock.fireNext(); // the check itself
+    await new Promise((r) => setImmediate(r));
+    assert.equal(calls(), 1, "check runs once the uplink is free");
+  });
+
+  it("still runs a manual check while the uplink is metered", async () => {
+    const { source, calls } = countingSource();
+    const { service } = makeService({
+      backgroundChecks: true,
+      deferBackground: () => true,
+    });
+    service.register(basicReg({ versionSource: source }));
+    const result = await service.checkOne("test-plugin");
+    assert.equal(calls(), 1);
+    assert.equal(result.reason, "up-to-date");
   });
 });

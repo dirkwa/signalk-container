@@ -399,6 +399,7 @@ Semantics:
 - If `digest` is set, the probe is skipped — the caller already pins to a digest and the config-string check covers it.
 - Offline pulls are silently skipped (`ENOTFOUND`, `ENETUNREACH`, `ETIMEDOUT`, etc.). Boats at sea must never have their containers killed by a missing internet connection.
 - Non-offline pull failures (auth, parse, permissions) are also skipped with a debug log — update probing never blocks plugin startup.
+- While [signalk-internet](https://github.com/meri-imperiumi/signalk-internet) reports `network.internet.state` as `metered`, `offline` or `captive`, the probe is skipped without a pull, so a paid satellite link carries no image download nobody asked for. The next `ensureRunning` on a free link probes again.
 - Config-drift check runs first, then digest-drift. If config changed (env, volumes, ports), that recreate fires before any digest comparison. The two never both trigger.
 
 Notification-only flow (without auto-recreate) is available separately via [`containers.updates.register({...})`](#update-detection) — that fires a `notifications.plugins.<id>.updateAvailable` Signal K notification but does not pull or recreate. Use the updates service when you want the user to confirm the upgrade; use `autoUpdateOnFloatingTag` when "follow the floating tag" is the intended behavior.
@@ -1206,6 +1207,10 @@ The service treats network unavailability as the **normal expected state**, not 
 - The offline failure does NOT count toward auto-unregister
 
 When network comes back, the next scheduled check (or a manual one) just succeeds. No exponential backoff, no manual recovery needed.
+
+### Metered connections
+
+Scheduled checks also stay off the network while [signalk-internet](https://github.com/meri-imperiumi/signalk-internet) reports `network.internet.state` as `metered`, `offline` or `captive`. A floating-tag check pulls the image to compare digests, which on a per-gigabyte satellite plan costs real money. The deferred check looks again every 15 minutes and runs once the state is back to `online`. A manual check from the config panel always runs. Without signalk-internet the checks run as configured.
 
 The persistent cache lives at `${app.getDataDirPath()}/updates-cache.json` and survives Signal K restarts. A boat that powers up mid-ocean still sees the last-known-good check rather than "unknown".
 

@@ -221,10 +221,12 @@ export function makeMockClient(spec: MockClientSpec = {}): ContainerClient {
       spec.listImages instanceof Error
         ? Promise.reject(spec.listImages)
         : Promise.resolve(spec.listImages ?? []),
-    pull: () =>
-      spec.pull instanceof Error
+    pull: (name: string) => {
+      record(spec, "pull", name);
+      return spec.pull instanceof Error
         ? Promise.reject(spec.pull)
-        : Promise.resolve(streamFrom("")),
+        : Promise.resolve(streamFrom(""));
+    },
     pruneImages: () =>
       spec.pruneImages instanceof Error
         ? Promise.reject(spec.pruneImages)

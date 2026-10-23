@@ -45,6 +45,11 @@ export interface UpdateServiceOptions {
   defaultCheckIntervalMs?: number;
   /** Run scheduled checks at all? Manual checks always work. */
   backgroundChecks?: boolean;
+  /**
+   * True while scheduled checks must stay off the network (a metered or
+   * absent uplink). A deferred check is retried later; manual checks run.
+   */
+  deferBackground?: () => boolean;
   /** Number of consecutive REAL errors before auto-unregister. */
   errorStrikeLimit?: number;
 }
@@ -66,6 +71,10 @@ const FIRST_CHECK_DELAY_MS = 45 * 1000;
 // short delay a bounded number of times before settling into the normal poll.
 const MAX_STARTUP_RETRIES = 10;
 const DEFAULT_STRIKE_LIMIT = 5;
+// How soon a check deferred for a restricted uplink looks again. Reading the
+// connectivity state costs nothing, and waiting a full interval after the
+// boat reaches a free link would leave the panel stale for up to a day.
+const DEFERRED_RETRY_MS = 15 * 60 * 1000;
 
 interface RegistrationState {
   reg: UpdateRegistration;
@@ -243,6 +252,13 @@ export class UpdateService implements UpdateServiceApi {
       ? FIRST_CHECK_DELAY_MS
       : Math.max(MIN_INTERVAL_MS, state.intervalMs + jitter);
     state.timer = this.opts.clock.setTimer(() => {
+      if (this.opts.deferBackground?.()) {
+        this.opts.app.debug(
+          `[updates] scheduled check for ${state.reg.pluginId} deferred: uplink metered or offline`,
+        );
+        this.deferNext(state);
+        return;
+      }
       this.runCheck(state)
         .catch((err) => {
           // Should never reach here — runCheck handles its own errors.
@@ -273,6 +289,14 @@ export class UpdateService implements UpdateServiceApi {
           this.scheduleNext(state, { first: retry });
         });
     }, delay);
+  }
+
+  private deferNext(state: RegistrationState): void {
+    if (this.stopped || !this.isCurrent(state)) return;
+    state.timer = this.opts.clock.setTimer(
+      () => this.scheduleNext(state, { first: true }),
+      DEFERRED_RETRY_MS,
+    );
   }
 
   private async runCheck(state: RegistrationState): Promise<UpdateCheckResult> {

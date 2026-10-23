@@ -1905,7 +1905,7 @@ export default function PluginConfigurationPanel({
         label="Background update checks"
         value={backgroundUpdateChecks}
         onChange={setBackgroundUpdateChecks}
-        hint="Disable on metered connections; manual check still works"
+        hint="Pauses while signalk-internet reports metered or offline; manual check still works"
       />
 
       <SelectField
