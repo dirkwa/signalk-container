@@ -2373,10 +2373,11 @@ export function diffContainerConfig(
   // emit and compare to live `Config.User`. The rootless-Podman
   // `UsernsMode: keep-id` mapping doesn't surface in `Config.User`, so
   // that comparison only runs when the expected form is a `User` value.
-  // keep-id never sets a `User`, though, so on that branch a live one
-  // that differs from the image's own was set by another mapping (a run
-  // that misread the rootless probe gave every container the host
-  // caller's UID) and only a recreate brings keep-id to it.
+  // keep-id never sets a `User` of ours, though: podman reports the image's
+  // own, or for an image without one the keep-id `uid:gid`. On that branch
+  // a live user that is neither was set by another mapping (a run that
+  // misread the rootless probe gave every container the host caller's UID)
+  // and only a recreate brings keep-id to it.
   const mapping = userMappingFlags(runtime, requested.user);
   const expectedUser = mapping.User ?? null;
   if (expectedUser !== null) {
@@ -2385,12 +2386,24 @@ export function diffContainerConfig(
     mapping.HostConfig?.UsernsMode !== undefined &&
     live.imageUser !== undefined &&
     live.imageUser !== null &&
-    live.user !== live.imageUser
+    live.user !== live.imageUser &&
+    live.user !== keepIdUser(mapping.HostConfig.UsernsMode)
   ) {
     drifted.push("user");
   }
 
   return { drifted };
+}
+
+/**
+ * The `uid:gid` a keep-id mapping runs an image without a `USER` as, and
+ * which podman then reports as its `Config.User` (`keep-id:uid=0,gid=0` gives
+ * `0:0`). `null` when the mode names no uid.
+ */
+function keepIdUser(usernsMode: string): string | null {
+  const uid = /\buid=(\d+)/.exec(usernsMode)?.[1];
+  const gid = /\bgid=(\d+)/.exec(usernsMode)?.[1];
+  return uid === undefined ? null : `${uid}:${gid ?? uid}`;
 }
 
 /**
