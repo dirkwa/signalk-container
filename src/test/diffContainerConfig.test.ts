@@ -662,6 +662,59 @@ describe("diffContainerConfig — ownership (user)", () => {
   });
 });
 
+describe("diffContainerConfig — a user keep-id would not have set", () => {
+  const podmanRootless: ContainerRuntimeInfo = {
+    runtime: "podman",
+    version: "5.4.2",
+    isPodmanDockerShim: false,
+    isRootless: true,
+  };
+
+  it("flags drift on rootless podman for a user the image does not run as", () => {
+    // A run that misread the rootless probe created the container with the
+    // host caller's UID; QuestDB's image runs as root and drops to its own
+    // user, which owns the data.
+    const { drifted } = diffContainerConfig(
+      reqBase(),
+      liveBase({ user: "1000:1000", imageUser: "" }),
+      podmanRootless,
+    );
+    assert.ok(drifted.includes("user"));
+  });
+
+  it("no drift on rootless podman when the user is the image's own", () => {
+    const { drifted } = diffContainerConfig(
+      reqBase({ user: { inImageUid: 1000, inImageGid: 1000 } }),
+      liveBase({ user: "mayara", imageUser: "mayara" }),
+      podmanRootless,
+    );
+    assert.ok(!drifted.includes("user"));
+  });
+
+  it("no drift on rootless podman when the image user could not be read", () => {
+    const { drifted } = diffContainerConfig(
+      reqBase(),
+      liveBase({ user: "1000:1000", imageUser: null }),
+      podmanRootless,
+    );
+    assert.ok(!drifted.includes("user"));
+  });
+
+  it("leaves the docker comparison as it was", () => {
+    const docker: ContainerRuntimeInfo = {
+      runtime: "docker",
+      version: "27.0.0",
+      isPodmanDockerShim: false,
+      isRootless: false,
+    };
+    const { drifted } = diffContainerConfig(
+      reqBase(),
+      liveBase({ user: "1000:1000", imageUser: "" }),
+      docker,
+    );
+    assert.ok(!drifted.includes("user"));
+  });
+});
 describe("diffContainerConfig — recovery path documentation", () => {
   // When `classifyVolumeSources` filters out a 'skip' volume, the
   // requested map shrinks. After the source recovers, the next call

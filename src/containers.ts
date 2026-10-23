@@ -1678,6 +1678,28 @@ export interface LiveContainerConfig {
    * keep-id flag on the new run).
    */
   user: string;
+  /**
+   * The image's own `Config.User`, read only when `user` is non-empty;
+   * `null` otherwise and when the image cannot be inspected. A container
+   * created without `--user` inherits it, so a `user` that differs from it
+   * was set at create time.
+   */
+  imageUser?: string | null;
+}
+
+/**
+ * The `Config.User` an image runs as, `""` when it sets none, or `null` when
+ * the image cannot be inspected.
+ */
+async function imageUserOf(
+  client: ContainerClient,
+  imageId: unknown,
+): Promise<string | null> {
+  if (typeof imageId !== "string" || imageId === "") return null;
+  const result = await safe(() => client.getImage(imageId).inspect());
+  if (!result.ok) return null;
+  const user = (result.value as { Config?: { User?: unknown } }).Config?.User;
+  return typeof user === "string" ? user.trim() : "";
 }
 
 /**
@@ -1818,6 +1840,7 @@ export async function getLiveContainerConfig(
   }
 
   const user = (rawUser ?? "").trim();
+  const imageUser = user === "" ? null : await imageUserOf(client, info.Image);
 
   const devices: DeviceNodeSpec[] = [];
   if (Array.isArray(rawDevices)) {
@@ -1871,6 +1894,7 @@ export async function getLiveContainerConfig(
     portBindings,
     extraHosts,
     user,
+    imageUser,
     devices,
     deviceCgroupRules,
     groupAdd,
@@ -2342,11 +2366,21 @@ export function diffContainerConfig(
   // User/ownership drift. Compute the `User` form the translator would
   // emit and compare to live `Config.User`. The rootless-Podman
   // `UsernsMode: keep-id` mapping doesn't surface in `Config.User`, so
-  // we only fire drift when the expected form is a `User` value — that
-  // is, opt-out, rootless-Podman, and unavailable-hostUser all suppress
-  // drift on this field by design.
-  const expectedUser = userMappingFlags(runtime, requested.user).User ?? null;
-  if (expectedUser !== null && expectedUser !== live.user) {
+  // that comparison only runs when the expected form is a `User` value.
+  // keep-id never sets a `User`, though, so on that branch a live one
+  // that differs from the image's own was set by another mapping (a run
+  // that misread the rootless probe gave every container the host
+  // caller's UID) and only a recreate brings keep-id to it.
+  const mapping = userMappingFlags(runtime, requested.user);
+  const expectedUser = mapping.User ?? null;
+  if (expectedUser !== null) {
+    if (expectedUser !== live.user) drifted.push("user");
+  } else if (
+    mapping.HostConfig?.UsernsMode !== undefined &&
+    live.imageUser !== undefined &&
+    live.imageUser !== null &&
+    live.user !== live.imageUser
+  ) {
     drifted.push("user");
   }
 

@@ -537,3 +537,39 @@ describe("getLiveContainerConfig", () => {
     assert.equal(result.user, "");
   });
 });
+
+describe("getLiveContainerConfig — image user", () => {
+  it("reads the image's own user when the container has one", async () => {
+    const client = makeMockClient({
+      defaultContainer: {
+        inspect: { ...buildInspect({ user: "1000:1000" }), Image: "sha256:q" },
+      },
+      images: { "sha256:q": { Config: { User: "" } } },
+    });
+    const result = await getLiveContainerConfig(dummyRuntime, "x", client);
+    assert.equal(result?.user, "1000:1000");
+    assert.equal(result?.imageUser, "");
+  });
+
+  it("does not inspect the image for a container without a user", async () => {
+    // Were the image read, its user would come back as "root".
+    const client = makeMockClient({
+      defaultContainer: {
+        inspect: { ...buildInspect({ user: "" }), Image: "sha256:q" },
+      },
+      images: { "sha256:q": { Config: { User: "root" } } },
+    });
+    const result = await getLiveContainerConfig(dummyRuntime, "x", client);
+    assert.equal(result?.imageUser, null);
+  });
+
+  it("leaves the image user unknown when the image cannot be inspected", async () => {
+    const client = makeMockClient({
+      defaultContainer: {
+        inspect: { ...buildInspect({ user: "mayara" }), Image: "sha256:gone" },
+      },
+    });
+    const result = await getLiveContainerConfig(dummyRuntime, "x", client);
+    assert.equal(result?.imageUser, null);
+  });
+});
