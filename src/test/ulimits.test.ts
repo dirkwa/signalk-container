@@ -180,6 +180,15 @@ describe("readNofileHardCeiling", () => {
     // nofile, which a rootless container cannot exceed.
     if (ceiling !== null) assert.ok(ceiling > 0);
   });
+  it("leaves the ceiling unknown for podman whose rootless reading is unknown", () => {
+    const ceiling = readNofileHardCeiling({
+      runtime: "podman",
+      version: "5.4.2",
+      isPodmanDockerShim: false,
+      isRootless: null,
+    });
+    assert.equal(ceiling, null);
+  });
 });
 
 describe("ensureRunning — ulimits", () => {

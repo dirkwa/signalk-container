@@ -23,6 +23,16 @@ describe("probeCgroupControllers", () => {
     );
   });
 
+  it("returns null for podman whose rootless reading is unknown", async () => {
+    // The root file answers, but it may not be the cgroup the containers
+    // land under, so an unknown reading must not take it.
+    const read = reader({ [ROOT]: "cpuset cpu io memory pids" });
+    assert.equal(
+      await probeCgroupControllers("podman", null, read, 1000),
+      null,
+    );
+  });
+
   it("rootless podman: reads the user manager's delegated set, not the root", async () => {
     // systemd < 252 default Delegate=pids memory — the root file still
     // lists cpu, but a container asking for it would fail to create.

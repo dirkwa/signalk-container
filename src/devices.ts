@@ -13,6 +13,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import * as path from "node:path";
 import type { HostDeviceProbeResult } from "./types.js";
 import type { ContainerRuntimeInfo } from "./types.js";
+import { isKnownRootful } from "./runtime.js";
 
 /**
  * Character-device majors for well-known hot-plug device directories. A
@@ -355,7 +356,7 @@ export function resolveDeviceRequests(
           pathInContainer: spec.pathInContainer,
           unverified: true,
         });
-        if (runtime.isRootless !== true) {
+        if (isKnownRootful(runtime)) {
           for (const major of directoryDeviceMajors(spec.pathOnHost, probe)) {
             cgroupRules.add(`c ${major}:* rwm`);
           }
@@ -381,7 +382,7 @@ export function resolveDeviceRequests(
         pathOnHost: spec.pathOnHost,
         pathInContainer: spec.pathInContainer,
       });
-      if (runtime.isRootless !== true) {
+      if (isKnownRootful(runtime)) {
         for (const major of directoryDeviceMajors(spec.pathOnHost, probe)) {
           cgroupRules.add(`c ${major}:* rwm`);
         }

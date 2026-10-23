@@ -322,6 +322,21 @@ function rootlessFromInfo(info: DaemonInfo): boolean | null {
 }
 
 /**
+ * Whether rootful-only facilities apply: device cgroup rules and the system
+ * `fs.nr_open` ceiling. On podman only an explicit `false` counts, because an
+ * unknown reading is not rootful and those facilities fail or mislead under a
+ * rootless daemon. Docker's reading is advisory, so there only an explicit
+ * rootless rules them out.
+ */
+export function isKnownRootful(
+  runtime: Pick<ContainerRuntimeInfo, "runtime" | "isRootless">,
+): boolean {
+  return runtime.runtime === "podman"
+    ? runtime.isRootless === false
+    : runtime.isRootless !== true;
+}
+
+/**
  * cgroup v2 controllers available to the runtime, read from the kernel
  * (`/sys/fs/cgroup/cgroup.controllers`) rather than `info()`. dockerode
  * reaches podman's docker-compat `/info`, which does NOT expose
@@ -345,6 +360,8 @@ function rootlessFromInfo(info: DaemonInfo): boolean | null {
  * there fails container creation outright ("the requested cgroup
  * controller `cpu` is not available"), so for rootless podman the user
  * manager's file is read first and the root file is the fallback.
+ * An unknown rootless reading returns `null` as well: neither file can be
+ * trusted to be the one the containers land under.
  */
 export async function probeCgroupControllers(
   runtime: RuntimeName,
@@ -352,7 +369,7 @@ export async function probeCgroupControllers(
   read: (path: string) => Promise<string> = (p) => readFile(p, "utf8"),
   uid: number | undefined = process.getuid?.(),
 ): Promise<string[] | null> {
-  if (runtime !== "podman") return null;
+  if (runtime !== "podman" || rootless === null) return null;
   const candidates: string[] = [];
   if (rootless && uid !== undefined) {
     candidates.push(
