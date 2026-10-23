@@ -6,7 +6,13 @@ import {
   RuntimePreference,
   UserMappingPayload,
 } from "./types.js";
-import { libpodSubordinateUidCount, resolveClient, safe } from "./client.js";
+import {
+  libpodRootless,
+  libpodSubordinateUidCount,
+  resolveClient,
+  safe,
+  type ContainerClient,
+} from "./client.js";
 
 /**
  * Detect if the Signal K server is itself running inside a container.
@@ -119,6 +125,12 @@ type UserMappingIntent =
  *     container doesn't write to a host-owned bind mount).
  *   - host UID resolver returns null (Windows) → no flag. Docker
  *     Desktop / Windows handles UID translation internally.
+ *   - Podman whose rootless reading is unknown (`isRootless` null) → no
+ *     flag. The rootful branch's `User` would run a rootless container as
+ *     the host caller's UID, and drift detection would then recreate every
+ *     managed container to match a guess; keep-id would fail outright on a
+ *     rootful daemon. With no flag the container keeps the runtime's
+ *     default mapping.
  *   - rootless Podman with `disableUserNamespaceRemap` active → no
  *     flag. Used on hosts whose backing filesystem refuses kernel
  *     idmapped mounts (ZFS being the canonical case). Container runs
@@ -177,6 +189,9 @@ export function userMappingFlags(
   assertNonNegativeInt("inImageUid", inImageUid);
   assertNonNegativeInt("inImageGid", inImageGid);
 
+  if (runtime.runtime === "podman" && typeof runtime.isRootless !== "boolean") {
+    return {};
+  }
   if (runtime.runtime === "podman" && runtime.isRootless === true) {
     if (usernsRemapDisabled) {
       return {};
@@ -282,8 +297,8 @@ interface DaemonInfo {
  *   - `SecurityOptions` containing a `name=rootless` entry (rootless
  *     podman lists it; docker lists `name=cgroupns` etc. but not
  *     rootless)
- * `null` stays advisory ("not probed") — treated as not-rootless by the
- * userns matrix, the safe default for docker.
+ * `null` means "not probed": `userMappingFlags` then emits no mapping for
+ * podman, and docker takes its usual `User` path.
  */
 /**
  * Daemon CPU count from `/info`, or `null` when absent or not a positive
@@ -433,6 +448,46 @@ export function honoursVolumeSubpath(version: string | null): boolean {
   return atLeast(version, VOLUME_SUBPATH_MIN);
 }
 
+/** Tries at the docker-compat `/info` before detection settles without it. */
+const INFO_ATTEMPTS = 3;
+const INFO_RETRY_MS = 1000;
+let infoRetryMs = INFO_RETRY_MS;
+
+/** Test-only override for the pause between `/info` tries. `null` restores it. */
+export function _setInfoRetryDelayForTesting(ms: number | null): void {
+  infoRetryMs = ms ?? INFO_RETRY_MS;
+}
+
+/**
+ * The daemon's `/info` and whether it runs rootless. Podman's API answers
+ * slowly while every container starts at once and can drop a call then, and
+ * one failed read used to leave `isRootless` unknown for the whole run. So
+ * `/info` is tried again, and for podman `/libpod/info` is asked when the
+ * compat answer still settles nothing.
+ */
+export async function probeDaemon(
+  client: Pick<ContainerClient, "info" | "modem">,
+  runtime: ContainerRuntimeInfo["runtime"],
+): Promise<{ info: DaemonInfo; isRootless: boolean | null }> {
+  let info: DaemonInfo = {};
+  for (let attempt = 1; attempt <= INFO_ATTEMPTS; attempt++) {
+    const result = await safe(() => client.info());
+    if (result.ok) {
+      info = result.value as DaemonInfo;
+      break;
+    }
+    if (attempt < INFO_ATTEMPTS) {
+      await new Promise((resolve) => setTimeout(resolve, infoRetryMs));
+    }
+  }
+  const fromInfo = rootlessFromInfo(info);
+  const isRootless =
+    fromInfo === null && runtime === "podman"
+      ? await libpodRootless(client)
+      : fromInfo;
+  return { info, isRootless };
+}
+
 async function detectRuntimeImpl(
   preference: RuntimePreference,
 ): Promise<ContainerRuntimeInfo | null> {
@@ -449,13 +504,7 @@ async function detectRuntimeImpl(
   };
 
   const runtime = classifyRuntime(version);
-
-  const infoResult = await safe(() => client.info());
-  const info: DaemonInfo = infoResult.ok
-    ? (infoResult.value as DaemonInfo)
-    : {};
-
-  const isRootless = rootlessFromInfo(info);
+  const { info, isRootless } = await probeDaemon(client, runtime);
   return {
     runtime,
     version: version.Version ?? "unknown",

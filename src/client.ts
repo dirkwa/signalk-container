@@ -103,6 +103,7 @@ interface LibpodInfo {
       uidmap?: LibpodIdMapEntry[] | null;
       gidmap?: LibpodIdMapEntry[] | null;
     };
+    security?: { rootless?: boolean };
   };
 }
 
@@ -305,6 +306,44 @@ export function libpodSubordinateUidCount(
           // fewer gids exist reproduces the very failure this bounds.
           // Unknown on either side means no safe bound at all.
           resolve(uid === null || gid === null ? null : Math.min(uid, gid));
+        },
+      );
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+/**
+ * Whether podman runs rootless, from its native `/libpod/info`
+ * (`host.security.rootless`). A second source for when the docker-compat
+ * `/info` cannot be read, because every container's user mapping depends on
+ * this answer. `null` on Docker, on any request failure, and when the modem
+ * can't dial.
+ */
+export function libpodRootless(
+  client: DialOnlyClient,
+): Promise<boolean | null> {
+  return new Promise((resolve) => {
+    const dial = client.modem.dial?.bind(client.modem);
+    if (!dial) {
+      resolve(null);
+      return;
+    }
+    try {
+      dial(
+        {
+          path: LIBPOD_INFO_PATH,
+          method: "GET",
+          statusCodes: { 200: true, 500: "server error" },
+        },
+        (err, data) => {
+          if (err || typeof data !== "object" || data === null) {
+            resolve(null);
+            return;
+          }
+          const rootless = (data as LibpodInfo).host?.security?.rootless;
+          resolve(typeof rootless === "boolean" ? rootless : null);
         },
       );
     } catch {

@@ -204,6 +204,14 @@ Invariants:
 
 Discoverability — `selfDeployment().containerStorage` reports the filesystem backing the rootless-Podman storage root and emits `advice` lines when the filesystem is in `IDMAP_HAZARD_FSTYPES`. Advisory only; never escalates `status`.
 
+### Rootless detection must not degrade to a guess
+
+`isRootless` decides every managed container's user mapping, so a reading that could not be made must never choose one.
+
+- `probeDaemon` (`src/runtime.ts`) tries the docker-compat `/info` up to `INFO_ATTEMPTS` times, then for podman asks `/libpod/info` (`host.security.rootless`, via `libpodRootless`) when the compat answer settles nothing. Podman's API answers slowly while every container starts at once and can drop a call then.
+- `isRootless === null` on podman makes `userMappingFlags` emit **no** mapping, neither `UsernsMode` nor `User`. The rootful branch's `User=<host uid>:<host gid>` would run a rootless container as the wrong UID, and drift detection would recreate every managed container to match the guess. An image whose data belongs to its own non-root user (QuestDB's `questdb`) then cannot open its files and restarts in a loop. Never route an unknown reading to the rootful branch.
+- Docker keeps its `User` path whatever the reading: rootless there does not change the mapping.
+
 ### Degradation notifications (`notifications.container.*`)
 
 `src/notifications.ts` (`makeDegradationEmitter`) publishes SignalK notifications for six degradation conditions (five per container, plus the host-level deployment one), via the server's `app.notifications.raise()`/`clear()` API. Wired into the `src/index.ts` wrapper.
