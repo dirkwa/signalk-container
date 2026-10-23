@@ -89,6 +89,14 @@ export interface LibpodNetworkBackendInfo {
  */
 const LIBPOD_INFO_PATH = "/v4.0.0/libpod/info";
 
+/**
+ * How long `libpodRootless` waits for `/libpod/info` before treating the
+ * answer as unknown. Well above the ~4 s a busy Raspberry Pi's podman takes,
+ * and short enough that a daemon that accepts the connection and never
+ * answers cannot hold detection indefinitely.
+ */
+const LIBPOD_INFO_TIMEOUT_MS = 10_000;
+
 /** One `container_id`/`host_id`/`size` triple from podman's `/info`. */
 export interface LibpodIdMapEntry {
   container_id?: number;
@@ -323,8 +331,14 @@ export function libpodSubordinateUidCount(
  */
 export function libpodRootless(
   client: DialOnlyClient,
+  timeoutMs: number = LIBPOD_INFO_TIMEOUT_MS,
 ): Promise<boolean | null> {
-  return new Promise((resolve) => {
+  return new Promise((settle) => {
+    const timer = setTimeout(() => settle(null), timeoutMs);
+    const resolve = (value: boolean | null): void => {
+      clearTimeout(timer);
+      settle(value);
+    };
     const dial = client.modem.dial?.bind(client.modem);
     if (!dial) {
       resolve(null);

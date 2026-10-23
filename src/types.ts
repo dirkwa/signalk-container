@@ -56,17 +56,19 @@ export interface ContainerRuntimeInfo {
    */
   hostCpus?: number | null;
   /**
-   * Whether the runtime is operating in rootless mode.  Probed once
-   * at detection time via `podman info --format
-   * '{{.Host.Security.Rootless}}'` for Podman; assumed `false` for
-   * Docker (rootless Docker accepts the same `--user` flag form as
-   * rootful, so the distinction doesn't matter for our flag-emission
-   * logic).  `null` means "not probed" — treat as not rootless.
+   * Whether the runtime is operating in rootless mode. Read once at
+   * detection time from the daemon's docker-compat `/info` (`Rootless`, or
+   * `name=rootless` in `SecurityOptions`) and, for Podman when that settles
+   * nothing, from its native `/libpod/info` (`host.security.rootless`).
    *
-   * Used by `jobs.ts` to pick the right UID-mapping flag form for
-   * `runJob` containers: `--userns=keep-id:uid=N,gid=N` is rootless-
-   * Podman-only and errors out under rootful, so we have to detect
-   * before emitting it.
+   * `null` means unknown: no source answered. It is not "not rootless".
+   * For Podman the UID mapping then emits nothing at all, neither keep-id
+   * (which a rootful daemon rejects) nor the rootful branch's `User` (which
+   * would run a rootless container as the wrong UID). Docker takes its
+   * `User` path either way, since rootless Docker accepts the same form.
+   *
+   * Used by `userMappingFlags` for both managed containers and `runJob`
+   * helpers.
    */
   isRootless?: boolean | null;
   /**

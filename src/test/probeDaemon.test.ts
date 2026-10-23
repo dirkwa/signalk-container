@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import type { ContainerClient } from "../client.js";
+import { libpodRootless, type ContainerClient } from "../client.js";
 import { _setInfoRetryDelayForTesting, probeDaemon } from "../runtime.js";
 
 /**
@@ -84,5 +84,18 @@ describe("probeDaemon", () => {
     const c = client(ALWAYS, null, { host: { security: { rootless: true } } });
     assert.equal((await probeDaemon(c.client, "docker")).isRootless, null);
     assert.equal(c.dialCalls(), 0);
+  });
+});
+
+describe("libpodRootless", () => {
+  it("gives up on a daemon that accepts the call and never answers", async () => {
+    const silent: Pick<ContainerClient, "modem"> = {
+      modem: {
+        dial: () => {},
+        followProgress: () => {},
+        demuxStream: () => {},
+      },
+    };
+    assert.equal(await libpodRootless(silent, 20), null);
   });
 });
