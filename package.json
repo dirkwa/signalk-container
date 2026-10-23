@@ -8,6 +8,9 @@
   ],
   "signalk": {
     "displayName": "Container Manager",
+    "recommends": [
+      "@meri-imperiumi/signalk-internet"
+    ],
     "appIcon": "./icon.svg",
     "screenshots": [
       "./doc/screenshots/signalk-container-1.png",
