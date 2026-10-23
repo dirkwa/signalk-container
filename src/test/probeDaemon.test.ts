@@ -87,6 +87,27 @@ describe("probeDaemon", () => {
   it("asks /libpod/info when /info answers without a rootless reading", async () => {
     const c = client(0, {}, { host: { security: { rootless: false } } });
     assert.equal((await probeDaemon(c.client, "podman")).isRootless, false);
+    assert.equal(c.infoCalls(), 3);
+  });
+
+  it("tries /info again when it answers without a rootless reading", async () => {
+    let calls = 0;
+    const flaky: ProbeClient = {
+      info: () => Promise.resolve(++calls < 3 ? {} : { Rootless: true }),
+      modem: {
+        dial: (_opts, cb) => cb(new Error("socket gone"), null),
+        followProgress: () => {},
+        demuxStream: () => {},
+      },
+    };
+    assert.equal((await probeDaemon(flaky, "podman")).isRootless, true);
+    assert.equal(calls, 3);
+  });
+
+  it("takes docker's first answer, whose mapping does not depend on it", async () => {
+    const c = client(0, {});
+    assert.equal((await probeDaemon(c.client, "docker")).isRootless, null);
+    assert.equal(c.infoCalls(), 1);
   });
 
   it("leaves rootless unknown when neither source answers", async () => {

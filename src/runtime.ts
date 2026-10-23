@@ -490,7 +490,9 @@ export async function probeDaemon(
     );
     if (result.ok) {
       info = result.value as DaemonInfo;
-      break;
+      // An answer without a reading is retried too, on podman, where the
+      // mapping depends on it; Docker's does not, so any answer settles it.
+      if (rootlessFromInfo(info) !== null || runtime !== "podman") break;
     }
     if (attempt < INFO_ATTEMPTS) {
       await new Promise((resolve) => setTimeout(resolve, infoRetryMs));
