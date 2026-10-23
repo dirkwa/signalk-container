@@ -46,7 +46,7 @@ export interface ContainerClient {
   pull(repoTag: string, opts?: object): Promise<NodeJS.ReadableStream>;
   pruneImages(opts?: object): Promise<Docker.PruneImagesInfo>;
   version(): Promise<Docker.DockerVersion>;
-  info(): Promise<unknown>;
+  info(opts?: { abortSignal?: AbortSignal }): Promise<unknown>;
   /** docker-modem; typed `any` upstream. Used for followProgress + demuxStream. */
   modem: {
     followProgress(
@@ -68,6 +68,7 @@ export interface ContainerClient {
         path: string;
         method: string;
         statusCodes: Record<number, boolean | string>;
+        abortSignal?: AbortSignal;
       },
       callback: (err: Error | null, data: unknown) => void,
     ): void;
@@ -89,6 +90,14 @@ export interface LibpodNetworkBackendInfo {
  */
 const LIBPOD_INFO_PATH = "/v4.0.0/libpod/info";
 
+/**
+ * How long `libpodRootless` waits for `/libpod/info` before treating the
+ * answer as unknown. Well above the ~4 s a busy Raspberry Pi's podman takes,
+ * and short enough that a daemon that accepts the connection and never
+ * answers cannot hold detection indefinitely.
+ */
+const LIBPOD_INFO_TIMEOUT_MS = 10_000;
+
 /** One `container_id`/`host_id`/`size` triple from podman's `/info`. */
 export interface LibpodIdMapEntry {
   container_id?: number;
@@ -103,6 +112,7 @@ interface LibpodInfo {
       uidmap?: LibpodIdMapEntry[] | null;
       gidmap?: LibpodIdMapEntry[] | null;
     };
+    security?: { rootless?: boolean };
   };
 }
 
@@ -310,6 +320,81 @@ export function libpodSubordinateUidCount(
     } catch {
       resolve(null);
     }
+  });
+}
+
+/**
+ * Whether podman runs rootless, from its native `/libpod/info`
+ * (`host.security.rootless`). A second source for when the docker-compat
+ * `/info` cannot be read, because every container's user mapping depends on
+ * this answer. `null` on Docker, on any request failure, and when the modem
+ * can't dial.
+ */
+export function libpodRootless(
+  client: DialOnlyClient,
+  timeoutMs: number = LIBPOD_INFO_TIMEOUT_MS,
+): Promise<boolean | null> {
+  const dial = client.modem.dial?.bind(client.modem);
+  if (!dial) return Promise.resolve(null);
+  return withDeadline(
+    timeoutMs,
+    (abortSignal) =>
+      new Promise<unknown>((resolve, reject) => {
+        dial(
+          {
+            path: LIBPOD_INFO_PATH,
+            method: "GET",
+            statusCodes: { 200: true, 500: "server error" },
+            abortSignal,
+          },
+          (err, data) => (err ? reject(err) : resolve(data)),
+        );
+      }),
+  ).then(
+    (data) => {
+      if (typeof data !== "object" || data === null) return null;
+      const rootless = (data as LibpodInfo).host?.security?.rootless;
+      return typeof rootless === "boolean" ? rootless : null;
+    },
+    () => null,
+  );
+}
+
+/**
+ * Run a daemon request that takes an `AbortSignal`, aborting it once
+ * `timeoutMs` passes. The returned promise rejects at the deadline even if
+ * the request ignores the abort, so a daemon that accepts a call and never
+ * answers neither holds the caller nor keeps the request open.
+ */
+export function withDeadline<T>(
+  timeoutMs: number,
+  request: (abortSignal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const controller = new AbortController();
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(`no answer within ${timeoutMs} ms`));
+    }, timeoutMs);
+    const settle = (): void => clearTimeout(timer);
+    let pending: Promise<T>;
+    try {
+      pending = request(controller.signal);
+    } catch (err) {
+      settle();
+      reject(err);
+      return;
+    }
+    pending.then(
+      (value) => {
+        settle();
+        resolve(value);
+      },
+      (err: unknown) => {
+        settle();
+        reject(err);
+      },
+    );
   });
 }
 

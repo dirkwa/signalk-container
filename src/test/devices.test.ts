@@ -220,6 +220,32 @@ describe("resolveDeviceRequests", () => {
     ]);
   });
 
+  it("emits cgroup rules on rootful podman but not when the reading is unknown", () => {
+    const probe = fakeProbe({
+      dirs: { "/dev/snd": ["controlC0"] },
+      stats: {
+        "/dev/snd": { kind: "directory", rdev: 0 },
+        "/dev/snd/controlC0": node(116, 0),
+      },
+    });
+    const podman = (isRootless: boolean | null): ContainerRuntimeInfo => ({
+      runtime: "podman",
+      version: "5.4.2",
+      isPodmanDockerShim: false,
+      isRootless,
+    });
+    assert.deepEqual(
+      resolveDeviceRequests(["/dev/snd"], podman(false), () => {}, probe)
+        .cgroupRules,
+      ["c 116:* rwm"],
+    );
+    assert.deepEqual(
+      resolveDeviceRequests(["/dev/snd"], podman(null), () => {}, probe)
+        .cgroupRules,
+      [],
+    );
+  });
+
   it("skips a missing host path with a warning (unplugged device must not block start)", () => {
     const warnings: string[] = [];
     const resolved = resolveDeviceRequests(

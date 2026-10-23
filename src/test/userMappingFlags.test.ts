@@ -121,14 +121,23 @@ describe("userMappingFlags", () => {
     );
   });
 
-  it("treats Podman with isRootless=null as not rootless (conservative default)", () => {
-    // Older Podman versions whose `info` output we couldn't parse
-    // get isRootless=null.  Treat as rootful so we don't emit the
-    // keep-id flag and trip the "only supported in rootless mode"
-    // hard error.
+  it("emits no mapping for Podman whose rootless reading is unknown", () => {
+    // A rootless probe that could not be read must not pick the rootful
+    // branch: its `User` would run a rootless container as the host
+    // caller's UID, and drift detection would recreate every managed
+    // container to match. keep-id would fail outright on a rootful daemon,
+    // so no flag at all is the one choice right on both.
     assert.deepEqual(
       userMappingFlags(podmanUnknownRuntime, undefined, linuxIds),
-      { User: "1000:1000" },
+      {},
+    );
+    assert.deepEqual(
+      userMappingFlags(
+        podmanUnknownRuntime,
+        { inImageUid: 1000, inImageGid: 1000 },
+        linuxIds,
+      ),
+      {},
     );
   });
 

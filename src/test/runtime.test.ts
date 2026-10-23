@@ -10,6 +10,7 @@ import {
   _setCurrentHostIdsForTesting,
   makeLineSplitter,
   isContainerized,
+  isKnownRootful,
 } from "../runtime.js";
 import type { ContainerRuntimeInfo } from "../types.js";
 
@@ -313,5 +314,30 @@ describe("hostCpusFromInfo", () => {
     assert.equal(hostCpusFromInfo({ NCPU: -2 }), null);
     assert.equal(hostCpusFromInfo({ NCPU: Number.NaN }), null);
     assert.equal(hostCpusFromInfo({ NCPU: "4" as unknown as number }), null);
+  });
+});
+
+describe("isKnownRootful", () => {
+  const rt = (
+    runtime: "podman" | "docker",
+    isRootless: boolean | null | undefined,
+  ): ContainerRuntimeInfo => ({
+    runtime,
+    version: "1.0.0",
+    isPodmanDockerShim: false,
+    isRootless,
+  });
+
+  it("on podman counts only an explicit false as rootful", () => {
+    assert.equal(isKnownRootful(rt("podman", false)), true);
+    assert.equal(isKnownRootful(rt("podman", true)), false);
+    assert.equal(isKnownRootful(rt("podman", null)), false);
+    assert.equal(isKnownRootful(rt("podman", undefined)), false);
+  });
+
+  it("on docker rules out only an explicit rootless", () => {
+    assert.equal(isKnownRootful(rt("docker", false)), true);
+    assert.equal(isKnownRootful(rt("docker", null)), true);
+    assert.equal(isKnownRootful(rt("docker", true)), false);
   });
 });

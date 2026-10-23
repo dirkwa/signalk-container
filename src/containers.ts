@@ -28,6 +28,7 @@ import {
 import {
   StreamingProcessHandle,
   isContainerized,
+  isKnownRootful,
   makeLineSplitter,
   userMappingFlags,
 } from "./runtime.js";
@@ -2480,7 +2481,7 @@ export function readNofileHardCeiling(
     }
   };
 
-  if (runtime.isRootless) {
+  if (runtime.isRootless === true) {
     try {
       return (
         parseProcLimitsNofile(readFileSync("/proc/self/limits", "utf8"))
@@ -2490,7 +2491,9 @@ export function readNofileHardCeiling(
       return null;
     }
   }
-  return read("/proc/sys/fs/nr_open");
+  // An unknown reading on podman cannot vouch for the rootful ceiling; the
+  // request then goes unclamped rather than clamped to the wrong limit.
+  return isKnownRootful(runtime) ? read("/proc/sys/fs/nr_open") : null;
 }
 
 /**

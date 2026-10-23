@@ -6,7 +6,14 @@ import {
   RuntimePreference,
   UserMappingPayload,
 } from "./types.js";
-import { libpodSubordinateUidCount, resolveClient, safe } from "./client.js";
+import {
+  libpodRootless,
+  libpodSubordinateUidCount,
+  resolveClient,
+  safe,
+  withDeadline,
+  type ContainerClient,
+} from "./client.js";
 
 /**
  * Detect if the Signal K server is itself running inside a container.
@@ -119,6 +126,12 @@ type UserMappingIntent =
  *     container doesn't write to a host-owned bind mount).
  *   - host UID resolver returns null (Windows) → no flag. Docker
  *     Desktop / Windows handles UID translation internally.
+ *   - Podman whose rootless reading is unknown (`isRootless` null) → no
+ *     flag. The rootful branch's `User` would run a rootless container as
+ *     the host caller's UID, and drift detection would then recreate every
+ *     managed container to match a guess; keep-id would fail outright on a
+ *     rootful daemon. With no flag the container keeps the runtime's
+ *     default mapping.
  *   - rootless Podman with `disableUserNamespaceRemap` active → no
  *     flag. Used on hosts whose backing filesystem refuses kernel
  *     idmapped mounts (ZFS being the canonical case). Container runs
@@ -177,6 +190,9 @@ export function userMappingFlags(
   assertNonNegativeInt("inImageUid", inImageUid);
   assertNonNegativeInt("inImageGid", inImageGid);
 
+  if (runtime.runtime === "podman" && typeof runtime.isRootless !== "boolean") {
+    return {};
+  }
   if (runtime.runtime === "podman" && runtime.isRootless === true) {
     if (usernsRemapDisabled) {
       return {};
@@ -282,8 +298,8 @@ interface DaemonInfo {
  *   - `SecurityOptions` containing a `name=rootless` entry (rootless
  *     podman lists it; docker lists `name=cgroupns` etc. but not
  *     rootless)
- * `null` stays advisory ("not probed") — treated as not-rootless by the
- * userns matrix, the safe default for docker.
+ * `null` means "not probed": `userMappingFlags` then emits no mapping for
+ * podman, and docker takes its usual `User` path.
  */
 /**
  * Daemon CPU count from `/info`, or `null` when absent or not a positive
@@ -303,6 +319,21 @@ function rootlessFromInfo(info: DaemonInfo): boolean | null {
     return info.SecurityOptions.some((o) => /\brootless\b/.test(o));
   }
   return null;
+}
+
+/**
+ * Whether rootful-only facilities apply: device cgroup rules and the system
+ * `fs.nr_open` ceiling. On podman only an explicit `false` counts, because an
+ * unknown reading is not rootful and those facilities fail or mislead under a
+ * rootless daemon. Docker's reading is advisory, so there only an explicit
+ * rootless rules them out.
+ */
+export function isKnownRootful(
+  runtime: Pick<ContainerRuntimeInfo, "runtime" | "isRootless">,
+): boolean {
+  return runtime.runtime === "podman"
+    ? runtime.isRootless === false
+    : runtime.isRootless !== true;
 }
 
 /**
@@ -329,6 +360,8 @@ function rootlessFromInfo(info: DaemonInfo): boolean | null {
  * there fails container creation outright ("the requested cgroup
  * controller `cpu` is not available"), so for rootless podman the user
  * manager's file is read first and the root file is the fallback.
+ * An unknown rootless reading returns `null` as well: neither file can be
+ * trusted to be the one the containers land under.
  */
 export async function probeCgroupControllers(
   runtime: RuntimeName,
@@ -336,7 +369,7 @@ export async function probeCgroupControllers(
   read: (path: string) => Promise<string> = (p) => readFile(p, "utf8"),
   uid: number | undefined = process.getuid?.(),
 ): Promise<string[] | null> {
-  if (runtime !== "podman") return null;
+  if (runtime !== "podman" || rootless === null) return null;
   const candidates: string[] = [];
   if (rootless && uid !== undefined) {
     candidates.push(
@@ -433,6 +466,63 @@ export function honoursVolumeSubpath(version: string | null): boolean {
   return atLeast(version, VOLUME_SUBPATH_MIN);
 }
 
+/** Tries at the docker-compat `/info` before detection settles without it. */
+const INFO_ATTEMPTS = 3;
+const INFO_RETRY_MS = 1000;
+/**
+ * How long one `/info` try may take before it is aborted. Well above the
+ * ~4 s a busy Raspberry Pi's podman takes for it.
+ */
+const INFO_TIMEOUT_MS = 10_000;
+let infoRetryMs = INFO_RETRY_MS;
+let infoTimeoutMs = INFO_TIMEOUT_MS;
+
+/** Test-only override for the pause between `/info` tries. `null` restores it. */
+export function _setInfoRetryDelayForTesting(ms: number | null): void {
+  infoRetryMs = ms ?? INFO_RETRY_MS;
+}
+
+/** Test-only override for one `/info` try's deadline. `null` restores it. */
+export function _setInfoTimeoutForTesting(ms: number | null): void {
+  infoTimeoutMs = ms ?? INFO_TIMEOUT_MS;
+}
+
+/**
+ * The daemon's `/info` and whether it runs rootless. Podman's API answers
+ * slowly while every container starts at once and can drop a call then, and
+ * one failed read used to leave `isRootless` unknown for the whole run. So
+ * `/info` is tried again, each try aborted at a deadline, and for podman
+ * `/libpod/info` is asked when the compat answer still settles nothing.
+ */
+export async function probeDaemon(
+  client: Pick<ContainerClient, "info" | "modem">,
+  runtime: ContainerRuntimeInfo["runtime"],
+): Promise<{ info: DaemonInfo; isRootless: boolean | null }> {
+  let info: DaemonInfo = {};
+  for (let attempt = 1; attempt <= INFO_ATTEMPTS; attempt++) {
+    const result = await safe(() =>
+      withDeadline(infoTimeoutMs, (abortSignal) =>
+        client.info({ abortSignal }),
+      ),
+    );
+    if (result.ok) {
+      info = result.value as DaemonInfo;
+      // An answer without a reading is retried too, on podman, where the
+      // mapping depends on it; Docker's does not, so any answer settles it.
+      if (rootlessFromInfo(info) !== null || runtime !== "podman") break;
+    }
+    if (attempt < INFO_ATTEMPTS) {
+      await new Promise((resolve) => setTimeout(resolve, infoRetryMs));
+    }
+  }
+  const fromInfo = rootlessFromInfo(info);
+  const isRootless =
+    fromInfo === null && runtime === "podman"
+      ? await libpodRootless(client)
+      : fromInfo;
+  return { info, isRootless };
+}
+
 async function detectRuntimeImpl(
   preference: RuntimePreference,
 ): Promise<ContainerRuntimeInfo | null> {
@@ -449,13 +539,7 @@ async function detectRuntimeImpl(
   };
 
   const runtime = classifyRuntime(version);
-
-  const infoResult = await safe(() => client.info());
-  const info: DaemonInfo = infoResult.ok
-    ? (infoResult.value as DaemonInfo)
-    : {};
-
-  const isRootless = rootlessFromInfo(info);
+  const { info, isRootless } = await probeDaemon(client, runtime);
   return {
     runtime,
     version: version.Version ?? "unknown",
