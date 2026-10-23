@@ -46,7 +46,7 @@ export interface ContainerClient {
   pull(repoTag: string, opts?: object): Promise<NodeJS.ReadableStream>;
   pruneImages(opts?: object): Promise<Docker.PruneImagesInfo>;
   version(): Promise<Docker.DockerVersion>;
-  info(): Promise<unknown>;
+  info(opts?: { abortSignal?: AbortSignal }): Promise<unknown>;
   /** docker-modem; typed `any` upstream. Used for followProgress + demuxStream. */
   modem: {
     followProgress(
@@ -68,6 +68,7 @@ export interface ContainerClient {
         path: string;
         method: string;
         statusCodes: Record<number, boolean | string>;
+        abortSignal?: AbortSignal;
       },
       callback: (err: Error | null, data: unknown) => void,
     ): void;
@@ -333,36 +334,67 @@ export function libpodRootless(
   client: DialOnlyClient,
   timeoutMs: number = LIBPOD_INFO_TIMEOUT_MS,
 ): Promise<boolean | null> {
-  return new Promise((settle) => {
-    const timer = setTimeout(() => settle(null), timeoutMs);
-    const resolve = (value: boolean | null): void => {
-      clearTimeout(timer);
-      settle(value);
-    };
-    const dial = client.modem.dial?.bind(client.modem);
-    if (!dial) {
-      resolve(null);
+  const dial = client.modem.dial?.bind(client.modem);
+  if (!dial) return Promise.resolve(null);
+  return withDeadline(
+    timeoutMs,
+    (abortSignal) =>
+      new Promise<unknown>((resolve, reject) => {
+        dial(
+          {
+            path: LIBPOD_INFO_PATH,
+            method: "GET",
+            statusCodes: { 200: true, 500: "server error" },
+            abortSignal,
+          },
+          (err, data) => (err ? reject(err) : resolve(data)),
+        );
+      }),
+  ).then(
+    (data) => {
+      if (typeof data !== "object" || data === null) return null;
+      const rootless = (data as LibpodInfo).host?.security?.rootless;
+      return typeof rootless === "boolean" ? rootless : null;
+    },
+    () => null,
+  );
+}
+
+/**
+ * Run a daemon request that takes an `AbortSignal`, aborting it once
+ * `timeoutMs` passes. The returned promise rejects at the deadline even if
+ * the request ignores the abort, so a daemon that accepts a call and never
+ * answers neither holds the caller nor keeps the request open.
+ */
+export function withDeadline<T>(
+  timeoutMs: number,
+  request: (abortSignal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const controller = new AbortController();
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(`no answer within ${timeoutMs} ms`));
+    }, timeoutMs);
+    const settle = (): void => clearTimeout(timer);
+    let pending: Promise<T>;
+    try {
+      pending = request(controller.signal);
+    } catch (err) {
+      settle();
+      reject(err);
       return;
     }
-    try {
-      dial(
-        {
-          path: LIBPOD_INFO_PATH,
-          method: "GET",
-          statusCodes: { 200: true, 500: "server error" },
-        },
-        (err, data) => {
-          if (err || typeof data !== "object" || data === null) {
-            resolve(null);
-            return;
-          }
-          const rootless = (data as LibpodInfo).host?.security?.rootless;
-          resolve(typeof rootless === "boolean" ? rootless : null);
-        },
-      );
-    } catch {
-      resolve(null);
-    }
+    pending.then(
+      (value) => {
+        settle();
+        resolve(value);
+      },
+      (err: unknown) => {
+        settle();
+        reject(err);
+      },
+    );
   });
 }
 

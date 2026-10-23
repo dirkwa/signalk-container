@@ -1,7 +1,15 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { libpodRootless, type ContainerClient } from "../client.js";
-import { _setInfoRetryDelayForTesting, probeDaemon } from "../runtime.js";
+import {
+  libpodRootless,
+  withDeadline,
+  type ContainerClient,
+} from "../client.js";
+import {
+  _setInfoRetryDelayForTesting,
+  _setInfoTimeoutForTesting,
+  probeDaemon,
+} from "../runtime.js";
 
 /**
  * The rootless reading decides every managed container's user mapping, so a
@@ -46,8 +54,14 @@ function client(
 const ALWAYS = Number.MAX_SAFE_INTEGER;
 
 describe("probeDaemon", () => {
-  beforeEach(() => _setInfoRetryDelayForTesting(0));
-  afterEach(() => _setInfoRetryDelayForTesting(null));
+  beforeEach(() => {
+    _setInfoRetryDelayForTesting(0);
+    _setInfoTimeoutForTesting(20);
+  });
+  afterEach(() => {
+    _setInfoRetryDelayForTesting(null);
+    _setInfoTimeoutForTesting(null);
+  });
 
   it("reads rootless from /info", async () => {
     const c = client(0, { Rootless: true, NCPU: 4 });
@@ -80,6 +94,27 @@ describe("probeDaemon", () => {
     assert.equal((await probeDaemon(c.client, "podman")).isRootless, null);
   });
 
+  it("aborts an /info that never answers and asks /libpod/info", async () => {
+    let aborted = 0;
+    const silent: ProbeClient = {
+      info: (opts) =>
+        new Promise((_resolve, reject) => {
+          opts?.abortSignal?.addEventListener("abort", () => {
+            aborted++;
+            reject(new Error("aborted"));
+          });
+        }),
+      modem: {
+        dial: (_opts, cb) =>
+          cb(null, { host: { security: { rootless: true } } }),
+        followProgress: () => {},
+        demuxStream: () => {},
+      },
+    };
+    assert.equal((await probeDaemon(silent, "podman")).isRootless, true);
+    assert.equal(aborted, 3);
+  });
+
   it("does not ask /libpod/info of docker", async () => {
     const c = client(ALWAYS, null, { host: { security: { rootless: true } } });
     assert.equal((await probeDaemon(c.client, "docker")).isRootless, null);
@@ -88,14 +123,43 @@ describe("probeDaemon", () => {
 });
 
 describe("libpodRootless", () => {
-  it("gives up on a daemon that accepts the call and never answers", async () => {
+  it("gives up on a daemon that accepts the call and never answers, and aborts it", async () => {
+    let signal: AbortSignal | undefined;
     const silent: Pick<ContainerClient, "modem"> = {
       modem: {
-        dial: () => {},
+        dial: (opts) => {
+          signal = opts.abortSignal;
+        },
         followProgress: () => {},
         demuxStream: () => {},
       },
     };
     assert.equal(await libpodRootless(silent, 20), null);
+    assert.equal(signal?.aborted, true);
+  });
+});
+
+describe("withDeadline", () => {
+  it("passes an answer that comes in time through", async () => {
+    assert.equal(await withDeadline(1000, () => Promise.resolve(7)), 7);
+  });
+
+  it("aborts the request and rejects at the deadline", async () => {
+    let signal: AbortSignal | undefined;
+    await assert.rejects(
+      withDeadline(20, (s) => {
+        signal = s;
+        return new Promise(() => {});
+      }),
+      /no answer within 20 ms/,
+    );
+    assert.equal(signal?.aborted, true);
+  });
+
+  it("rejects at the deadline even when the request ignores the abort", async () => {
+    await assert.rejects(
+      withDeadline(20, () => new Promise(() => {})),
+      /no answer within 20 ms/,
+    );
   });
 });

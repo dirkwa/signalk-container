@@ -11,6 +11,7 @@ import {
   libpodSubordinateUidCount,
   resolveClient,
   safe,
+  withDeadline,
   type ContainerClient,
 } from "./client.js";
 
@@ -451,19 +452,30 @@ export function honoursVolumeSubpath(version: string | null): boolean {
 /** Tries at the docker-compat `/info` before detection settles without it. */
 const INFO_ATTEMPTS = 3;
 const INFO_RETRY_MS = 1000;
+/**
+ * How long one `/info` try may take before it is aborted. Well above the
+ * ~4 s a busy Raspberry Pi's podman takes for it.
+ */
+const INFO_TIMEOUT_MS = 10_000;
 let infoRetryMs = INFO_RETRY_MS;
+let infoTimeoutMs = INFO_TIMEOUT_MS;
 
 /** Test-only override for the pause between `/info` tries. `null` restores it. */
 export function _setInfoRetryDelayForTesting(ms: number | null): void {
   infoRetryMs = ms ?? INFO_RETRY_MS;
 }
 
+/** Test-only override for one `/info` try's deadline. `null` restores it. */
+export function _setInfoTimeoutForTesting(ms: number | null): void {
+  infoTimeoutMs = ms ?? INFO_TIMEOUT_MS;
+}
+
 /**
  * The daemon's `/info` and whether it runs rootless. Podman's API answers
  * slowly while every container starts at once and can drop a call then, and
  * one failed read used to leave `isRootless` unknown for the whole run. So
- * `/info` is tried again, and for podman `/libpod/info` is asked when the
- * compat answer still settles nothing.
+ * `/info` is tried again, each try aborted at a deadline, and for podman
+ * `/libpod/info` is asked when the compat answer still settles nothing.
  */
 export async function probeDaemon(
   client: Pick<ContainerClient, "info" | "modem">,
@@ -471,7 +483,11 @@ export async function probeDaemon(
 ): Promise<{ info: DaemonInfo; isRootless: boolean | null }> {
   let info: DaemonInfo = {};
   for (let attempt = 1; attempt <= INFO_ATTEMPTS; attempt++) {
-    const result = await safe(() => client.info());
+    const result = await safe(() =>
+      withDeadline(infoTimeoutMs, (abortSignal) =>
+        client.info({ abortSignal }),
+      ),
+    );
     if (result.ok) {
       info = result.value as DaemonInfo;
       break;
