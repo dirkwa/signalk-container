@@ -691,6 +691,26 @@ describe("diffContainerConfig — a user keep-id would not have set", () => {
     assert.ok(!drifted.includes("user"));
   });
 
+  it("no drift on rootless podman for the uid:gid keep-id itself gives an image without a user", () => {
+    // podman reports `0:0` for an image without USER run as
+    // `keep-id:uid=0,gid=0`; recreating it would only bring the same back.
+    const { drifted } = diffContainerConfig(
+      reqBase(),
+      liveBase({ user: "0:0", imageUser: "" }),
+      podmanRootless,
+    );
+    assert.ok(!drifted.includes("user"));
+  });
+
+  it("no drift on rootless podman for the declared in-image uid:gid", () => {
+    const { drifted } = diffContainerConfig(
+      reqBase({ user: { inImageUid: 1000, inImageGid: 1000 } }),
+      liveBase({ user: "1000:1000", imageUser: "mayara" }),
+      podmanRootless,
+    );
+    assert.ok(!drifted.includes("user"));
+  });
+
   it("no drift on rootless podman when the image user could not be read", () => {
     const { drifted } = diffContainerConfig(
       reqBase(),
