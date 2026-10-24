@@ -146,7 +146,7 @@ function makeService(opts: {
   app?: AppDeps;
   backgroundChecks?: boolean;
   errorStrikeLimit?: number;
-  deferBackground?: () => boolean;
+  deferBackground?: () => boolean | Promise<boolean>;
 }): {
   service: UpdateService;
   clock: FakeClock;
@@ -1091,6 +1091,33 @@ describe("UpdateService — restricted uplink", () => {
     clock.fireNext(); // the check itself
     await new Promise((r) => setImmediate(r));
     assert.equal(calls(), 1, "check runs once the uplink is free");
+  });
+
+  it("runs the scheduled check when the uplink check throws", async () => {
+    const { source, calls } = countingSource();
+    const { service, clock } = makeService({
+      backgroundChecks: true,
+      deferBackground: () => Promise.reject(new Error("boom")),
+    });
+    service.register(basicReg({ versionSource: source }));
+    clock.fireNext();
+    await new Promise((r) => setImmediate(r));
+    assert.equal(calls(), 1);
+  });
+
+  it("starts no check when unregistered while the uplink check is pending", async () => {
+    const { source, calls } = countingSource();
+    let answer: (restricted: boolean) => void = () => {};
+    const { service, clock } = makeService({
+      backgroundChecks: true,
+      deferBackground: () => new Promise<boolean>((r) => (answer = r)),
+    });
+    service.register(basicReg({ versionSource: source }));
+    clock.fireNext();
+    service.unregister("test-plugin");
+    answer(false);
+    await new Promise((r) => setImmediate(r));
+    assert.equal(calls(), 0);
   });
 
   it("still runs a manual check while the uplink is metered", async () => {

@@ -9,7 +9,12 @@ import {
   _setCurrentHostIdsForTesting,
   _setDetectRuntimeForTesting,
 } from "../runtime.js";
-import { INTERNET_STATE_PATH, isInternetRestricted } from "../internetState.js";
+import {
+  INTERNET_PLUGIN_ID,
+  INTERNET_STATE_PATH,
+  isInternetRestricted,
+  type InternetStateSource,
+} from "../internetState.js";
 import { makeMockClient } from "./helpers/mockClient.js";
 import type {
   ContainerManagerApi,
@@ -18,28 +23,62 @@ import type {
 } from "../types.js";
 
 describe("isInternetRestricted", () => {
-  const node = (value: unknown) => (path: string) =>
-    path === INTERNET_STATE_PATH ? { value, timestamp: "t" } : undefined;
+  function source(
+    value: unknown,
+    plugin: { enabled: boolean } | null = { enabled: true },
+  ): InternetStateSource {
+    return {
+      getSelfPath: (path) =>
+        path === INTERNET_STATE_PATH ? { value, timestamp: "t" } : undefined,
+      getPluginsList: async () => [
+        { id: "signalk-container", enabled: true },
+        ...(plugin ? [{ id: INTERNET_PLUGIN_ID, ...plugin }] : []),
+      ],
+    };
+  }
 
-  it("holds back on a metered, offline or captive uplink", () => {
+  it("holds back on a metered, offline or captive uplink", async () => {
     for (const state of ["metered", "offline", "captive"]) {
-      assert.equal(isInternetRestricted(node(state)), true, state);
+      assert.equal(await isInternetRestricted(source(state)), true, state);
     }
   });
 
-  it("lets traffic through when online or when nothing reports a state", () => {
-    assert.equal(isInternetRestricted(node("online")), false);
-    assert.equal(isInternetRestricted(node(null)), false);
-    assert.equal(
-      isInternetRestricted(() => undefined),
-      false,
-    );
-    assert.equal(isInternetRestricted(undefined), false);
+  it("lets traffic through when the uplink is online", async () => {
+    assert.equal(await isInternetRestricted(source("online")), false);
   });
 
-  it("accepts a bare value", () => {
+  it("ignores a value left behind by a disabled or removed plugin", async () => {
     assert.equal(
-      isInternetRestricted(() => "metered"),
+      await isInternetRestricted(source("metered", { enabled: false })),
+      false,
+    );
+    assert.equal(await isInternetRestricted(source("metered", null)), false);
+  });
+
+  it("holds back while the enabled plugin has not published yet", async () => {
+    assert.equal(await isInternetRestricted(source(undefined)), true);
+  });
+
+  it("changes nothing on a server that cannot tell which plugins run", async () => {
+    assert.equal(
+      await isInternetRestricted({ getSelfPath: () => "metered" }),
+      false,
+    );
+    assert.equal(
+      await isInternetRestricted({
+        getSelfPath: () => "metered",
+        getPluginsList: () => Promise.reject(new Error("boom")),
+      }),
+      false,
+    );
+  });
+
+  it("accepts a bare value", async () => {
+    assert.equal(
+      await isInternetRestricted({
+        getSelfPath: () => "metered",
+        getPluginsList: async () => [{ id: INTERNET_PLUGIN_ID, enabled: true }],
+      }),
       true,
     );
   });
@@ -69,7 +108,10 @@ describe("floating-tag auto-update on a restricted uplink", () => {
     }
   });
 
-  async function pullsOnStart(internetState: string): Promise<number> {
+  async function pullsOnStart(
+    internetState: string,
+    internetPluginEnabled = true,
+  ): Promise<number> {
     delete process.env.container;
     const calls = new Map<string, unknown[]>();
     _setClientForTesting(
@@ -112,6 +154,9 @@ describe("floating-tag auto-update on a restricted uplink", () => {
       config: { configPath: dataDir },
       getSelfPath: (path: string) =>
         path === INTERNET_STATE_PATH ? { value: internetState } : undefined,
+      getPluginsList: async () => [
+        { id: INTERNET_PLUGIN_ID, enabled: internetPluginEnabled },
+      ],
     });
     plugin.start({ backgroundUpdateChecks: false } as PluginConfig);
     const api = (
@@ -138,5 +183,9 @@ describe("floating-tag auto-update on a restricted uplink", () => {
 
   it("does not pull while metered", async () => {
     assert.equal(await pullsOnStart("metered"), 0);
+  });
+
+  it("pulls as before when signalk-internet is disabled but its old value lingers", async () => {
+    assert.equal(await pullsOnStart("metered", false), 1);
   });
 });
