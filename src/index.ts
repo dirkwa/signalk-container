@@ -136,6 +136,7 @@ import { planUpdateApply } from "./updates/applyPlan.js";
 import { DIGEST_RE, resolveImage } from "./manifest/resolver.js";
 import { ManifestStore, SYNTHETIC_PREFIX } from "./manifest/store.js";
 import { findOrphans, ORPHAN_CHECK_DELAY_MS } from "./orphans.js";
+import { isInternetRestricted } from "./internetState.js";
 import {
   CPU_PRIORITIES,
   DEFAULT_CONTAINER_CPU_PRIORITY,
@@ -173,6 +174,8 @@ interface App {
     [key: string]: unknown;
   };
   handleMessage?: (pluginId: string, delta: unknown) => void;
+  /** Reads a vessels.self node; used for signalk-internet's state. */
+  getSelfPath?: (path: string) => unknown;
   /**
    * The plugins the server has loaded, installed whether enabled or not.
    * Not declared by the pinned `@signalk/server-api` type; the running
@@ -1733,11 +1736,20 @@ export default (app: App) => {
       );
       const innerOptions: EnsureRunningOptions = { ...options, onDeviceIssue };
 
+      // A floating-tag update pull on container start is background traffic:
+      // skip it on a metered or absent uplink. The intent stays in
+      // lastConfigs, so the next start on a free link pulls again.
+      const innerConfig =
+        effectiveConfig.autoUpdateOnFloatingTag &&
+        isInternetRestricted(app.getSelfPath?.bind(app))
+          ? { ...effectiveConfig, autoUpdateOnFloatingTag: false }
+          : effectiveConfig;
+
       try {
         await ensureRunning(
           runtimeInfo,
           name,
-          effectiveConfig,
+          innerConfig,
           (msg) => app.debug(msg),
           innerOptions,
           undefined,
@@ -2910,7 +2922,7 @@ export default (app: App) => {
           default: true,
           title: "Background update checks",
           description:
-            "Periodically check for container image updates in the background. Disable on metered connections — manual checks via the UI button still work.",
+            "Periodically check for container image updates in the background. Checks pause on their own while signalk-internet reports a metered or offline connection; manual checks via the UI button still work.",
         },
         disableUserNamespaceRemap: {
           type: "boolean",
@@ -3106,6 +3118,7 @@ export default (app: App) => {
         cache: new FileUpdateCache(cachePath, (msg) => app.debug(msg)),
         defaultCheckIntervalMs: intervalMs,
         backgroundChecks: config.backgroundUpdateChecks !== false,
+        deferBackground: () => isInternetRestricted(app.getSelfPath?.bind(app)),
       });
 
       manifestStore = new ManifestStore(
