@@ -182,7 +182,7 @@ interface App {
    * server provides it. Read to notice a container whose owning plugin was
    * uninstalled.
    */
-  getPluginsList?: () => Promise<Array<{ id: string }>>;
+  getPluginsList?: () => Promise<Array<{ id: string; enabled?: boolean }>>;
   /**
    * Persist the plugin's configuration to plugin-config-data/signalk-container.json.
    * Signal K server-api declares this; we optionally use it from updateResources()
@@ -1741,7 +1741,7 @@ export default (app: App) => {
       // lastConfigs, so the next start on a free link pulls again.
       const innerConfig =
         effectiveConfig.autoUpdateOnFloatingTag &&
-        isInternetRestricted(app.getSelfPath?.bind(app))
+        (await isInternetRestricted(app))
           ? { ...effectiveConfig, autoUpdateOnFloatingTag: false }
           : effectiveConfig;
 
@@ -3118,7 +3118,7 @@ export default (app: App) => {
         cache: new FileUpdateCache(cachePath, (msg) => app.debug(msg)),
         defaultCheckIntervalMs: intervalMs,
         backgroundChecks: config.backgroundUpdateChecks !== false,
-        deferBackground: () => isInternetRestricted(app.getSelfPath?.bind(app)),
+        deferBackground: () => isInternetRestricted(app),
       });
 
       manifestStore = new ManifestStore(

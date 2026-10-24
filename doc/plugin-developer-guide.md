@@ -1210,7 +1210,7 @@ When network comes back, the next scheduled check (or a manual one) just succeed
 
 ### Metered connections
 
-Scheduled checks also stay off the network while [signalk-internet](https://github.com/meri-imperiumi/signalk-internet) reports `network.internet.state` as `metered`, `offline` or `captive`. A floating-tag check pulls the image to compare digests, which on a per-gigabyte satellite plan costs real money. The deferred check looks again every 15 minutes and runs once the state is back to `online`. A manual check from the config panel always runs. Without signalk-internet the checks run as configured.
+Scheduled checks also stay off the network while [signalk-internet](https://github.com/meri-imperiumi/signalk-internet) reports `network.internet.state` as `metered`, `offline` or `captive`. A floating-tag check pulls the image to compare digests, which on a per-gigabyte satellite plan costs real money. The deferred check looks again every 15 minutes and runs once the state is back to `online`. A manual check from the config panel always runs. The state counts only while signalk-internet is enabled: the server keeps serving a disabled plugin's last value until restart, so that value is ignored, and without the plugin the checks run as configured. Right after startup, before an enabled signalk-internet has published its first state, background checks and floating-tag update probes wait for it. Pulling an image that is not on the host yet is never held back: the container cannot start without it.
 
 The persistent cache lives at `${app.getDataDirPath()}/updates-cache.json` and survives Signal K restarts. A boat that powers up mid-ocean still sees the last-known-good check rather than "unknown".
 

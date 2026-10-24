@@ -49,7 +49,7 @@ export interface UpdateServiceOptions {
    * True while scheduled checks must stay off the network (a metered or
    * absent uplink). A deferred check is retried later; manual checks run.
    */
-  deferBackground?: () => boolean;
+  deferBackground?: () => boolean | Promise<boolean>;
   /** Number of consecutive REAL errors before auto-unregister. */
   errorStrikeLimit?: number;
 }
@@ -251,8 +251,20 @@ export class UpdateService implements UpdateServiceApi {
     const delay = opts.first
       ? FIRST_CHECK_DELAY_MS
       : Math.max(MIN_INTERVAL_MS, state.intervalMs + jitter);
-    state.timer = this.opts.clock.setTimer(() => {
-      if (this.opts.deferBackground?.()) {
+    state.timer = this.opts.clock.setTimer(async () => {
+      let defer = false;
+      try {
+        defer = (await this.opts.deferBackground?.()) ?? false;
+      } catch (err) {
+        // Not knowing the uplink keeps the behaviour the service had
+        // before it could tell: run the check.
+        this.opts.app.debug(
+          `[updates] uplink check failed, running ${state.reg.pluginId} check: ${err}`,
+        );
+      }
+      // The await above can outlast stop() or a re-register.
+      if (this.stopped || !this.isCurrent(state)) return;
+      if (defer) {
         this.opts.app.debug(
           `[updates] scheduled check for ${state.reg.pluginId} deferred: uplink metered or offline`,
         );
