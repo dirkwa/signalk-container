@@ -136,7 +136,7 @@ import { planUpdateApply } from "./updates/applyPlan.js";
 import { DIGEST_RE, resolveImage } from "./manifest/resolver.js";
 import { ManifestStore, SYNTHETIC_PREFIX } from "./manifest/store.js";
 import { findOrphans, ORPHAN_CHECK_DELAY_MS } from "./orphans.js";
-import { isInternetRestricted } from "./internetState.js";
+import { InternetState, type InternetStateApp } from "./internetState.js";
 import {
   CPU_PRIORITIES,
   DEFAULT_CONTAINER_CPU_PRIORITY,
@@ -174,8 +174,8 @@ interface App {
     [key: string]: unknown;
   };
   handleMessage?: (pluginId: string, delta: unknown) => void;
-  /** Reads a vessels.self node; used for signalk-internet's state. */
-  getSelfPath?: (path: string) => unknown;
+  /** Delivers signalk-internet's state (`network.internet.state`). */
+  subscriptionmanager?: InternetStateApp["subscriptionmanager"];
   /**
    * The plugins the server has loaded, installed whether enabled or not.
    * Not declared by the pinned `@signalk/server-api` type; the running
@@ -341,6 +341,7 @@ export function shouldSurfaceDetectStatus(
 
 export default (app: App) => {
   let runtimeInfo: ContainerRuntimeInfo | null = null;
+  const internetState = new InternetState(app);
   // A server shutdown stops every plugin at once, so a consumer's own stop()
   // can reach api.stop() after this plugin's stop() has dropped the runtime.
   // stop() keeps what stopping a container needs here, until the next start(),
@@ -1741,7 +1742,7 @@ export default (app: App) => {
       // lastConfigs, so the next start on a free link pulls again.
       const innerConfig =
         effectiveConfig.autoUpdateOnFloatingTag &&
-        (await isInternetRestricted(app))
+        (await internetState.isRestricted())
           ? { ...effectiveConfig, autoUpdateOnFloatingTag: false }
           : effectiveConfig;
 
@@ -3071,6 +3072,8 @@ export default (app: App) => {
       // so the toggle does not leak across plugin restarts.
       setDisableUserns(config.disableUserNamespaceRemap === true);
 
+      internetState.start();
+
       // Instantiate the update service synchronously so consumer
       // plugins can call containers.updates.register(...) before
       // the runtime is detected. The service tolerates a null
@@ -3118,7 +3121,7 @@ export default (app: App) => {
         cache: new FileUpdateCache(cachePath, (msg) => app.debug(msg)),
         defaultCheckIntervalMs: intervalMs,
         backgroundChecks: config.backgroundUpdateChecks !== false,
-        deferBackground: () => isInternetRestricted(app),
+        deferBackground: () => internetState.isRestricted(),
       });
 
       manifestStore = new ManifestStore(
@@ -3451,6 +3454,7 @@ export default (app: App) => {
         updateService.stop();
         updateService = null;
       }
+      internetState.stop();
       manifestStore = null;
       lastConfigs.clear();
       lastVolumeIssues.clear();

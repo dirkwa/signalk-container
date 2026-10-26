@@ -12,8 +12,8 @@ import {
 import {
   INTERNET_PLUGIN_ID,
   INTERNET_STATE_PATH,
-  isInternetRestricted,
-  type InternetStateSource,
+  InternetState,
+  type InternetStateApp,
 } from "../internetState.js";
 import { makeMockClient } from "./helpers/mockClient.js";
 import type {
@@ -22,65 +22,148 @@ import type {
   PluginConfig,
 } from "../types.js";
 
-describe("isInternetRestricted", () => {
-  function source(
-    value: unknown,
-    plugin: { enabled: boolean } | null = { enabled: true },
-  ): InternetStateSource {
-    return {
-      getSelfPath: (path) =>
-        path === INTERNET_STATE_PATH ? { value, timestamp: "t" } : undefined,
-      getPluginsList: async () => [
+/**
+ * A server whose subscription manager replays `cached` at subscribe, as Signal
+ * K does with the last value, and `publish` delivers the next one.
+ */
+function fakeServer(
+  cached: unknown,
+  plugin: { enabled: boolean } | null = { enabled: true },
+) {
+  let deliver: ((value: unknown) => void) | null = null;
+  const counts = { pluginListReads: 0, unsubscribed: 0 };
+  const app: InternetStateApp = {
+    error: () => {},
+    subscriptionmanager: {
+      subscribe: (subscription, unsubscribes, _onError, onDelta) => {
+        assert.deepEqual(subscription.subscribe, [
+          { path: INTERNET_STATE_PATH, policy: "instant" },
+        ]);
+        deliver = (value) =>
+          onDelta({
+            updates: [{ values: [{ path: INTERNET_STATE_PATH, value }] }],
+          });
+        unsubscribes.push(() => {
+          deliver = null;
+          counts.unsubscribed++;
+        });
+        if (cached !== undefined) deliver(cached);
+      },
+    },
+    getPluginsList: async () => {
+      counts.pluginListReads++;
+      return [
         { id: "signalk-container", enabled: true },
         ...(plugin ? [{ id: INTERNET_PLUGIN_ID, ...plugin }] : []),
-      ],
-    };
-  }
+      ];
+    },
+  };
+  return { app, counts, publish: (value: unknown) => deliver?.(value) };
+}
 
+function started(app: InternetStateApp): InternetState {
+  const state = new InternetState(app);
+  state.start();
+  return state;
+}
+
+describe("InternetState", () => {
   it("holds back on a metered, offline or captive uplink", async () => {
-    for (const state of ["metered", "offline", "captive"]) {
-      assert.equal(await isInternetRestricted(source(state)), true, state);
+    for (const value of ["metered", "offline", "captive"]) {
+      assert.equal(
+        await started(fakeServer(value).app).isRestricted(),
+        true,
+        value,
+      );
     }
   });
 
   it("lets traffic through when the uplink is online", async () => {
-    assert.equal(await isInternetRestricted(source("online")), false);
+    assert.equal(await started(fakeServer("online").app).isRestricted(), false);
   });
 
-  it("ignores a value left behind by a disabled or removed plugin", async () => {
-    assert.equal(
-      await isInternetRestricted(source("metered", { enabled: false })),
-      false,
-    );
-    assert.equal(await isInternetRestricted(source("metered", null)), false);
+  it("follows each new state without asking the server again", async () => {
+    const server = fakeServer("online");
+    const state = started(server.app);
+    server.publish("metered");
+    assert.equal(await state.isRestricted(), true);
+    server.publish("online");
+    assert.equal(await state.isRestricted(), false);
+    assert.equal(server.counts.pluginListReads, 0);
   });
 
   it("holds back while the enabled plugin has not published yet", async () => {
-    assert.equal(await isInternetRestricted(source(undefined)), true);
+    const server = fakeServer(undefined);
+    const state = started(server.app);
+    assert.equal(await state.isRestricted(), true);
+    server.publish("online");
+    assert.equal(await state.isRestricted(), false);
+    assert.equal(server.counts.pluginListReads, 1);
+  });
+
+  it("asks the plugin list at the check, not at start", async () => {
+    const server = fakeServer(undefined, null);
+    const state = started(server.app);
+    assert.equal(await state.isRestricted(), false);
+    // signalk-internet registered after this plugin started
+    server.app.getPluginsList = async () => [
+      { id: INTERNET_PLUGIN_ID, enabled: true },
+    ];
+    assert.equal(await state.isRestricted(), true);
+  });
+
+  it("lets traffic through once signalk-internet clears its state on stop", async () => {
+    const plugin = { enabled: true };
+    const server = fakeServer("metered", plugin);
+    const state = started(server.app);
+    plugin.enabled = false;
+    server.publish(null);
+    assert.equal(await state.isRestricted(), false);
+  });
+
+  it("holds back after signalk-internet restarts, until it publishes again", async () => {
+    const server = fakeServer("online");
+    const state = started(server.app);
+    server.publish(null);
+    assert.equal(await state.isRestricted(), true);
+    server.publish("online");
+    assert.equal(await state.isRestricted(), false);
+  });
+
+  it("changes nothing without signalk-internet enabled", async () => {
+    assert.equal(
+      await started(
+        fakeServer(undefined, { enabled: false }).app,
+      ).isRestricted(),
+      false,
+    );
+    assert.equal(
+      await started(fakeServer(undefined, null).app).isRestricted(),
+      false,
+    );
   });
 
   it("changes nothing on a server that cannot tell which plugins run", async () => {
+    const { app } = fakeServer(undefined);
     assert.equal(
-      await isInternetRestricted({ getSelfPath: () => "metered" }),
+      await started({ ...app, getPluginsList: undefined }).isRestricted(),
       false,
     );
     assert.equal(
-      await isInternetRestricted({
-        getSelfPath: () => "metered",
+      await started({
+        ...app,
         getPluginsList: () => Promise.reject(new Error("boom")),
-      }),
+      }).isRestricted(),
       false,
     );
   });
 
-  it("accepts a bare value", async () => {
-    assert.equal(
-      await isInternetRestricted({
-        getSelfPath: () => "metered",
-        getPluginsList: async () => [{ id: INTERNET_PLUGIN_ID, enabled: true }],
-      }),
-      true,
-    );
+  it("unsubscribes and forgets the state on stop", async () => {
+    const server = fakeServer("metered", null);
+    const state = started(server.app);
+    state.stop();
+    assert.equal(server.counts.unsubscribed, 1);
+    assert.equal(await state.isRestricted(), false);
   });
 });
 
@@ -108,9 +191,10 @@ describe("floating-tag auto-update on a restricted uplink", () => {
     }
   });
 
+  // `published` is what signalk-internet sent before the container starts.
   async function pullsOnStart(
-    internetState: string,
-    internetPluginEnabled = true,
+    published: unknown[],
+    internetPlugin = { enabled: true },
   ): Promise<number> {
     delete process.env.container;
     const calls = new Map<string, unknown[]>();
@@ -145,6 +229,7 @@ describe("floating-tag auto-update on a restricted uplink", () => {
     _setDetectRuntimeForTesting(() => Promise.resolve(RUNTIME));
     const dataDir = mkdtempSync(join(tmpdir(), "skc-internet-state-"));
     const noop = () => {};
+    const server = fakeServer(published[0], internetPlugin);
     const plugin = containerManagerPlugin({
       debug: noop,
       error: noop,
@@ -152,13 +237,11 @@ describe("floating-tag auto-update on a restricted uplink", () => {
       setPluginError: noop,
       getDataDirPath: () => dataDir,
       config: { configPath: dataDir },
-      getSelfPath: (path: string) =>
-        path === INTERNET_STATE_PATH ? { value: internetState } : undefined,
-      getPluginsList: async () => [
-        { id: INTERNET_PLUGIN_ID, enabled: internetPluginEnabled },
-      ],
+      subscriptionmanager: server.app.subscriptionmanager,
+      getPluginsList: server.app.getPluginsList,
     });
     plugin.start({ backgroundUpdateChecks: false } as PluginConfig);
+    for (const value of published.slice(1)) server.publish(value);
     const api = (
       globalThis as { __signalk_containerManager?: ContainerManagerApi }
     ).__signalk_containerManager;
@@ -178,14 +261,18 @@ describe("floating-tag auto-update on a restricted uplink", () => {
   }
 
   it("pulls the tag on start while online", async () => {
-    assert.equal(await pullsOnStart("online"), 1);
+    assert.equal(await pullsOnStart(["online"]), 1);
   });
 
   it("does not pull while metered", async () => {
-    assert.equal(await pullsOnStart("metered"), 0);
+    assert.equal(await pullsOnStart(["metered"]), 0);
   });
 
-  it("pulls as before when signalk-internet is disabled but its old value lingers", async () => {
-    assert.equal(await pullsOnStart("metered", false), 1);
+  it("does not pull before an enabled signalk-internet has published", async () => {
+    assert.equal(await pullsOnStart([]), 0);
+  });
+
+  it("pulls once signalk-internet clears its state on stop", async () => {
+    assert.equal(await pullsOnStart(["metered", null], { enabled: false }), 1);
   });
 });
