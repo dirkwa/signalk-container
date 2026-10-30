@@ -95,6 +95,17 @@ export function _setDeviceProbeForTesting(probe: DeviceHostProbe | null): void {
 const SERIAL_NODE_PATH_RE =
   /^\/dev\/(?:serial\/by-(?:id|path)\/[^/]+|tty(?:USB|ACM)\d+)$/;
 
+/** Whether a containerized manager emits `hostPath` unverified as a node. */
+function isUnverifiedSerialNode(
+  hostPath: string,
+  runtime: ContainerRuntimeInfo,
+): boolean {
+  return (
+    runtime.isContainerized === true &&
+    SERIAL_NODE_PATH_RE.test(stripTrailingSlashes(hostPath))
+  );
+}
+
 /**
  * Extract the device major from a raw `st_rdev`. Linux packs the major
  * into bits 8–19 (`(rdev >> 8) & 0xfff`); written in arithmetic form
@@ -273,13 +284,20 @@ export function filterUnresolvedDeviceEntries(
  * requested side. Filtering the live side by the same probe restores the
  * symmetry the podman branch gets for free (both its sides are
  * host-probed). Only node devices are subject to this; directory-device
- * binds compare through volumes and are unaffected.
+ * binds compare through volumes and are unaffected. A serial node a
+ * containerized manager emits unverified is kept: the requested side carries
+ * it without a stat, so dropping it here would read as drift on every call.
  */
 export function presentLiveDeviceNodes(
   liveNodes: readonly DeviceNodeSpec[],
+  runtime: ContainerRuntimeInfo,
   probe: DeviceHostProbe = currentDeviceProbe,
 ): DeviceNodeSpec[] {
-  return liveNodes.filter((n) => probe.stat(n.pathOnHost) !== null);
+  return liveNodes.filter(
+    (n) =>
+      isUnverifiedSerialNode(n.pathOnHost, runtime) ||
+      probe.stat(n.pathOnHost) !== null,
+  );
 }
 
 /**
@@ -347,10 +365,7 @@ export function resolveDeviceRequests(
     const canonicalHostPath = stripTrailingSlashes(spec.pathOnHost);
     const st = probe.stat(spec.pathOnHost);
     if (st === null) {
-      if (
-        runtime.isContainerized === true &&
-        SERIAL_NODE_PATH_RE.test(canonicalHostPath)
-      ) {
+      if (isUnverifiedSerialNode(canonicalHostPath, runtime)) {
         const reason =
           `Device "${entry}" is not visible from inside the Signal K ` +
           `container; emitting it unverified — the runtime resolves the ` +
@@ -888,8 +903,10 @@ export function deviceDirectoryOf(path: string, isNode = false): string {
  *
  * Unlike `/dev/dri`, these have no usable node-name prefix — `/dev/snd` holds
  * `seq`, `timer`, `pcmC0D0p`; `/dev/input` holds `event0`, `js0`, `mice` — so
- * the class is keyed off the directory instead. Both are uniformly one group
- * on every mainstream distribution's udev rules.
+ * the class is keyed off the directory instead. The `/dev/serial` link
+ * directories hold names like `usb-Itead_Sonoff_…-if00-port0` that point at
+ * `dialout` tty nodes. Each is uniformly one group on every mainstream
+ * distribution's udev rules.
  *
  * `/dev/dri` is deliberately absent: its nodes split between `render` and
  * `video`, so a single directory-wide answer would be wrong for half of them.
@@ -897,6 +914,8 @@ export function deviceDirectoryOf(path: string, isNode = false): string {
 export const CONVENTIONAL_DIRECTORY_GROUPS: Readonly<Record<string, string>> = {
   "/dev/snd": "audio",
   "/dev/input": "input",
+  "/dev/serial/by-id": "dialout",
+  "/dev/serial/by-path": "dialout",
 };
 
 /**
@@ -916,8 +935,10 @@ export const CONVENTIONAL_DIRECTORY_GROUPS: Readonly<Record<string, string>> = {
  *
  * - **By node prefix**, for `/dev/dri`, whose nodes split across two groups by
  *   name: `renderD*` is the render node, `card*` the display one. The
- *   directory alone cannot tell them apart.
- * - **By directory**, for `/dev/snd` and `/dev/input`, whose members share no
+ *   directory alone cannot tell them apart. USB serial nodes (`ttyUSB*`,
+ *   `ttyACM*`) sit directly in `/dev`, so they are matched by name too.
+ * - **By directory**, for `/dev/snd`, `/dev/input` and the `/dev/serial`
+ *   link directories, whose members share no
  *   common prefix at all (`seq`, `timer`, `pcmC0D0p`; `event0`, `js0`, `mice`)
  *   yet are uniformly one group each. Enumerating the node names would be a
  *   losing game; the containing directory is the reliable signal.
@@ -934,6 +955,7 @@ export function conventionalDeviceGroup(
 ): string | null {
   if (node.startsWith("renderD")) return "render";
   if (node.startsWith("card")) return "video";
+  if (/^tty(?:USB|ACM)\d+$/.test(node)) return "dialout";
   if (directory !== undefined) {
     const known =
       CONVENTIONAL_DIRECTORY_GROUPS[stripTrailingSlashes(directory)];

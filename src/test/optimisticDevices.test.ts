@@ -289,6 +289,44 @@ describe("ensureRunning — optimistic-device create fallback", () => {
     );
   });
 
+  it("drops only the serial node the host error names in full", async () => {
+    hostStats = {};
+    const { client, calls } = makeClient([
+      () =>
+        Promise.reject(
+          new Error(
+            'error gathering device information while adding custom device "/dev/ttyUSB10": no such file or directory',
+          ),
+        ),
+      () => Promise.resolve(),
+    ]);
+    await ensureRunning(
+      podmanRootlessInContainer,
+      "satellite",
+      {
+        image: "myorg/voice-satellite",
+        tag: "1.0.0",
+        devices: ["/dev/ttyUSB1", "/dev/ttyUSB10"],
+      },
+      () => {},
+      undefined,
+      client,
+    );
+    const created = (calls.get("createContainer") ?? []) as Array<{
+      HostConfig?: { Devices?: Array<{ PathOnHost: string }> };
+      Labels?: Record<string, string>;
+    }>;
+    assert.equal(created.length, 2);
+    assert.deepEqual(
+      created[1].HostConfig?.Devices?.map((d) => d.PathOnHost),
+      ["/dev/ttyUSB1"],
+    );
+    assert.equal(
+      created[1].Labels?.[DEVICES_UNRESOLVED_LABEL],
+      '["/dev/ttyUSB10"]',
+    );
+  });
+
   it("does not fall back on an unrelated start failure", async () => {
     hostStats = {};
     const { client, calls } = makeClient([
@@ -355,6 +393,36 @@ describe("diffContainerConfig — unresolved-label stickiness", () => {
       podmanRootlessInContainer,
     );
     assert.ok(drifted.includes("volumes"));
+  });
+
+  it("keeps a docker-reported serial node it emitted unverified", () => {
+    hostStats = {};
+    const byId = "/dev/serial/by-id/usb-stick-if00-port0";
+    const node = {
+      pathOnHost: byId,
+      pathInContainer: "/dev/zigbee",
+      cgroupPermissions: "rwm",
+    };
+    const serialRequest: ContainerConfig = {
+      image: "myorg/voice-satellite",
+      tag: "1.0.0",
+      devices: [`${byId}:/dev/zigbee`],
+    };
+    assert.ok(
+      !diffContainerConfig(
+        serialRequest,
+        { ...liveOf({}), devices: [node] },
+        dockerInContainer,
+      ).drifted.includes("devices"),
+    );
+    // An unplug still reads as no drift: both sides drop the node.
+    assert.ok(
+      !diffContainerConfig(
+        { ...serialRequest, devices: [] },
+        { ...liveOf({}), devices: [{ ...node, pathOnHost: "/dev/gone0" }] },
+        dockerInContainer,
+      ).drifted.includes("devices"),
+    );
   });
 
   it("resumes drift once the manager can see the labeled path", () => {
