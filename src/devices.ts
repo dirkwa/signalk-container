@@ -86,6 +86,16 @@ export function _setDeviceProbeForTesting(probe: DeviceHostProbe | null): void {
 }
 
 /**
+ * Host paths that can only name a serial device node: the udev
+ * `/dev/serial/by-id|by-path` links and the USB serial nodes. A
+ * containerized manager emits these unverified like the well-known
+ * directories, since a USB stick plugged in after Signal K started is on
+ * the host but not in the Signal K container.
+ */
+const SERIAL_NODE_PATH_RE =
+  /^\/dev\/(?:serial\/by-(?:id|path)\/[^/]+|tty(?:USB|ACM)\d+)$/;
+
+/**
  * Extract the device major from a raw `st_rdev`. Linux packs the major
  * into bits 8–19 (`(rdev >> 8) & 0xfff`); written in arithmetic form
  * because `st_rdev` is not bounded to 32 bits and JS bitwise operators
@@ -315,10 +325,11 @@ export interface ResolvedDeviceRequests {
  * that is a well-known hot-plug directory is then emitted UNVERIFIED
  * (bind + class cgroup rule from `WELL_KNOWN_DIRECTORY_MAJORS` — the
  * exact reason that table exists) and marked `unverified` so the create
- * path can fall back if the real host rejects it. Non-well-known paths
- * stay skipped even when containerized: without a stat there is no way
- * to classify node vs directory, and guessing wrong fails the create on
- * hosts where the device IS present.
+ * path can fall back if the real host rejects it. A serial device path
+ * (`SERIAL_NODE_PATH_RE`) is emitted unverified the same way, as a node.
+ * Other paths stay skipped even when containerized: without a stat there
+ * is no way to classify node vs directory, and guessing wrong fails the
+ * create on hosts where the device IS present.
  */
 export function resolveDeviceRequests(
   devices: readonly string[],
@@ -336,6 +347,24 @@ export function resolveDeviceRequests(
     const canonicalHostPath = stripTrailingSlashes(spec.pathOnHost);
     const st = probe.stat(spec.pathOnHost);
     if (st === null) {
+      if (
+        runtime.isContainerized === true &&
+        SERIAL_NODE_PATH_RE.test(canonicalHostPath)
+      ) {
+        const reason =
+          `Device "${entry}" is not visible from inside the Signal K ` +
+          `container; emitting it unverified — the runtime resolves the ` +
+          `device against the real host, where it may exist`;
+        warn(reason);
+        issues.push({
+          entry,
+          hostPath: canonicalHostPath,
+          disposition: "optimistic",
+          reason,
+        });
+        nodes.push(spec);
+        continue;
+      }
       if (
         runtime.isContainerized === true &&
         WELL_KNOWN_DIRECTORY_MAJORS[canonicalHostPath] !== undefined
