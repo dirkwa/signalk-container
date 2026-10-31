@@ -167,6 +167,14 @@ describe("a recorded serial device that appears on the host", () => {
       assert.ok(probed.includes(BY_ID));
       assert.ok(count(calls, "remove") >= 1, "old container removed");
       assert.ok(count(calls, "createContainer") >= 1, "replacement created");
+      const created = calls.get("createContainer") ?? [];
+      const replacement = created[created.length - 1] as {
+        HostConfig?: { Devices?: Array<{ PathOnHost?: string }> };
+      };
+      assert.ok(
+        replacement.HostConfig?.Devices?.some((d) => d.PathOnHost === BY_ID),
+        "replacement requests the serial device",
+      );
     } finally {
       await shutdown();
     }
