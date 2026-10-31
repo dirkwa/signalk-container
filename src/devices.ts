@@ -118,9 +118,6 @@ export function majorFromRdev(rdev: number): number {
 
 const SERIAL_BY_PATH_DIR = "/dev/serial/by-path/";
 
-/** Stands in for a colon-carrying host path while the rest is parsed. */
-const HOST_PATH_STAND_IN = "/host";
-
 /** One parsed `hostPath[:containerPath[:permissions]]` device entry. */
 export interface DeviceNodeSpec {
   pathOnHost: string;
@@ -184,23 +181,29 @@ export function parseDeviceEntry(entry: string): DeviceNodeSpec {
 }
 
 function parseByPathEntry(entry: string): DeviceNodeSpec {
-  let hostEnd = entry.indexOf(":/");
-  if (hostEnd === -1) {
-    const lastColon = entry.lastIndexOf(":");
-    hostEnd = DEVICE_PERMISSIONS_RE.test(entry.slice(lastColon + 1))
-      ? lastColon
-      : entry.length;
-  }
+  const containerAt = entry.indexOf(":/");
+  const permissionsAt = trailingPermissionsAt(entry);
+  const hostEnd =
+    containerAt !== -1 ? containerAt : (permissionsAt ?? entry.length);
   const pathOnHost = entry.slice(0, hostEnd);
-  const rest = parseDeviceEntry(HOST_PATH_STAND_IN + entry.slice(hostEnd));
-  return {
-    pathOnHost,
-    pathInContainer:
-      rest.pathInContainer === HOST_PATH_STAND_IN
-        ? pathOnHost
-        : rest.pathInContainer,
-    cgroupPermissions: rest.cgroupPermissions,
-  };
+  const cgroupPermissions =
+    permissionsAt === undefined
+      ? DEFAULT_DEVICE_PERMISSIONS
+      : entry.slice(permissionsAt + 1);
+  const pathInContainer =
+    containerAt === -1
+      ? pathOnHost
+      : entry.slice(containerAt + 1, permissionsAt ?? entry.length);
+  return { pathOnHost, pathInContainer, cgroupPermissions };
+}
+
+/** Index of the colon before a trailing permission set, if there is one. */
+function trailingPermissionsAt(entry: string): number | undefined {
+  const lastColon = entry.lastIndexOf(":");
+  return lastColon !== -1 &&
+    DEVICE_PERMISSIONS_RE.test(entry.slice(lastColon + 1))
+    ? lastColon
+    : undefined;
 }
 
 /**
