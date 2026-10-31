@@ -745,9 +745,7 @@ export async function probeHostDevice(
     /** Reads a file on this process's own filesystem. */
     readFile: (p: string) => Promise<string>;
     /** Runs the probe inside a container; null when none can be run. */
-    runInContainer?: (
-      hostPath: string,
-    ) => Promise<{ nodes: string[]; gids: number[]; groupFile: string } | null>;
+    runInContainer?: (hostPath: string) => Promise<ProbeOutput | null>;
     debug?: (msg: string) => void;
   },
 ): Promise<HostDeviceProbeResult | null> {
@@ -786,6 +784,15 @@ export async function probeHostDevice(
     // A local read still beats nothing — the nodes are real even if the names
     // came from the wrong group file.
     return fromLocal?.exists ? fromLocal : null;
+  }
+
+  // The links in /dev/serial/by-id point at nodes the probe does not mount, so
+  // the group owning each node cannot be read here, and the udev convention is
+  // not safe to assume (Arch gives serial nodes to uucp). The names are what a
+  // caller listing devices needs; probing one link mounts its node and reads
+  // its group.
+  if (remote.links !== undefined && remote.links.length > 0) {
+    return { exists: true, nodes: [...remote.links].sort(), groups: [] };
   }
 
   // The probe ran and found nothing: a definite absence, not "could not tell".
@@ -1122,12 +1129,20 @@ export const PROBE_TIMEOUT_MS = 30_000;
  */
 export const PROBE_CACHE_MS = 60_000;
 
+/** What the probe container reported. */
+export interface ProbeOutput {
+  nodes: string[];
+  gids: number[];
+  groupFile: string;
+  /** Link names in a {@link DEVICE_LINK_DIRECTORIES} entry. */
+  links?: string[];
+}
+
 /**
  * Host directories whose entries are symlinks to device nodes elsewhere in
  * `/dev`. Inside the probe container a link like `../../ttyUSB0` points at a
- * path that is not mounted, so it can only be reported by name, and its group
- * comes from {@link CONVENTIONAL_DIRECTORY_GROUPS}. udev removes the link when
- * the device goes, so a link that is there names a device that is plugged in.
+ * path that is not mounted, so it can only be reported by name: the group
+ * owning its node is not readable there.
  */
 export const DEVICE_LINK_DIRECTORIES: ReadonlySet<string> = new Set([
   "/dev/serial/by-id",
@@ -1143,9 +1158,8 @@ export const DEVICE_LINK_DIRECTORIES: ReadonlySet<string> = new Set([
  *   ---                 separator
  *   <contents of /etc/group>
  *
- * `L` entries count only when `hostPath` is one of
- * {@link DEVICE_LINK_DIRECTORIES}; they carry {@link OVERFLOW_GID}, the gid
- * that says "unknown" and lets the directory's conventional group apply.
+ * `L` entries are returned in `links`, and only when `hostPath` is one of
+ * {@link DEVICE_LINK_DIRECTORIES}.
  *
  * The group file is the HOST's, bind-mounted in — a probe image's own
  * /etc/group does not carry the host's gids (Alpine has no gid 44), which
@@ -1154,15 +1168,12 @@ export const DEVICE_LINK_DIRECTORIES: ReadonlySet<string> = new Set([
 export function parseProbeOutput(
   output: string,
   hostPath?: string,
-): {
-  nodes: string[];
-  gids: number[];
-  groupFile: string;
-} {
+): ProbeOutput {
   const [devicePart = "", groupFile = ""] = output.split(/^---$/m, 2);
   const nodes: string[] = [];
   const gids: number[] = [];
-  const links =
+  const links: string[] = [];
+  const keepLinks =
     hostPath !== undefined &&
     DEVICE_LINK_DIRECTORIES.has(stripTrailingSlashes(hostPath));
 
@@ -1171,10 +1182,7 @@ export function parseProbeOutput(
     const link = /^L (\S+)$/.exec(trimmed);
     if (link) {
       const name = link[1];
-      if (links && name !== undefined) {
-        nodes.push(name);
-        gids.push(OVERFLOW_GID);
-      }
+      if (keepLinks && name !== undefined) links.push(name);
       continue;
     }
     const match = /^N (\S+) (\d+)$/.exec(trimmed);
@@ -1186,7 +1194,7 @@ export function parseProbeOutput(
     gids.push(gid);
   }
 
-  return { nodes, gids, groupFile };
+  return { nodes, gids, groupFile, links };
 }
 
 /** One cached probe, keyed by path. Holds the in-flight promise, not a result. */

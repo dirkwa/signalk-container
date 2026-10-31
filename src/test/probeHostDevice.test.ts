@@ -420,14 +420,16 @@ describe("probeHostDevice (containerized)", () => {
     });
   });
 
-  it("lists the sticks in /dev/serial/by-id from a containerized Signal K", async () => {
+  // The links' nodes are not mounted in the probe, so their group is not
+  // knowable there; dialout must not be assumed (Arch uses uucp).
+  it("lists the sticks in /dev/serial/by-id without guessing a group", async () => {
     const result = await probeHostDevice("/dev/serial/by-id", {
       containerized: true,
       ...invisible,
       runInContainer: () =>
         Promise.resolve(
           parseProbeOutput(
-            "L usb-Itead_Sonoff_Zigbee-if00-port0\nL usb-FTDI_GPS-if00-port0\n---\ndialout:x:20:pi\n",
+            "L usb-Itead_Sonoff_Zigbee-if00-port0\nL usb-FTDI_GPS-if00-port0\n---\ndialout:x:20:pi\nuucp:x:14:\n",
             "/dev/serial/by-id",
           ),
         ),
@@ -435,7 +437,7 @@ describe("probeHostDevice (containerized)", () => {
     assert.deepEqual(result, {
       exists: true,
       nodes: ["usb-FTDI_GPS-if00-port0", "usb-Itead_Sonoff_Zigbee-if00-port0"],
-      groups: ["dialout"],
+      groups: [],
     });
   });
 
@@ -1092,11 +1094,11 @@ describe("parseProbeOutput", () => {
       "L usb-Itead_Sonoff_Zigbee-if00-port0\nL usb-FTDI_GPS-if00-port0\n---\n",
       "/dev/serial/by-id/",
     );
-    assert.deepEqual(parsed.nodes, [
+    assert.deepEqual(parsed.links, [
       "usb-Itead_Sonoff_Zigbee-if00-port0",
       "usb-FTDI_GPS-if00-port0",
     ]);
-    assert.deepEqual(parsed.gids, [OVERFLOW_GID, OVERFLOW_GID]);
+    assert.deepEqual(parsed.nodes, []);
   });
 
   it("ignores links in any other directory", () => {
@@ -1105,6 +1107,7 @@ describe("parseProbeOutput", () => {
       "/dev/dri",
     );
     assert.deepEqual(parsed.nodes, ["card0"]);
+    assert.deepEqual(parsed.links, []);
   });
 
   it("ignores noise the shell may have emitted", () => {
