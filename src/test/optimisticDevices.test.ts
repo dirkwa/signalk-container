@@ -455,6 +455,7 @@ describe("unresolvedSerialDeviceAppeared", () => {
     assert.equal(
       await unresolvedSerialDeviceAppeared(
         [byId],
+        [byId],
         podmanRootlessInContainer,
         present,
       ),
@@ -466,6 +467,7 @@ describe("unresolvedSerialDeviceAppeared", () => {
     for (const probe of [absent, () => Promise.resolve(null)]) {
       assert.equal(
         await unresolvedSerialDeviceAppeared(
+          [byId],
           [byId],
           podmanRootlessInContainer,
           probe,
@@ -484,6 +486,7 @@ describe("unresolvedSerialDeviceAppeared", () => {
     assert.equal(
       await unresolvedSerialDeviceAppeared(
         ["/dev/snd"],
+        ["/dev/snd"],
         podmanRootlessInContainer,
         probe,
       ),
@@ -492,12 +495,35 @@ describe("unresolvedSerialDeviceAppeared", () => {
     assert.equal(
       await unresolvedSerialDeviceAppeared(
         [byId],
+        [byId],
         podmanRootlessBareMetal,
         probe,
       ),
       false,
     );
+    // Recorded, but no longer requested: the live devices already match.
+    assert.equal(
+      await unresolvedSerialDeviceAppeared(
+        ["/dev/snd"],
+        [byId],
+        podmanRootlessInContainer,
+        probe,
+      ),
+      false,
+    );
     assert.deepEqual(probed, []);
+  });
+
+  it("matches a requested entry by its host path", async () => {
+    assert.equal(
+      await unresolvedSerialDeviceAppeared(
+        [`${byId}:/dev/zigbee:rw`],
+        [byId],
+        podmanRootlessInContainer,
+        present,
+      ),
+      true,
+    );
   });
 });
 

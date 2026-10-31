@@ -289,11 +289,19 @@ export function parseUnresolvedDevicesLabel(
  * `probeHost` answers for the real host (`probeHostDevice`).
  */
 export async function unresolvedSerialDeviceAppeared(
+  requestedEntries: readonly string[],
   unresolvedHostPaths: readonly string[],
   runtime: ContainerRuntimeInfo,
   probeHost: (hostPath: string) => Promise<HostDeviceProbeResult | null>,
 ): Promise<boolean> {
+  // Throws on a malformed entry, before the caller removes anything.
+  const requested = new Set(
+    requestedEntries.map((e) =>
+      stripTrailingSlashes(parseDeviceEntry(e).pathOnHost),
+    ),
+  );
   for (const hostPath of unresolvedHostPaths) {
+    if (!requested.has(hostPath)) continue;
     if (!isUnverifiedSerialNode(hostPath, runtime)) continue;
     if ((await probeHost(hostPath))?.exists === true) return true;
   }

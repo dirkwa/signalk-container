@@ -28,6 +28,7 @@ import {
   SetupSnippetFormat,
   SetupSnippetResult,
   DeviceIssue,
+  HostDeviceProbeResult,
   UpdateResourcesResult,
   VolumeIssue,
 } from "./types.js";
@@ -337,6 +338,19 @@ export function shouldSurfaceDetectStatus(
   surfaced: SelfDeploymentStatus | null,
 ): boolean {
   return next !== surfaced;
+}
+
+let hostDeviceProbeOverride:
+  ((path: string) => Promise<HostDeviceProbeResult | null>) | null = null;
+
+/**
+ * Test-only override for `probeHostDevice`, which otherwise runs a probe
+ * container against the real host. Pass `null` to restore it.
+ */
+export function _setHostDeviceProbeForTesting(
+  probe: ((path: string) => Promise<HostDeviceProbeResult | null>) | null,
+): void {
+  hostDeviceProbeOverride = probe;
 }
 
 // `DEFAULT_KEEP_IMAGE_VERSIONS` and `normalizeKeepImageVersions` live in
@@ -1238,6 +1252,15 @@ export default (app: App) => {
     ) {
       if (!runtimeInfo) throw new Error("No container runtime available");
 
+      // Fail fast on a malformed digest before any pull or magic-mount
+      // resolution. resolveImage() validates again, but doing it here
+      // produces a cleaner stack for the consumer plugin.
+      if (config.digest !== undefined && !DIGEST_RE.test(config.digest)) {
+        throw new Error(
+          `Invalid digest for ${config.image}: expected sha256:<64-hex>, got ${config.digest}`,
+        );
+      }
+
       // A serial device plugged in after the host rejected it stays
       // excluded from drift (the manager cannot see it), so only a
       // recreate attaches it. The probe runs only while such a device is
@@ -1249,6 +1272,7 @@ export default (app: App) => {
         );
         if (
           await unresolvedSerialDeviceAppeared(
+            config.devices,
             unresolved,
             runtimeInfo,
             async (p) => (await api.probeHostDevice?.(p)) ?? null,
@@ -1256,15 +1280,6 @@ export default (app: App) => {
         ) {
           return api.recreate(name, config, options);
         }
-      }
-
-      // Fail fast on a malformed digest before any pull or magic-mount
-      // resolution. resolveImage() validates again, but doing it here
-      // produces a cleaner stack for the consumer plugin.
-      if (config.digest !== undefined && !DIGEST_RE.test(config.digest)) {
-        throw new Error(
-          `Invalid digest for ${config.image}: expected sha256:<64-hex>, got ${config.digest}`,
-        );
       }
 
       // Propagate the host timezone before any other config shaping so
@@ -2206,6 +2221,7 @@ export default (app: App) => {
     },
 
     async probeHostDevice(path: string) {
+      if (hostDeviceProbeOverride) return hostDeviceProbeOverride(path);
       if (!runtimeInfo) return null;
       const runtime = runtimeInfo;
 
