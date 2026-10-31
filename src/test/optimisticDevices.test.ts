@@ -103,8 +103,14 @@ describe("resolveDeviceRequests — optimistic emission when containerized", () 
   it("emits an unverified node for a serial device it cannot see", () => {
     hostStats = {};
     const byId = "/dev/serial/by-id/usb-Itead_Sonoff_Zigbee-if00-port0";
+    const byPath = "/dev/serial/by-path/pci-0000:01:00.0-usb-0:1:1.0-port0";
     const resolved = resolveDeviceRequests(
-      [`${byId}:/dev/zigbee`, "/dev/ttyUSB0", "/dev/ttyACM1"],
+      [
+        `${byId}:/dev/zigbee`,
+        "/dev/ttyUSB0",
+        "/dev/ttyACM1",
+        `${byPath}:/dev/gps`,
+      ],
       podmanRootlessInContainer,
     );
     assert.deepEqual(
@@ -113,12 +119,13 @@ describe("resolveDeviceRequests — optimistic emission when containerized", () 
         [byId, "/dev/zigbee"],
         ["/dev/ttyUSB0", "/dev/ttyUSB0"],
         ["/dev/ttyACM1", "/dev/ttyACM1"],
+        [byPath, "/dev/gps"],
       ],
     );
     assert.deepEqual(resolved.directoryBinds, []);
     assert.deepEqual(
       resolved.issues.map((i) => i.disposition),
-      ["optimistic", "optimistic", "optimistic"],
+      ["optimistic", "optimistic", "optimistic", "optimistic"],
     );
   });
 

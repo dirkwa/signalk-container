@@ -46,6 +46,31 @@ function fakeProbe(spec: {
 }
 
 describe("parseDeviceEntry", () => {
+  const BY_PATH = "/dev/serial/by-path/pci-0000:01:00.0-usb-0:1:1.0-port0";
+
+  it("keeps the colons of a /dev/serial/by-path name in the host path", () => {
+    assert.deepEqual(parseDeviceEntry(BY_PATH), {
+      pathOnHost: BY_PATH,
+      pathInContainer: BY_PATH,
+      cgroupPermissions: "rwm",
+    });
+    assert.deepEqual(parseDeviceEntry(`${BY_PATH}:/dev/zigbee`), {
+      pathOnHost: BY_PATH,
+      pathInContainer: "/dev/zigbee",
+      cgroupPermissions: "rwm",
+    });
+    assert.deepEqual(parseDeviceEntry(`${BY_PATH}:/dev/zigbee:rw`), {
+      pathOnHost: BY_PATH,
+      pathInContainer: "/dev/zigbee",
+      cgroupPermissions: "rw",
+    });
+    assert.deepEqual(parseDeviceEntry(`${BY_PATH}:rw`), {
+      pathOnHost: BY_PATH,
+      pathInContainer: BY_PATH,
+      cgroupPermissions: "rw",
+    });
+  });
+
   it("defaults containerPath and permissions for a bare path", () => {
     assert.deepEqual(parseDeviceEntry("/dev/ttyUSB0"), {
       pathOnHost: "/dev/ttyUSB0",

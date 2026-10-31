@@ -116,6 +116,11 @@ export function majorFromRdev(rdev: number): number {
   return Math.floor(rdev / 0x100) % 0x1000;
 }
 
+const SERIAL_BY_PATH_DIR = "/dev/serial/by-path/";
+
+/** Stands in for a colon-carrying host path while the rest is parsed. */
+const HOST_PATH_STAND_IN = "/host";
+
 /** One parsed `hostPath[:containerPath[:permissions]]` device entry. */
 export interface DeviceNodeSpec {
   pathOnHost: string;
@@ -131,8 +136,15 @@ export interface DeviceNodeSpec {
  * Throws on malformed input — a bad entry is a consumer-plugin bug and
  * should fail loudly at `ensureRunning` time, unlike a merely-unplugged
  * device (see `resolveDeviceRequests`).
+ *
+ * A `/dev/serial/by-path/` name carries colons of its own
+ * (`pci-0000:01:00.0-usb-0:1:1.0-port0`), so its host path ends only where a
+ * container path (`:/…`) or a trailing permission set begins.
  */
 export function parseDeviceEntry(entry: string): DeviceNodeSpec {
+  if (entry.startsWith(SERIAL_BY_PATH_DIR)) {
+    return parseByPathEntry(entry);
+  }
   const parts = entry.split(":");
   if (parts.length > 3 || parts[0] === "") {
     throw new Error(
@@ -168,6 +180,26 @@ export function parseDeviceEntry(entry: string): DeviceNodeSpec {
     pathOnHost: entry,
     pathInContainer: entry,
     cgroupPermissions: DEFAULT_DEVICE_PERMISSIONS,
+  };
+}
+
+function parseByPathEntry(entry: string): DeviceNodeSpec {
+  let hostEnd = entry.indexOf(":/");
+  if (hostEnd === -1) {
+    const lastColon = entry.lastIndexOf(":");
+    hostEnd = DEVICE_PERMISSIONS_RE.test(entry.slice(lastColon + 1))
+      ? lastColon
+      : entry.length;
+  }
+  const pathOnHost = entry.slice(0, hostEnd);
+  const rest = parseDeviceEntry(HOST_PATH_STAND_IN + entry.slice(hostEnd));
+  return {
+    pathOnHost,
+    pathInContainer:
+      rest.pathInContainer === HOST_PATH_STAND_IN
+        ? pathOnHost
+        : rest.pathInContainer,
+    cgroupPermissions: rest.cgroupPermissions,
   };
 }
 
