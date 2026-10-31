@@ -11,7 +11,7 @@
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import * as path from "node:path";
-import type { HostDeviceProbeResult } from "./types.js";
+import type { ContainerJobResult, HostDeviceProbeResult } from "./types.js";
 import type { ContainerRuntimeInfo } from "./types.js";
 import { isKnownRootful } from "./runtime.js";
 
@@ -1197,6 +1197,45 @@ export function parseProbeOutput(
   }
 
   return { nodes, gids, groupFile, links };
+}
+
+/**
+ * Whether a failed probe job failed because `hostPath` does not exist on the
+ * host. Podman refuses a bind mount whose source is missing (`statfs <path>:
+ * no such file or directory`), and a mount-type bind on Docker says the
+ * source path `does not exist`. That is a definite absence, not "could not
+ * tell": a USB stick that is unplugged has no node and no by-id link.
+ *
+ * The path must appear as a whole token. The probe also mounts `/etc/group`,
+ * so a probe of `/etc` would otherwise read a missing `/etc/group` as its own
+ * absence.
+ */
+export function isMissingProbeSource(
+  error: string | undefined,
+  hostPath: string,
+): boolean {
+  if (error === undefined) return false;
+  if (!/no such file or directory|does not exist/i.test(error)) return false;
+  const escaped = hostPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?:^|[\\s"'])${escaped}(?=$|[\\s"':,])`).test(error);
+}
+
+/**
+ * The probe output of one probe job, or null when the job failed for a
+ * reason that says nothing about the device (a probe image without `sh`, a
+ * timeout), so the next candidate image should be tried.
+ */
+export function probeJobOutput(
+  result: Pick<ContainerJobResult, "status" | "error" | "log">,
+  hostPath: string,
+): ProbeOutput | null {
+  if (result.status !== "completed") {
+    return isMissingProbeSource(result.error, hostPath)
+      ? { nodes: [], gids: [], groupFile: "" }
+      : null;
+  }
+  const parsed = parseProbeOutput(result.log.join("\n"), hostPath);
+  return { ...parsed, nodes: nameSelfMountedNodes(parsed.nodes, hostPath) };
 }
 
 /** One cached probe, keyed by path. Holds the in-flight promise, not a result. */
