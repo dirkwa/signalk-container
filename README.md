@@ -1023,6 +1023,15 @@ Three results, and the difference matters:
 
 Treat `null` as "assume no device, but do not report it as absent".
 
+**Listing USB serial devices.** Probing the directory `/dev/serial/by-id` (or
+`/dev/serial/by-path`) returns its link names in `nodes`, e.g.
+`usb-ITead_Sonoff_Zigbee_3.0_USB_Dongle_Plus_…-if00-port0`, so a plugin can
+find a device by its vendor and product name. udev removes a link when its
+device is unplugged, but probe results are cached for up to a minute, so a
+device unplugged within that time can still be listed. From a containerized
+SignalK `groups` is empty for such a listing: the links point at nodes the
+probe does not mount. Probe the link itself to get the group owning its node.
+
 **Runtime differences.** Docker reads the host's numeric gids and maps them to
 names. Rootless podman cannot — its user namespace does not map them — so the
 probe falls back to the DRM naming convention (`card*` → `video`,
