@@ -420,6 +420,25 @@ describe("probeHostDevice (containerized)", () => {
     });
   });
 
+  it("lists the sticks in /dev/serial/by-id from a containerized Signal K", async () => {
+    const result = await probeHostDevice("/dev/serial/by-id", {
+      containerized: true,
+      ...invisible,
+      runInContainer: () =>
+        Promise.resolve(
+          parseProbeOutput(
+            "L usb-Itead_Sonoff_Zigbee-if00-port0\nL usb-FTDI_GPS-if00-port0\n---\ndialout:x:20:pi\n",
+            "/dev/serial/by-id",
+          ),
+        ),
+    });
+    assert.deepEqual(result, {
+      exists: true,
+      nodes: ["usb-FTDI_GPS-if00-port0", "usb-Itead_Sonoff_Zigbee-if00-port0"],
+      groups: ["dialout"],
+    });
+  });
+
   // A raw marker must resolve identically to the substituted form. Left as
   // "__self__" it matches no udev prefix, and /dev/dri has no directory rule
   // by design, so a resolvable renderD128 would come back as unknown.
@@ -1064,6 +1083,28 @@ describe("parseProbeOutput", () => {
     const parsed = parseProbeOutput(`---\n${GROUP_FILE}`);
     assert.deepEqual(parsed.nodes, []);
     assert.deepEqual(parsed.gids, []);
+  });
+
+  // The links in /dev/serial/by-id point at ../../ttyUSB0, which the probe
+  // container does not mount, so they come back by name only.
+  it("lists the links of a /dev/serial link directory", () => {
+    const parsed = parseProbeOutput(
+      "L usb-Itead_Sonoff_Zigbee-if00-port0\nL usb-FTDI_GPS-if00-port0\n---\n",
+      "/dev/serial/by-id/",
+    );
+    assert.deepEqual(parsed.nodes, [
+      "usb-Itead_Sonoff_Zigbee-if00-port0",
+      "usb-FTDI_GPS-if00-port0",
+    ]);
+    assert.deepEqual(parsed.gids, [OVERFLOW_GID, OVERFLOW_GID]);
+  });
+
+  it("ignores links in any other directory", () => {
+    const parsed = parseProbeOutput(
+      `L by-path\nN card0 ${String(VIDEO_GID)}\n---\n`,
+      "/dev/dri",
+    );
+    assert.deepEqual(parsed.nodes, ["card0"]);
   });
 
   it("ignores noise the shell may have emitted", () => {

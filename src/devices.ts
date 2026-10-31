@@ -1123,18 +1123,38 @@ export const PROBE_TIMEOUT_MS = 30_000;
 export const PROBE_CACHE_MS = 60_000;
 
 /**
+ * Host directories whose entries are symlinks to device nodes elsewhere in
+ * `/dev`. Inside the probe container a link like `../../ttyUSB0` points at a
+ * path that is not mounted, so it can only be reported by name, and its group
+ * comes from {@link CONVENTIONAL_DIRECTORY_GROUPS}. udev removes the link when
+ * the device goes, so a link that is there names a device that is plugged in.
+ */
+export const DEVICE_LINK_DIRECTORIES: ReadonlySet<string> = new Set([
+  "/dev/serial/by-id",
+  "/dev/serial/by-path",
+]);
+
+/**
  * Parse the probe container's stdout.
  *
  * Format, chosen so it can be produced by a plain `sh` in any base image:
  *   N <name> <gid>      one line per character device found
+ *   L <name>            one line per symlink found (target not mounted)
  *   ---                 separator
  *   <contents of /etc/group>
+ *
+ * `L` entries count only when `hostPath` is one of
+ * {@link DEVICE_LINK_DIRECTORIES}; they carry {@link OVERFLOW_GID}, the gid
+ * that says "unknown" and lets the directory's conventional group apply.
  *
  * The group file is the HOST's, bind-mounted in — a probe image's own
  * /etc/group does not carry the host's gids (Alpine has no gid 44), which
  * would report `video` as the bare number "44".
  */
-export function parseProbeOutput(output: string): {
+export function parseProbeOutput(
+  output: string,
+  hostPath?: string,
+): {
   nodes: string[];
   gids: number[];
   groupFile: string;
@@ -1142,9 +1162,22 @@ export function parseProbeOutput(output: string): {
   const [devicePart = "", groupFile = ""] = output.split(/^---$/m, 2);
   const nodes: string[] = [];
   const gids: number[] = [];
+  const links =
+    hostPath !== undefined &&
+    DEVICE_LINK_DIRECTORIES.has(stripTrailingSlashes(hostPath));
 
   for (const line of devicePart.split("\n")) {
-    const match = /^N (\S+) (\d+)$/.exec(line.trim());
+    const trimmed = line.trim();
+    const link = /^L (\S+)$/.exec(trimmed);
+    if (link) {
+      const name = link[1];
+      if (links && name !== undefined) {
+        nodes.push(name);
+        gids.push(OVERFLOW_GID);
+      }
+      continue;
+    }
+    const match = /^N (\S+) (\d+)$/.exec(trimmed);
     if (!match) continue;
     const name = match[1];
     const gid = Number.parseInt(match[2] ?? "", 10);

@@ -2273,8 +2273,12 @@ export default (app: App) => {
                   // the literal marker below, and the caller substitutes the real
                   // device name — putting the path in the shell string instead
                   // would let a device path containing quotes break out of it.
+                  // A symlink (the /dev/serial/by-id entries) points outside
+                  // the mount, so it is reported by name; parseProbeOutput
+                  // keeps those only for the link directories.
                   `if [ -c ${PROBE_MOUNT} ]; then echo "N ${PROBE_SELF_MARKER} $(stat -c %g ${PROBE_MOUNT})"; ` +
-                    `else for f in ${PROBE_MOUNT}/*; do [ -c "$f" ] && echo "N $(basename "$f") $(stat -c %g "$f")"; done; fi; ` +
+                    `else for f in ${PROBE_MOUNT}/*; do if [ -c "$f" ]; then echo "N $(basename "$f") $(stat -c %g "$f")"; ` +
+                    `elif [ -L "$f" ]; then echo "L $(basename "$f")"; fi; done; fi; ` +
                     `echo "---"; cat ${PROBE_GROUP_MOUNT} 2>/dev/null || true`,
                 ],
                 inputs: {
@@ -2293,7 +2297,7 @@ export default (app: App) => {
                 );
                 continue;
               }
-              const parsed = parseProbeOutput(result.log.join("\n"));
+              const parsed = parseProbeOutput(result.log.join("\n"), hostPath);
               return {
                 ...parsed,
                 nodes: nameSelfMountedNodes(parsed.nodes, hostPath),
