@@ -28,6 +28,7 @@ import {
   SetupSnippetFormat,
   SetupSnippetResult,
   DeviceIssue,
+  HostDeviceProbeResult,
   UpdateResourcesResult,
   VolumeIssue,
 } from "./types.js";
@@ -76,6 +77,7 @@ import {
   getContainerState,
   getContainerStateDetail,
   getImageDigest,
+  getLiveContainerConfig,
   getLiveContainerDigest,
   getLiveResources,
   getRepoDigest,
@@ -128,6 +130,9 @@ import {
   PROBE_SELF_MARKER,
   PROBE_TIMEOUT_MS,
   PROBE_CACHE_MS,
+  DEVICES_UNRESOLVED_LABEL,
+  parseUnresolvedDevicesLabel,
+  unresolvedSerialDeviceAppeared,
 } from "./devices.js";
 import { UpdateService } from "./updates/service.js";
 import { FileUpdateCache } from "./updates/cache.js";
@@ -333,6 +338,19 @@ export function shouldSurfaceDetectStatus(
   surfaced: SelfDeploymentStatus | null,
 ): boolean {
   return next !== surfaced;
+}
+
+let hostDeviceProbeOverride:
+  ((path: string) => Promise<HostDeviceProbeResult | null>) | null = null;
+
+/**
+ * Test-only override for `probeHostDevice`, which otherwise runs a probe
+ * container against the real host. Pass `null` to restore it.
+ */
+export function _setHostDeviceProbeForTesting(
+  probe: ((path: string) => Promise<HostDeviceProbeResult | null>) | null,
+): void {
+  hostDeviceProbeOverride = probe;
 }
 
 // `DEFAULT_KEEP_IMAGE_VERSIONS` and `normalizeKeepImageVersions` live in
@@ -1241,6 +1259,27 @@ export default (app: App) => {
         throw new Error(
           `Invalid digest for ${config.image}: expected sha256:<64-hex>, got ${config.digest}`,
         );
+      }
+
+      // A serial device plugged in after the host rejected it stays
+      // excluded from drift (the manager cannot see it), so only a
+      // recreate attaches it. The probe runs only while such a device is
+      // recorded on the live container.
+      if (runtimeInfo.isContainerized === true && config.devices?.length) {
+        const live = await getLiveContainerConfig(runtimeInfo, name);
+        const unresolved = parseUnresolvedDevicesLabel(
+          live?.labels[DEVICES_UNRESOLVED_LABEL],
+        );
+        if (
+          await unresolvedSerialDeviceAppeared(
+            config.devices,
+            unresolved,
+            runtimeInfo,
+            async (p) => (await api.probeHostDevice?.(p)) ?? null,
+          )
+        ) {
+          return api.recreate(name, config, options);
+        }
       }
 
       // Propagate the host timezone before any other config shaping so
@@ -2182,6 +2221,7 @@ export default (app: App) => {
     },
 
     async probeHostDevice(path: string) {
+      if (hostDeviceProbeOverride) return hostDeviceProbeOverride(path);
       if (!runtimeInfo) return null;
       const runtime = runtimeInfo;
 

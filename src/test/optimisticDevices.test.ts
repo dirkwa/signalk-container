@@ -10,6 +10,7 @@ import {
   filterUnresolvedDeviceEntries,
   parseUnresolvedDevicesLabel,
   resolveDeviceRequests,
+  unresolvedSerialDeviceAppeared,
   _setDeviceProbeForTesting,
   _setEtcGroupReaderForTesting,
   type DeviceStatResult,
@@ -440,6 +441,89 @@ describe("diffContainerConfig — unresolved-label stickiness", () => {
       podmanRootlessInContainer,
     );
     assert.ok(drifted.includes("volumes"));
+  });
+});
+
+describe("unresolvedSerialDeviceAppeared", () => {
+  const byId = "/dev/serial/by-id/usb-stick-if00-port0";
+  const present = () =>
+    Promise.resolve({ exists: true, nodes: ["x"], groups: ["dialout"] });
+  const absent = () =>
+    Promise.resolve({ exists: false, nodes: [], groups: [] });
+
+  it("reports a rejected serial device the host now has", async () => {
+    assert.equal(
+      await unresolvedSerialDeviceAppeared(
+        [byId],
+        [byId],
+        podmanRootlessInContainer,
+        present,
+      ),
+      true,
+    );
+  });
+
+  it("stays quiet while the host still lacks it or cannot tell", async () => {
+    for (const probe of [absent, () => Promise.resolve(null)]) {
+      assert.equal(
+        await unresolvedSerialDeviceAppeared(
+          [byId],
+          [byId],
+          podmanRootlessInContainer,
+          probe,
+        ),
+        false,
+      );
+    }
+  });
+
+  it("probes only serial devices, and only when containerized", async () => {
+    const probed: string[] = [];
+    const probe = (p: string) => {
+      probed.push(p);
+      return present();
+    };
+    assert.equal(
+      await unresolvedSerialDeviceAppeared(
+        ["/dev/snd"],
+        ["/dev/snd"],
+        podmanRootlessInContainer,
+        probe,
+      ),
+      false,
+    );
+    assert.equal(
+      await unresolvedSerialDeviceAppeared(
+        [byId],
+        [byId],
+        podmanRootlessBareMetal,
+        probe,
+      ),
+      false,
+    );
+    // Recorded, but no longer requested: the live devices already match.
+    assert.equal(
+      await unresolvedSerialDeviceAppeared(
+        ["/dev/snd"],
+        [byId],
+        podmanRootlessInContainer,
+        probe,
+      ),
+      false,
+    );
+    assert.deepEqual(probed, []);
+  });
+
+  it("matches a requested entry by its host path", async () => {
+    assert.equal(
+      await unresolvedSerialDeviceAppeared(
+        [`${byId}:/dev/zigbee:rw`],
+        [byId],
+        podmanRootlessInContainer,
+        present,
+      ),
+      true,
+    );
   });
 });
 
