@@ -122,12 +122,10 @@ import { runJob, cleanupOrphanedJobs } from "./jobs.js";
 import type { ProbeCacheEntry } from "./devices.js";
 import {
   probeHostDevice,
-  parseProbeOutput,
-  isMissingProbeSource,
+  probeJobOutput,
   PROBE_MOUNT,
   PROBE_GROUP_MOUNT,
   cachedProbe,
-  nameSelfMountedNodes,
   PROBE_SELF_MARKER,
   PROBE_TIMEOUT_MS,
   PROBE_CACHE_MS,
@@ -2292,20 +2290,11 @@ export default (app: App) => {
                 // must never hang the plugin that asked.
                 signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
               });
-              if (result.status !== "completed") {
-                if (isMissingProbeSource(result.error, hostPath)) {
-                  return { nodes: [], gids: [], groupFile: "" };
-                }
-                app.debug(
-                  `probeHostDevice: probe with ${image} failed: ${result.error ?? "unknown"}`,
-                );
-                continue;
-              }
-              const parsed = parseProbeOutput(result.log.join("\n"), hostPath);
-              return {
-                ...parsed,
-                nodes: nameSelfMountedNodes(parsed.nodes, hostPath),
-              };
+              const output = probeJobOutput(result, hostPath);
+              if (output) return output;
+              app.debug(
+                `probeHostDevice: probe with ${image} failed: ${result.error ?? "unknown"}`,
+              );
             }
             return null;
           },

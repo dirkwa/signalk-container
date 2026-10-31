@@ -4,6 +4,7 @@ import {
   parseGroupNames,
   parseProbeOutput,
   isMissingProbeSource,
+  probeJobOutput,
   probeHostDevice,
   PROBE_SELF_MARKER,
   nameSelfMountedNodes,
@@ -1162,11 +1163,67 @@ describe("isMissingProbeSource", () => {
     );
   });
 
+  // The probe mounts /etc/group too, so a missing /etc/group must not make
+  // an existing /etc look absent.
+  it("matches the probed path only as a whole path", () => {
+    assert.equal(
+      isMissingProbeSource(
+        "statfs /etc/group: no such file or directory",
+        "/etc",
+      ),
+      false,
+    );
+    assert.equal(
+      isMissingProbeSource(
+        `statfs ${link}-port1: no such file or directory`,
+        link,
+      ),
+      false,
+    );
+  });
+
   it("ignores other failures and no error at all", () => {
     assert.equal(
       isMissingProbeSource(`permission denied: ${link}`, link),
       false,
     );
     assert.equal(isMissingProbeSource(undefined, link), false);
+  });
+});
+
+describe("probeHostDevice with a failed probe job", () => {
+  const link = "/dev/serial/by-id/usb-Itead_Sonoff_Zigbee-if00-port0";
+  const invisible = {
+    readDir: () => Promise.reject(new Error("ENOENT")),
+    statPath: () => Promise.reject(new Error("ENOENT")),
+    readFile: () => Promise.resolve(""),
+  };
+  const failingWith =
+    (error: string) =>
+    (hostPath: string): ReturnType<typeof probeJobOutput> =>
+      probeJobOutput({ status: "failed", error, log: [] }, hostPath);
+
+  it("reports an unplugged stick as absent in a container", async () => {
+    const result = await probeHostDevice(link, {
+      containerized: true,
+      ...invisible,
+      runInContainer: (p) =>
+        Promise.resolve(
+          failingWith(
+            `(HTTP code 500) server error - statfs ${p}: no such file or directory`,
+          )(p),
+        ),
+    });
+    assert.deepEqual(result, { exists: false, nodes: [], groups: [] });
+  });
+
+  it("stays unknown when the job failed for another reason", async () => {
+    const result = await probeHostDevice(link, {
+      containerized: true,
+      ...invisible,
+      runInContainer: (p) =>
+        Promise.resolve(failingWith("exec: sh: not found")(p)),
+    });
+    assert.equal(result, null);
   });
 });
