@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   parseGroupNames,
   parseProbeOutput,
+  isMissingProbeSource,
   probeHostDevice,
   PROBE_SELF_MARKER,
   nameSelfMountedNodes,
@@ -1123,5 +1124,49 @@ describe("parseProbeOutput", () => {
       `sh: glob failed\nN card0 ${String(VIDEO_GID)}\n---\n`,
     );
     assert.deepEqual(parsed.nodes, ["card0"]);
+  });
+});
+
+describe("isMissingProbeSource", () => {
+  const link = "/dev/serial/by-id/usb-Itead_Sonoff_Zigbee-if00-port0";
+
+  it("reads podman's missing bind source as absent", () => {
+    assert.equal(
+      isMissingProbeSource(
+        `(HTTP code 500) server error - statfs ${link}: no such file or directory`,
+        link,
+      ),
+      true,
+    );
+  });
+
+  it("reads Docker's missing mount source as absent", () => {
+    assert.equal(
+      isMissingProbeSource(
+        `invalid mount config for type "bind": bind source path does not exist: ${link}`,
+        link,
+      ),
+      true,
+    );
+  });
+
+  // Only the probed path counts: a missing image or another mount is not
+  // evidence that the device is gone.
+  it("ignores a missing path other than the probed one", () => {
+    assert.equal(
+      isMissingProbeSource(
+        "statfs /etc/group: no such file or directory",
+        link,
+      ),
+      false,
+    );
+  });
+
+  it("ignores other failures and no error at all", () => {
+    assert.equal(
+      isMissingProbeSource(`permission denied: ${link}`, link),
+      false,
+    );
+    assert.equal(isMissingProbeSource(undefined, link), false);
   });
 });

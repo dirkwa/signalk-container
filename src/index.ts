@@ -123,6 +123,7 @@ import type { ProbeCacheEntry } from "./devices.js";
 import {
   probeHostDevice,
   parseProbeOutput,
+  isMissingProbeSource,
   PROBE_MOUNT,
   PROBE_GROUP_MOUNT,
   cachedProbe,
@@ -2292,6 +2293,9 @@ export default (app: App) => {
                 signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
               });
               if (result.status !== "completed") {
+                if (isMissingProbeSource(result.error, hostPath)) {
+                  return { nodes: [], gids: [], groupFile: "" };
+                }
                 app.debug(
                   `probeHostDevice: probe with ${image} failed: ${result.error ?? "unknown"}`,
                 );

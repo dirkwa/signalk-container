@@ -1199,6 +1199,21 @@ export function parseProbeOutput(
   return { nodes, gids, groupFile, links };
 }
 
+/**
+ * Whether a failed probe job failed because `hostPath` does not exist on the
+ * host. Podman refuses a bind mount whose source is missing (`statfs <path>:
+ * no such file or directory`), and a mount-type bind on Docker says the
+ * source path `does not exist`. That is a definite absence, not "could not
+ * tell": a USB stick that is unplugged has no node and no by-id link.
+ */
+export function isMissingProbeSource(
+  error: string | undefined,
+  hostPath: string,
+): boolean {
+  if (error === undefined || !error.includes(hostPath)) return false;
+  return /no such file or directory|does not exist/i.test(error);
+}
+
 /** One cached probe, keyed by path. Holds the in-flight promise, not a result. */
 export interface ProbeCacheEntry {
   at: number;
