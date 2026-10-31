@@ -1101,6 +1101,14 @@ describe("parseProbeOutput", () => {
     assert.deepEqual(parsed.nodes, []);
   });
 
+  it("recognises another spelling of a link directory", () => {
+    const parsed = parseProbeOutput(
+      "L usb-FTDI_GPS-if00-port0\n---\n",
+      "/dev/serial//by-id/.",
+    );
+    assert.deepEqual(parsed.links, ["usb-FTDI_GPS-if00-port0"]);
+  });
+
   it("ignores links in any other directory", () => {
     const parsed = parseProbeOutput(
       `L by-path\nN card0 ${String(VIDEO_GID)}\n---\n`,

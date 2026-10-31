@@ -864,9 +864,17 @@ export type ContainerJobStatus =
 export interface HostDeviceProbeResult {
   /** The path exists on the host and holds at least one device node. */
   exists: boolean;
-  /** Device node names found there, sorted. */
+  /**
+   * Device node names found there, sorted. For `/dev/serial/by-id` or
+   * `/dev/serial/by-path` from a containerized Signal K: the link names.
+   */
   nodes: string[];
-  /** Host group names owning them, sorted; numeric gid when unnamed. */
+  /**
+   * Host group names owning them, sorted; numeric gid when unnamed. Empty
+   * for a `/dev/serial` link listing from a containerized Signal K, where the
+   * owning groups are unknown: do not pass that to `groupAdd`, probe the link
+   * itself for its group.
+   */
   groups: string[];
 }
 

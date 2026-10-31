@@ -1175,7 +1175,9 @@ export function parseProbeOutput(
   const links: string[] = [];
   const keepLinks =
     hostPath !== undefined &&
-    DEVICE_LINK_DIRECTORIES.has(stripTrailingSlashes(hostPath));
+    DEVICE_LINK_DIRECTORIES.has(
+      stripTrailingSlashes(path.posix.normalize(hostPath)),
+    );
 
   for (const line of devicePart.split("\n")) {
     const trimmed = line.trim();
