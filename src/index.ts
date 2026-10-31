@@ -76,6 +76,7 @@ import {
   getContainerState,
   getContainerStateDetail,
   getImageDigest,
+  getLiveContainerConfig,
   getLiveContainerDigest,
   getLiveResources,
   getRepoDigest,
@@ -128,6 +129,9 @@ import {
   PROBE_SELF_MARKER,
   PROBE_TIMEOUT_MS,
   PROBE_CACHE_MS,
+  DEVICES_UNRESOLVED_LABEL,
+  parseUnresolvedDevicesLabel,
+  unresolvedSerialDeviceAppeared,
 } from "./devices.js";
 import { UpdateService } from "./updates/service.js";
 import { FileUpdateCache } from "./updates/cache.js";
@@ -1233,6 +1237,26 @@ export default (app: App) => {
       options?: EnsureRunningOptions,
     ) {
       if (!runtimeInfo) throw new Error("No container runtime available");
+
+      // A serial device plugged in after the host rejected it stays
+      // excluded from drift (the manager cannot see it), so only a
+      // recreate attaches it. The probe runs only while such a device is
+      // recorded on the live container.
+      if (runtimeInfo.isContainerized === true && config.devices?.length) {
+        const live = await getLiveContainerConfig(runtimeInfo, name);
+        const unresolved = parseUnresolvedDevicesLabel(
+          live?.labels[DEVICES_UNRESOLVED_LABEL],
+        );
+        if (
+          await unresolvedSerialDeviceAppeared(
+            unresolved,
+            runtimeInfo,
+            async (p) => (await api.probeHostDevice?.(p)) ?? null,
+          )
+        ) {
+          return api.recreate(name, config, options);
+        }
+      }
 
       // Fail fast on a malformed digest before any pull or magic-mount
       // resolution. resolveImage() validates again, but doing it here

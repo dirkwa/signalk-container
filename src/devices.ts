@@ -282,6 +282,25 @@ export function parseUnresolvedDevicesLabel(
 }
 
 /**
+ * Whether a serial device the host rejected at create time has appeared on
+ * the host since. A containerized manager cannot see it locally, so
+ * `filterUnresolvedDeviceEntries` would keep it excluded and the container
+ * would never get it; the caller recreates the container instead.
+ * `probeHost` answers for the real host (`probeHostDevice`).
+ */
+export async function unresolvedSerialDeviceAppeared(
+  unresolvedHostPaths: readonly string[],
+  runtime: ContainerRuntimeInfo,
+  probeHost: (hostPath: string) => Promise<HostDeviceProbeResult | null>,
+): Promise<boolean> {
+  for (const hostPath of unresolvedHostPaths) {
+    if (!isUnverifiedSerialNode(hostPath, runtime)) continue;
+    if ((await probeHost(hostPath))?.exists === true) return true;
+  }
+  return false;
+}
+
+/**
  * Drop device entries recorded as unresolved on the live container — but
  * only while the manager STILL cannot see the host path. The moment the
  * path becomes visible (device plugged in and the path mounted into a
