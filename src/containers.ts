@@ -2319,7 +2319,7 @@ export function diffContainerConfig(
     devicesDrift =
       !sortedStringArraysEqual(
         canonicalDeviceKeys(requestedDevices.nodes),
-        canonicalDeviceKeys(presentLiveDeviceNodes(live.devices)),
+        canonicalDeviceKeys(presentLiveDeviceNodes(live.devices, runtime)),
       ) ||
       !sortedStringArraysEqual(
         requestedDevices.cgroupRules,
@@ -3648,7 +3648,7 @@ export async function ensureRunning(
           ? unverified.filter(
               (i) =>
                 !unresolvedPaths.includes(i.hostPath) &&
-                rawError.includes(i.hostPath),
+                namesHostPath(rawError, i.hostPath),
             )
           : [];
         if (rejected.length > 0) {
@@ -3754,6 +3754,20 @@ export async function ensureRunning(
  * the fallback.
  */
 const MISSING_HOST_PATH_RE = /no such file or directory|does not exist/i;
+
+/**
+ * Whether runtime error text names `hostPath` as a whole path, so a
+ * rejected `/dev/ttyUSB10` is not taken for `/dev/ttyUSB1`.
+ */
+function namesHostPath(rawError: string, hostPath: string): boolean {
+  let at = rawError.indexOf(hostPath);
+  while (at !== -1) {
+    const next = rawError.charAt(at + hostPath.length);
+    if (!/[\w./-]/.test(next)) return true;
+    at = rawError.indexOf(hostPath, at + 1);
+  }
+  return false;
+}
 
 /**
  * Rejection texts name the limit they refused (crun spells it

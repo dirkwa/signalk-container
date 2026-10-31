@@ -86,6 +86,27 @@ export function _setDeviceProbeForTesting(probe: DeviceHostProbe | null): void {
 }
 
 /**
+ * Host paths that can only name a serial device node: the udev
+ * `/dev/serial/by-id|by-path` links and the USB serial nodes. A
+ * containerized manager emits these unverified like the well-known
+ * directories, since a USB stick plugged in after Signal K started is on
+ * the host but not in the Signal K container.
+ */
+const SERIAL_NODE_PATH_RE =
+  /^\/dev\/(?:serial\/by-(?:id|path)\/[^/]+|tty(?:USB|ACM)\d+)$/;
+
+/** Whether a containerized manager emits `hostPath` unverified as a node. */
+function isUnverifiedSerialNode(
+  hostPath: string,
+  runtime: ContainerRuntimeInfo,
+): boolean {
+  return (
+    runtime.isContainerized === true &&
+    SERIAL_NODE_PATH_RE.test(stripTrailingSlashes(hostPath))
+  );
+}
+
+/**
  * Extract the device major from a raw `st_rdev`. Linux packs the major
  * into bits 8–19 (`(rdev >> 8) & 0xfff`); written in arithmetic form
  * because `st_rdev` is not bounded to 32 bits and JS bitwise operators
@@ -94,6 +115,8 @@ export function _setDeviceProbeForTesting(probe: DeviceHostProbe | null): void {
 export function majorFromRdev(rdev: number): number {
   return Math.floor(rdev / 0x100) % 0x1000;
 }
+
+const SERIAL_BY_PATH_DIR = "/dev/serial/by-path/";
 
 /** One parsed `hostPath[:containerPath[:permissions]]` device entry. */
 export interface DeviceNodeSpec {
@@ -110,8 +133,15 @@ export interface DeviceNodeSpec {
  * Throws on malformed input — a bad entry is a consumer-plugin bug and
  * should fail loudly at `ensureRunning` time, unlike a merely-unplugged
  * device (see `resolveDeviceRequests`).
+ *
+ * A `/dev/serial/by-path/` name carries colons of its own
+ * (`pci-0000:01:00.0-usb-0:1:1.0-port0`), so its host path ends only where a
+ * container path (`:/…`) or a trailing permission set begins.
  */
 export function parseDeviceEntry(entry: string): DeviceNodeSpec {
+  if (entry.startsWith(SERIAL_BY_PATH_DIR)) {
+    return parseByPathEntry(entry);
+  }
   const parts = entry.split(":");
   if (parts.length > 3 || parts[0] === "") {
     throw new Error(
@@ -148,6 +178,32 @@ export function parseDeviceEntry(entry: string): DeviceNodeSpec {
     pathInContainer: entry,
     cgroupPermissions: DEFAULT_DEVICE_PERMISSIONS,
   };
+}
+
+function parseByPathEntry(entry: string): DeviceNodeSpec {
+  const containerAt = entry.indexOf(":/");
+  const permissionsAt = trailingPermissionsAt(entry);
+  const hostEnd =
+    containerAt !== -1 ? containerAt : (permissionsAt ?? entry.length);
+  const pathOnHost = entry.slice(0, hostEnd);
+  const cgroupPermissions =
+    permissionsAt === undefined
+      ? DEFAULT_DEVICE_PERMISSIONS
+      : entry.slice(permissionsAt + 1);
+  const pathInContainer =
+    containerAt === -1
+      ? pathOnHost
+      : entry.slice(containerAt + 1, permissionsAt ?? entry.length);
+  return { pathOnHost, pathInContainer, cgroupPermissions };
+}
+
+/** Index of the colon before a trailing permission set, if there is one. */
+function trailingPermissionsAt(entry: string): number | undefined {
+  const lastColon = entry.lastIndexOf(":");
+  return lastColon !== -1 &&
+    DEVICE_PERMISSIONS_RE.test(entry.slice(lastColon + 1))
+    ? lastColon
+    : undefined;
 }
 
 /**
@@ -263,13 +319,20 @@ export function filterUnresolvedDeviceEntries(
  * requested side. Filtering the live side by the same probe restores the
  * symmetry the podman branch gets for free (both its sides are
  * host-probed). Only node devices are subject to this; directory-device
- * binds compare through volumes and are unaffected.
+ * binds compare through volumes and are unaffected. A serial node a
+ * containerized manager emits unverified is kept: the requested side carries
+ * it without a stat, so dropping it here would read as drift on every call.
  */
 export function presentLiveDeviceNodes(
   liveNodes: readonly DeviceNodeSpec[],
+  runtime: ContainerRuntimeInfo,
   probe: DeviceHostProbe = currentDeviceProbe,
 ): DeviceNodeSpec[] {
-  return liveNodes.filter((n) => probe.stat(n.pathOnHost) !== null);
+  return liveNodes.filter(
+    (n) =>
+      isUnverifiedSerialNode(n.pathOnHost, runtime) ||
+      probe.stat(n.pathOnHost) !== null,
+  );
 }
 
 /**
@@ -315,10 +378,11 @@ export interface ResolvedDeviceRequests {
  * that is a well-known hot-plug directory is then emitted UNVERIFIED
  * (bind + class cgroup rule from `WELL_KNOWN_DIRECTORY_MAJORS` — the
  * exact reason that table exists) and marked `unverified` so the create
- * path can fall back if the real host rejects it. Non-well-known paths
- * stay skipped even when containerized: without a stat there is no way
- * to classify node vs directory, and guessing wrong fails the create on
- * hosts where the device IS present.
+ * path can fall back if the real host rejects it. A serial device path
+ * (`SERIAL_NODE_PATH_RE`) is emitted unverified the same way, as a node.
+ * Other paths stay skipped even when containerized: without a stat there
+ * is no way to classify node vs directory, and guessing wrong fails the
+ * create on hosts where the device IS present.
  */
 export function resolveDeviceRequests(
   devices: readonly string[],
@@ -336,6 +400,21 @@ export function resolveDeviceRequests(
     const canonicalHostPath = stripTrailingSlashes(spec.pathOnHost);
     const st = probe.stat(spec.pathOnHost);
     if (st === null) {
+      if (isUnverifiedSerialNode(canonicalHostPath, runtime)) {
+        const reason =
+          `Device "${entry}" is not visible from inside the Signal K ` +
+          `container; emitting it unverified — the runtime resolves the ` +
+          `device against the real host, where it may exist`;
+        warn(reason);
+        issues.push({
+          entry,
+          hostPath: canonicalHostPath,
+          disposition: "optimistic",
+          reason,
+        });
+        nodes.push(spec);
+        continue;
+      }
       if (
         runtime.isContainerized === true &&
         WELL_KNOWN_DIRECTORY_MAJORS[canonicalHostPath] !== undefined
@@ -859,8 +938,10 @@ export function deviceDirectoryOf(path: string, isNode = false): string {
  *
  * Unlike `/dev/dri`, these have no usable node-name prefix — `/dev/snd` holds
  * `seq`, `timer`, `pcmC0D0p`; `/dev/input` holds `event0`, `js0`, `mice` — so
- * the class is keyed off the directory instead. Both are uniformly one group
- * on every mainstream distribution's udev rules.
+ * the class is keyed off the directory instead. The `/dev/serial` link
+ * directories hold names like `usb-Itead_Sonoff_…-if00-port0` that point at
+ * `dialout` tty nodes. Each is uniformly one group on every mainstream
+ * distribution's udev rules.
  *
  * `/dev/dri` is deliberately absent: its nodes split between `render` and
  * `video`, so a single directory-wide answer would be wrong for half of them.
@@ -868,6 +949,8 @@ export function deviceDirectoryOf(path: string, isNode = false): string {
 export const CONVENTIONAL_DIRECTORY_GROUPS: Readonly<Record<string, string>> = {
   "/dev/snd": "audio",
   "/dev/input": "input",
+  "/dev/serial/by-id": "dialout",
+  "/dev/serial/by-path": "dialout",
 };
 
 /**
@@ -887,8 +970,10 @@ export const CONVENTIONAL_DIRECTORY_GROUPS: Readonly<Record<string, string>> = {
  *
  * - **By node prefix**, for `/dev/dri`, whose nodes split across two groups by
  *   name: `renderD*` is the render node, `card*` the display one. The
- *   directory alone cannot tell them apart.
- * - **By directory**, for `/dev/snd` and `/dev/input`, whose members share no
+ *   directory alone cannot tell them apart. USB serial nodes (`ttyUSB*`,
+ *   `ttyACM*`) sit directly in `/dev`, so they are matched by name too.
+ * - **By directory**, for `/dev/snd`, `/dev/input` and the `/dev/serial`
+ *   link directories, whose members share no
  *   common prefix at all (`seq`, `timer`, `pcmC0D0p`; `event0`, `js0`, `mice`)
  *   yet are uniformly one group each. Enumerating the node names would be a
  *   losing game; the containing directory is the reliable signal.
@@ -905,6 +990,7 @@ export function conventionalDeviceGroup(
 ): string | null {
   if (node.startsWith("renderD")) return "render";
   if (node.startsWith("card")) return "video";
+  if (/^tty(?:USB|ACM)\d+$/.test(node)) return "dialout";
   if (directory !== undefined) {
     const known =
       CONVENTIONAL_DIRECTORY_GROUPS[stripTrailingSlashes(directory)];

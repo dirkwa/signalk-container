@@ -100,15 +100,57 @@ describe("resolveDeviceRequests — optimistic emission when containerized", () 
     assert.equal(resolved.issues[0].disposition, "skipped");
   });
 
-  it("still skips a non-well-known path even when containerized", () => {
+  it("emits an unverified node for a serial device it cannot see", () => {
+    hostStats = {};
+    const byId = "/dev/serial/by-id/usb-Itead_Sonoff_Zigbee-if00-port0";
+    const byPath = "/dev/serial/by-path/pci-0000:01:00.0-usb-0:1:1.0-port0";
+    const resolved = resolveDeviceRequests(
+      [
+        `${byId}:/dev/zigbee`,
+        "/dev/ttyUSB0",
+        "/dev/ttyACM1",
+        `${byPath}:/dev/gps`,
+      ],
+      podmanRootlessInContainer,
+    );
+    assert.deepEqual(
+      resolved.nodes.map((n) => [n.pathOnHost, n.pathInContainer]),
+      [
+        [byId, "/dev/zigbee"],
+        ["/dev/ttyUSB0", "/dev/ttyUSB0"],
+        ["/dev/ttyACM1", "/dev/ttyACM1"],
+        [byPath, "/dev/gps"],
+      ],
+    );
+    assert.deepEqual(resolved.directoryBinds, []);
+    assert.deepEqual(
+      resolved.issues.map((i) => i.disposition),
+      ["optimistic", "optimistic", "optimistic", "optimistic"],
+    );
+  });
+
+  it("still skips a missing serial device on a bare-metal manager", () => {
     hostStats = {};
     const resolved = resolveDeviceRequests(
       ["/dev/ttyUSB0"],
+      podmanRootlessBareMetal,
+    );
+    assert.deepEqual(resolved.nodes, []);
+    assert.equal(resolved.issues[0].disposition, "skipped");
+  });
+
+  it("still skips any other path even when containerized", () => {
+    hostStats = {};
+    const resolved = resolveDeviceRequests(
+      ["/dev/i2c-1", "/dev/serial/by-id", "/dev/ttyUSB"],
       podmanRootlessInContainer,
     );
     assert.deepEqual(resolved.nodes, []);
     assert.deepEqual(resolved.directoryBinds, []);
-    assert.equal(resolved.issues[0].disposition, "skipped");
+    assert.deepEqual(
+      resolved.issues.map((i) => i.disposition),
+      ["skipped", "skipped", "skipped"],
+    );
   });
 });
 
@@ -213,6 +255,85 @@ describe("ensureRunning — optimistic-device create fallback", () => {
     assert.equal(events[1].hostPath, "/dev/snd");
   });
 
+  it("drops an unverified serial node the host rejects", async () => {
+    hostStats = {};
+    const byId = "/dev/serial/by-id/usb-stick-if00-port0";
+    const { client, calls } = makeClient([
+      () =>
+        Promise.reject(
+          new Error(
+            `error gathering device information while adding custom device "${byId}": no such file or directory`,
+          ),
+        ),
+      () => Promise.resolve(),
+    ]);
+    const events: DeviceIssue[] = [];
+    await ensureRunning(
+      podmanRootlessInContainer,
+      "satellite",
+      { image: "myorg/voice-satellite", tag: "1.0.0", devices: [byId] },
+      () => {},
+      { onDeviceIssue: (e) => void events.push(e) },
+      client,
+    );
+    const created = (calls.get("createContainer") ?? []) as Array<{
+      HostConfig?: { Devices?: Array<{ PathOnHost: string }> };
+      Labels?: Record<string, string>;
+    }>;
+    assert.equal(created.length, 2);
+    assert.deepEqual(
+      created[0].HostConfig?.Devices?.map((d) => d.PathOnHost),
+      [byId],
+    );
+    assert.deepEqual(created[1].HostConfig?.Devices ?? [], []);
+    assert.equal(
+      created[1].Labels?.[DEVICES_UNRESOLVED_LABEL],
+      JSON.stringify([byId]),
+    );
+    assert.deepEqual(
+      events.map((e) => e.action),
+      ["optimistic", "unresolved"],
+    );
+  });
+
+  it("drops only the serial node the host error names in full", async () => {
+    hostStats = {};
+    const { client, calls } = makeClient([
+      () =>
+        Promise.reject(
+          new Error(
+            'error gathering device information while adding custom device "/dev/ttyUSB10": no such file or directory',
+          ),
+        ),
+      () => Promise.resolve(),
+    ]);
+    await ensureRunning(
+      podmanRootlessInContainer,
+      "satellite",
+      {
+        image: "myorg/voice-satellite",
+        tag: "1.0.0",
+        devices: ["/dev/ttyUSB1", "/dev/ttyUSB10"],
+      },
+      () => {},
+      undefined,
+      client,
+    );
+    const created = (calls.get("createContainer") ?? []) as Array<{
+      HostConfig?: { Devices?: Array<{ PathOnHost: string }> };
+      Labels?: Record<string, string>;
+    }>;
+    assert.equal(created.length, 2);
+    assert.deepEqual(
+      created[1].HostConfig?.Devices?.map((d) => d.PathOnHost),
+      ["/dev/ttyUSB1"],
+    );
+    assert.equal(
+      created[1].Labels?.[DEVICES_UNRESOLVED_LABEL],
+      '["/dev/ttyUSB10"]',
+    );
+  });
+
   it("does not fall back on an unrelated start failure", async () => {
     hostStats = {};
     const { client, calls } = makeClient([
@@ -279,6 +400,36 @@ describe("diffContainerConfig — unresolved-label stickiness", () => {
       podmanRootlessInContainer,
     );
     assert.ok(drifted.includes("volumes"));
+  });
+
+  it("keeps a docker-reported serial node it emitted unverified", () => {
+    hostStats = {};
+    const byId = "/dev/serial/by-id/usb-stick-if00-port0";
+    const node = {
+      pathOnHost: byId,
+      pathInContainer: "/dev/zigbee",
+      cgroupPermissions: "rwm",
+    };
+    const serialRequest: ContainerConfig = {
+      image: "myorg/voice-satellite",
+      tag: "1.0.0",
+      devices: [`${byId}:/dev/zigbee`],
+    };
+    assert.ok(
+      !diffContainerConfig(
+        serialRequest,
+        { ...liveOf({}), devices: [node] },
+        dockerInContainer,
+      ).drifted.includes("devices"),
+    );
+    // An unplug still reads as no drift: both sides drop the node.
+    assert.ok(
+      !diffContainerConfig(
+        { ...serialRequest, devices: [] },
+        { ...liveOf({}), devices: [{ ...node, pathOnHost: "/dev/gone0" }] },
+        dockerInContainer,
+      ).drifted.includes("devices"),
+    );
   });
 
   it("resumes drift once the manager can see the labeled path", () => {

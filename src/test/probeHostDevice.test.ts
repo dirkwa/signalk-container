@@ -399,6 +399,27 @@ describe("probeHostDevice (containerized)", () => {
     });
   });
 
+  // Rootless podman remaps every gid, and a /dev/serial/by-id link name has no
+  // udev prefix, so only the directory names its class.
+  it("resolves a remapped /dev/serial/by-id node to dialout", async () => {
+    const byId = "usb-Itead_Sonoff_Zigbee-if00-port0";
+    const result = await probeHostDevice(`/dev/serial/by-id/${byId}`, {
+      containerized: true,
+      ...invisible,
+      runInContainer: () =>
+        Promise.resolve({
+          nodes: [byId],
+          gids: [OVERFLOW_GID],
+          groupFile: "dialout:x:20:pi\n",
+        }),
+    });
+    assert.deepEqual(result, {
+      exists: true,
+      nodes: [byId],
+      groups: ["dialout"],
+    });
+  });
+
   // A raw marker must resolve identically to the substituted form. Left as
   // "__self__" it matches no udev prefix, and /dev/dri has no directory rule
   // by design, so a resolvable renderD128 would come back as unknown.
@@ -694,6 +715,23 @@ describe("conventionalDeviceGroup", () => {
     assert.equal(conventionalDeviceGroup("mice", "/dev/input"), "input");
   });
 
+  it("resolves USB serial nodes to dialout", () => {
+    assert.equal(conventionalDeviceGroup("ttyUSB0"), "dialout");
+    assert.equal(conventionalDeviceGroup("ttyACM12"), "dialout");
+    assert.equal(
+      conventionalDeviceGroup("usb-stick-if00-port0", "/dev/serial/by-id"),
+      "dialout",
+    );
+    assert.equal(
+      conventionalDeviceGroup(
+        "pci-0000:01:00.0-usb-0:1:1.0",
+        "/dev/serial/by-path",
+      ),
+      "dialout",
+    );
+    assert.equal(conventionalDeviceGroup("ttyS0"), null);
+  });
+
   it("tolerates a trailing slash on the directory", () => {
     assert.equal(conventionalDeviceGroup("seq", "/dev/snd/"), "audio");
   });
@@ -709,7 +747,7 @@ describe("conventionalDeviceGroup", () => {
   });
 
   it("returns null for an unknown directory", () => {
-    assert.equal(conventionalDeviceGroup("ttyUSB0", "/dev/serial"), null);
+    assert.equal(conventionalDeviceGroup("ttyS0", "/dev/serial"), null);
     assert.equal(conventionalDeviceGroup("seq"), null);
   });
 });
