@@ -42,8 +42,12 @@ export interface InternetStateApp {
   getPluginsList?: () => Promise<Array<{ id: string; enabled?: boolean }>>;
 }
 
-/** What ended a wait for a state. */
-type WakeReason = "change" | "timeout" | "abort" | "stop";
+/**
+ * What ended a wait for a state: `clamped` is a timer that ran out before
+ * a deadline too far for one, and `listed` the plugin list having been read.
+ */
+type WakeReason =
+  "change" | "timeout" | "clamped" | "abort" | "stop" | "listed";
 
 export class InternetState {
   private value: unknown = undefined;
@@ -51,7 +55,7 @@ export class InternetState {
   private waiters = new Set<(reason: WakeReason) => void>();
   // Bumped by every stop(), so a check that awaited across one stops waiting.
   private generation = 0;
-  // Nothing wakes a wait while stopped, so a check then does not wait.
+  // Nothing wakes a wait while stopped, so a check then waits for no state.
   private started = false;
 
   constructor(private readonly app: InternetStateApp) {}
@@ -99,7 +103,9 @@ export class InternetState {
    * instead, up to `waitMs` from the call, until `signal` aborts, or until
    * this stops. The null signalk-internet publishes when it stops or
    * restarts does not end the wait: the list is asked again, and a
-   * disabled plugin then means unrestricted.
+   * disabled plugin then means unrestricted. The wait bounds a list still
+   * pending too, since the server waits for every plugin's `schema()` to
+   * build it.
    */
   async isRestricted({
     waitMs = 0,
@@ -110,17 +116,23 @@ export class InternetState {
     for (;;) {
       const known = this.restricted();
       if (known !== null) return known;
-      const publisherEnabled = await this.publisherEnabled();
+      if (waitMs > 0 && signal?.aborted) return true;
+      const listing = this.publisherEnabled();
+      if (waitMs > 0) {
+        const woke = await this.waitFor(deadline, signal, listing);
+        if (woke === "change" || woke === "clamped") continue;
+        if (woke !== "listed") return this.restricted() ?? true;
+      }
+      const publisherEnabled = await listing;
       // A state that came in while the list was read is the answer.
       const arrived = this.restricted();
       if (arrived !== null) return arrived;
       if (!publisherEnabled) return false;
       if (generation !== this.generation || !this.started) return true;
-      const remaining = deadline - performance.now();
-      const woke = await this.waitForState(remaining, signal);
-      // A wait longer than one timer allows runs on past that timer.
-      const clamped = woke === "timeout" && remaining > MAX_TIMER_MS;
-      if (woke !== "change" && !clamped) return this.restricted() ?? true;
+      const woke = await this.waitFor(deadline, signal);
+      if (woke !== "change" && woke !== "clamped") {
+        return this.restricted() ?? true;
+      }
     }
   }
 
@@ -131,9 +143,18 @@ export class InternetState {
       : null;
   }
 
-  private waitForState(ms: number, signal?: AbortSignal): Promise<WakeReason> {
+  /** Waits for a state, or for `listed` to settle, until `deadline`. */
+  private waitFor(
+    deadline: number,
+    signal?: AbortSignal,
+    listed?: Promise<unknown>,
+  ): Promise<WakeReason> {
     if (signal?.aborted) return Promise.resolve("abort");
-    if (ms <= 0) return Promise.resolve("timeout");
+    const ms = deadline - performance.now();
+    // The server builds the list partly before it returns the promise, which
+    // can run past a short deadline; a list that then settles at once still
+    // answers, as a timer only runs after it.
+    if (ms <= 0 && !listed) return Promise.resolve("timeout");
     return new Promise((resolve) => {
       const done = (reason: WakeReason) => {
         clearTimeout(timer);
@@ -142,12 +163,14 @@ export class InternetState {
         resolve(reason);
       };
       const onAbort = () => done("abort");
+      const onListed = () => done("listed");
       const timer = setTimeout(
-        () => done("timeout"),
-        Math.min(ms, MAX_TIMER_MS),
+        () => done(ms > MAX_TIMER_MS ? "clamped" : "timeout"),
+        Math.min(Math.max(ms, 0), MAX_TIMER_MS),
       );
       signal?.addEventListener("abort", onAbort, { once: true });
       this.waiters.add(done);
+      listed?.then(onListed, onListed);
     });
   }
 

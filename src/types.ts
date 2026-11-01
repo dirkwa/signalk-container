@@ -2094,12 +2094,17 @@ export interface InternetCheckOptions {
    * How long, in ms from the call, to wait for the first state of an
    * enabled signalk-internet that has published none yet, as right after
    * startup or after it restarts. Default 0: such a link counts as
-   * restricted at once.
+   * restricted at once. A positive `waitMs` bounds reading the server's
+   * plugin list too: a list still pending when the wait runs out also
+   * counts as restricted, while one that settles at once is read even
+   * where building it took longer. Without one, the check waits for the
+   * list.
    */
   waitMs?: number;
   /**
    * Ends the wait early, as signalk-container stopping does; the link then
-   * counts as restricted.
+   * counts as restricted. Only a positive `waitMs` waits, so without one
+   * there is nothing for it to end.
    */
   signal?: AbortSignal;
 }
@@ -2111,7 +2116,8 @@ export interface InternetApi {
    * signalk-internet reports `network.internet.state` as `metered`,
    * `offline` or `captive`, and while an enabled signalk-internet has
    * published no state (after `waitMs`). False when it reports `online`,
-   * and without signalk-internet enabled, except where signalk-internet
+   * and without signalk-internet enabled (with a positive `waitMs`, once
+   * the plugin list is read within it), except where signalk-internet
    * 0.7.1 or older was disabled: it leaves its last state behind until the
    * server restarts.
    */

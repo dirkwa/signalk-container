@@ -299,27 +299,115 @@ describe("InternetState", () => {
     assert.ok(Date.now() - t0 < 2500);
   });
 
-  it("counts reading the plugin list towards the wait", async () => {
+  // Fails, rather than hangs, a check that waits for the list regardless.
+  const HUNG_LIST_TIMEOUT_MS = 10_000;
+
+  /** A state whose plugin list never answers, as behind a hung schema(). */
+  const withHungList = () => {
+    const server = fakeServer(undefined);
+    const state = started({
+      ...server.app,
+      getPluginsList: () => new Promise(() => {}),
+    });
+    return { server, state };
+  };
+
+  it(
+    "gives up on a plugin list slower than the wait",
+    { timeout: HUNG_LIST_TIMEOUT_MS },
+    async () => {
+      const { state } = withHungList();
+      const t0 = Date.now();
+      assert.equal(await state.isRestricted({ waitMs: 50 }), true);
+      assert.ok(Date.now() - t0 < 2500);
+    },
+  );
+
+  it(
+    "takes a state that comes in while a slow plugin list is read",
+    { timeout: HUNG_LIST_TIMEOUT_MS },
+    async () => {
+      const { server, state } = withHungList();
+      const t0 = Date.now();
+      const answer = state.isRestricted({ waitMs: 5000 });
+      setTimeout(() => server.publish("online"), 20);
+      assert.equal(await answer, false);
+      assert.ok(Date.now() - t0 < 2500);
+    },
+  );
+
+  it(
+    "ends a slow plugin list read on abort or stop",
+    { timeout: HUNG_LIST_TIMEOUT_MS },
+    async () => {
+      const { state } = withHungList();
+      const t0 = Date.now();
+      const abort = new AbortController();
+      const aborted = state.isRestricted({
+        waitMs: 5000,
+        signal: abort.signal,
+      });
+      setTimeout(() => abort.abort(), 20);
+      assert.equal(await aborted, true);
+
+      const stopped = state.isRestricted({ waitMs: 5000 });
+      setTimeout(() => state.stop(), 20);
+      assert.equal(await stopped, true);
+      assert.ok(Date.now() - t0 < 2500);
+    },
+  );
+
+  it("counts the time the plugin list takes towards the wait", async () => {
     const { app } = fakeServer(undefined);
     const list = app.getPluginsList!;
-    let answerList: () => void = () => {};
-    const listRead = new Promise<void>((resolve) => (answerList = resolve));
     const state = started({
       ...app,
       getPluginsList: async () => {
-        await listRead;
+        await new Promise((resolve) => setTimeout(resolve, 900));
         return list();
       },
     });
-    const answer = state.isRestricted({ waitMs: 50 });
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    answerList();
-    // The wait ran out while the list was read, so no timer is left to run.
-    const pending = new Promise((resolve) =>
-      setImmediate(() => resolve("pending")),
-    );
-    assert.equal(await Promise.race([answer, pending]), true);
+    const t0 = Date.now();
+    assert.equal(await state.isRestricted({ waitMs: 1000 }), true);
+    // A wait counted from the end of the list would run to about 1900 ms.
+    assert.ok(Date.now() - t0 < 1500);
   });
+
+  it("lets a plugin list that answers at once win over a short wait", async () => {
+    const { app } = fakeServer(undefined, { enabled: false });
+    const list = app.getPluginsList!;
+    const state = started({
+      ...app,
+      getPluginsList: () => {
+        // The synchronous part of the server's list outlasts the wait.
+        const until = Date.now() + 30;
+        while (Date.now() < until);
+        return list();
+      },
+    });
+    assert.equal(await state.isRestricted({ waitMs: 10 }), false);
+  });
+
+  it(
+    "reads the plugin list again after a null during a slow read",
+    { timeout: HUNG_LIST_TIMEOUT_MS },
+    async () => {
+      const server = fakeServer(undefined);
+      let reads = 0;
+      const state = started({
+        ...server.app,
+        getPluginsList: () =>
+          reads++ === 0
+            ? new Promise(() => {})
+            : Promise.resolve([{ id: INTERNET_PLUGIN_ID, enabled: false }]),
+      });
+      const t0 = Date.now();
+      const answer = state.isRestricted({ waitMs: 5000 });
+      setTimeout(() => server.publish(null), 20);
+      assert.equal(await answer, false);
+      assert.ok(Date.now() - t0 < 2500);
+    },
+  );
 
   it("takes a state that came in while the plugin list was read", async () => {
     for (const [enabled, value, restricted] of [
