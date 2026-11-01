@@ -7,7 +7,7 @@ import containerManagerPlugin from "../index.js";
 import { _setClientForTesting } from "../client.js";
 import { requestedResourcesLabel } from "../namespace.js";
 import { _setDetectRuntimeForTesting } from "../runtime.js";
-import { makeMockClient } from "./helpers/mockClient.js";
+import { hostEnv, makeMockClient } from "./helpers/mockClient.js";
 import type {
   ContainerConfig,
   ContainerManagerApi,
@@ -64,7 +64,7 @@ async function bootPlugin(live: Live): Promise<{
               State: { Status: "running", Running: true, Pid: 4242 },
               Config: {
                 Image: `${IMAGE}:${TAG}`,
-                Env: [],
+                Env: hostEnv(),
                 Labels: {
                   [requestedResourcesLabel()]: JSON.stringify(live.createdWith),
                 },
@@ -160,6 +160,9 @@ describe("a runtime-injected oomScoreAdj", () => {
       await api.ensureRunning(NAME, CONFIG);
       await api.ensureRunning(NAME, CONFIG);
       assert.equal(count(calls, "createContainer"), 0, "no recreate");
+      // This mock still reports the container after a remove, so only the
+      // remove tells that a recreate was attempted.
+      assert.equal(count(calls, "remove"), 0, "no recreate");
       assert.equal(count(calls, "update"), 0);
       assert.deepEqual(errors, []);
     } finally {

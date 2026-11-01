@@ -15,7 +15,7 @@ import {
   InternetState,
   type InternetStateApp,
 } from "../internetState.js";
-import { makeMockClient } from "./helpers/mockClient.js";
+import { hostEnv, makeMockClient } from "./helpers/mockClient.js";
 import type {
   ContainerManagerApi,
   ContainerRuntimeInfo,
@@ -210,7 +210,7 @@ describe("floating-tag auto-update on a restricted uplink", () => {
                 // thing ensureRunning has left to do.
                 Config: {
                   Image: `${IMAGE}:${TAG}`,
-                  Env: [],
+                  Env: hostEnv(),
                   Labels: {},
                   User: "1000:1000",
                 },

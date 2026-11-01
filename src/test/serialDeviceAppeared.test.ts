@@ -11,6 +11,7 @@ import { _setDetectRuntimeForTesting } from "../runtime.js";
 import { DEVICES_UNRESOLVED_LABEL } from "../devices.js";
 import {
   HTTP_NOT_FOUND,
+  hostEnv,
   httpError,
   makeMockClient,
   type MockContainerBehaviour,
@@ -54,7 +55,11 @@ function behaviourFor(c: FakeContainer): MockContainerBehaviour {
       c.exists
         ? Promise.resolve({
             State: { Status: "running", Running: true, Pid: 4242 },
-            Config: { Image: `${IMAGE}:${TAG}`, Env: [], Labels: c.labels },
+            Config: {
+              Image: `${IMAGE}:${TAG}`,
+              Env: hostEnv(),
+              Labels: c.labels,
+            },
             HostConfig: { NetworkMode: "bridge" },
             Mounts: [],
           })

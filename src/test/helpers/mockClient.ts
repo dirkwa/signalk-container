@@ -7,8 +7,21 @@
  */
 import { PassThrough } from "node:stream";
 import type { ContainerClient } from "../../client.js";
+import { defaultTimezoneEnv, resolveHostTimezone } from "../../containers.js";
 
 type Json = Record<string, unknown>;
+
+/**
+ * The `Config.Env` of a container signalk-container created on this host:
+ * `TZ` set to the host's zone, or empty on a UTC host such as a CI runner.
+ * A mock of a running container that should match a request made through
+ * the plugin API needs it: the API defaults `TZ` to the host zone, so an
+ * empty `Env` reads as env drift on any host outside UTC.
+ */
+export function hostEnv(): string[] {
+  const env = defaultTimezoneEnv(undefined, resolveHostTimezone()) ?? {};
+  return Object.entries(env).map(([key, value]) => `${key}=${value}`);
+}
 
 export interface MockContainerBehaviour {
   inspect?: Json | (() => Promise<Json>) | Error;
