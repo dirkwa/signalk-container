@@ -1212,6 +1212,17 @@ When network comes back, the next scheduled check (or a manual one) just succeed
 
 Scheduled checks also stay off the network while [signalk-internet](https://github.com/meri-imperiumi/signalk-internet) reports `network.internet.state` as `metered`, `offline` or `captive`. A floating-tag check pulls the image to compare digests, which on a per-gigabyte satellite plan costs real money. The deferred check looks again every 15 minutes and runs once the state is back to `online`. A manual check from the config panel always runs. The state comes from one subscription to that path, kept from start to stop. Releases of signalk-internet after 0.7.1 publish `null` when the plugin is disabled, so its last state does not keep holding the checks; 0.7.1 and older leave that state behind until the server restarts. Without the plugin the checks run as configured. Right after startup, and after signalk-internet restarts, background checks and floating-tag update probes wait until an enabled signalk-internet has published a state. Pulling an image that is not on the host yet is never held back: the container cannot start without it.
 
+A consumer that downloads something on its own, such as a check for a newer image of its own, can ask the same view with `containers.internet.isRestricted()` (1.38.0+). While an enabled signalk-internet has not published yet, as right after startup, the answer is `true`; pass `waitMs` to wait that long for its first state, and an `AbortSignal` as `signal` to end the wait when the plugin stops:
+
+```typescript
+// undefined before 1.38.0, where the link cannot be told: hold back too
+const restricted =
+  (await containers.internet?.isRestricted({ waitMs: 60_000, signal })) ?? true;
+if (restricted) return; // try again at the next start
+```
+
+Before 1.38.0 the API is missing and the example holds back too, since it cannot tell a metered link from a free one; the check then runs once signalk-container is updated.
+
 The persistent cache lives at `${app.getDataDirPath()}/updates-cache.json` and survives Signal K restarts. A boat that powers up mid-ocean still sees the last-known-good check rather than "unknown".
 
 ### Auto-unregister on persistent real errors

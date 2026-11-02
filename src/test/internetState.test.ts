@@ -1,5 +1,6 @@
 import { describe, it, afterEach, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { getEventListeners } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -158,6 +159,276 @@ describe("InternetState", () => {
     );
   });
 
+  it("waits for the first state of an enabled signalk-internet", async () => {
+    const server = fakeServer(undefined);
+    const state = started(server.app);
+    const t0 = Date.now();
+    const answer = state.isRestricted({ waitMs: 5000 });
+    setTimeout(() => server.publish("online"), 20);
+    assert.equal(await answer, false);
+    // Woken by the state, not by the end of the wait.
+    assert.ok(Date.now() - t0 < 2500);
+  });
+
+  it("holds back when no state comes within the wait", async () => {
+    const state = started(fakeServer(undefined).app);
+    const t0 = Date.now();
+    assert.equal(await state.isRestricted({ waitMs: 50 }), true);
+    assert.ok(Date.now() - t0 >= 40);
+  });
+
+  it("keeps waiting through the null of a restart", async () => {
+    const server = fakeServer(undefined);
+    const state = started(server.app);
+    const t0 = Date.now();
+    const answer = state.isRestricted({ waitMs: 5000 });
+    setTimeout(() => server.publish(null), 20);
+    setTimeout(() => server.publish("online"), 40);
+    assert.equal(await answer, false);
+    assert.ok(Date.now() - t0 < 2500);
+  });
+
+  it("lets traffic through once signalk-internet is disabled during the wait", async () => {
+    const plugin = { enabled: true };
+    const server = fakeServer(undefined, plugin);
+    const state = started(server.app);
+    const t0 = Date.now();
+    const answer = state.isRestricted({ waitMs: 5000 });
+    setTimeout(() => {
+      plugin.enabled = false;
+      server.publish(null);
+    }, 20);
+    assert.equal(await answer, false);
+    assert.ok(Date.now() - t0 < 2500);
+  });
+
+  it("stops waiting when it stops while the plugin list is read", async () => {
+    const server = fakeServer(undefined);
+    const list = server.app.getPluginsList!;
+    const state: InternetState = started({
+      ...server.app,
+      getPluginsList: async () => {
+        state.stop();
+        return list();
+      },
+    });
+    const t0 = Date.now();
+    assert.equal(await state.isRestricted({ waitMs: 5000 }), true);
+    assert.ok(Date.now() - t0 < 2500);
+  });
+
+  it("waits past the largest timer delay", async () => {
+    const state = started(fakeServer(undefined).app);
+    const abort = new AbortController();
+    const answer = state.isRestricted({
+      waitMs: Infinity,
+      signal: abort.signal,
+    });
+    const pending = new Promise((resolve) =>
+      setTimeout(() => resolve("pending"), 30),
+    );
+    assert.equal(await Promise.race([answer, pending]), "pending");
+    abort.abort();
+    assert.equal(await answer, true);
+  });
+
+  it("holds back at once when the signal aborts or the plugin stops", async () => {
+    const state = started(fakeServer(undefined).app);
+    const t0 = Date.now();
+
+    const aborted = new AbortController();
+    aborted.abort();
+    assert.equal(
+      await state.isRestricted({ waitMs: 5000, signal: aborted.signal }),
+      true,
+    );
+
+    const abort = new AbortController();
+    const answer = state.isRestricted({ waitMs: 5000, signal: abort.signal });
+    setTimeout(() => abort.abort(), 20);
+    assert.equal(await answer, true);
+
+    const stopped = state.isRestricted({ waitMs: 5000 });
+    setTimeout(() => state.stop(), 20);
+    assert.equal(await stopped, true);
+
+    assert.ok(Date.now() - t0 < 2500);
+  });
+
+  it("does not wait while stopped, with nothing to wake it", async () => {
+    const state = started(fakeServer(undefined).app);
+    state.stop();
+    const t0 = Date.now();
+    assert.equal(await state.isRestricted({ waitMs: 5000 }), true);
+    assert.ok(Date.now() - t0 < 2500);
+  });
+
+  it("leaves no abort listener or timer behind", async () => {
+    const timers = () =>
+      process.getActiveResourcesInfo().filter((r) => r === "Timeout").length;
+    const before = timers();
+    const server = fakeServer(undefined);
+    const state = started(server.app);
+    const abort = new AbortController();
+    const signal = abort.signal;
+
+    const changed = state.isRestricted({ waitMs: 60_000, signal });
+    await new Promise((resolve) => setImmediate(resolve));
+    server.publish("online");
+    assert.equal(await changed, false);
+
+    server.publish(null);
+    const stopped = state.isRestricted({ waitMs: 60_000, signal });
+    await new Promise((resolve) => setImmediate(resolve));
+    state.stop();
+    assert.equal(await stopped, true);
+
+    assert.equal(getEventListeners(signal, "abort").length, 0);
+    // Fewer where an earlier test's timer fired meanwhile.
+    assert.ok(timers() <= before);
+  });
+
+  it("does not wait without signalk-internet enabled", async () => {
+    const t0 = Date.now();
+    assert.equal(
+      await started(fakeServer(undefined, { enabled: false }).app).isRestricted(
+        { waitMs: 5000 },
+      ),
+      false,
+    );
+    assert.ok(Date.now() - t0 < 2500);
+  });
+
+  // Fails, rather than hangs, a check that waits for the list regardless.
+  const HUNG_LIST_TIMEOUT_MS = 10_000;
+
+  /** A state whose plugin list never answers, as behind a hung schema(). */
+  const withHungList = () => {
+    const server = fakeServer(undefined);
+    const state = started({
+      ...server.app,
+      getPluginsList: () => new Promise(() => {}),
+    });
+    return { server, state };
+  };
+
+  it(
+    "gives up on a plugin list slower than the wait",
+    { timeout: HUNG_LIST_TIMEOUT_MS },
+    async () => {
+      const { state } = withHungList();
+      const t0 = Date.now();
+      assert.equal(await state.isRestricted({ waitMs: 50 }), true);
+      assert.ok(Date.now() - t0 < 2500);
+    },
+  );
+
+  it(
+    "takes a state that comes in while a slow plugin list is read",
+    { timeout: HUNG_LIST_TIMEOUT_MS },
+    async () => {
+      const { server, state } = withHungList();
+      const t0 = Date.now();
+      const answer = state.isRestricted({ waitMs: 5000 });
+      setTimeout(() => server.publish("online"), 20);
+      assert.equal(await answer, false);
+      assert.ok(Date.now() - t0 < 2500);
+    },
+  );
+
+  it(
+    "ends a slow plugin list read on abort or stop",
+    { timeout: HUNG_LIST_TIMEOUT_MS },
+    async () => {
+      const { state } = withHungList();
+      const t0 = Date.now();
+      const abort = new AbortController();
+      const aborted = state.isRestricted({
+        waitMs: 5000,
+        signal: abort.signal,
+      });
+      setTimeout(() => abort.abort(), 20);
+      assert.equal(await aborted, true);
+
+      const stopped = state.isRestricted({ waitMs: 5000 });
+      setTimeout(() => state.stop(), 20);
+      assert.equal(await stopped, true);
+      assert.ok(Date.now() - t0 < 2500);
+    },
+  );
+
+  it("counts the time the plugin list takes towards the wait", async () => {
+    const { app } = fakeServer(undefined);
+    const list = app.getPluginsList!;
+    const state = started({
+      ...app,
+      getPluginsList: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 900));
+        return list();
+      },
+    });
+    const t0 = Date.now();
+    assert.equal(await state.isRestricted({ waitMs: 1000 }), true);
+    // A wait counted from the end of the list would run to about 1900 ms.
+    assert.ok(Date.now() - t0 < 1500);
+  });
+
+  it("lets a plugin list that answers at once win over a short wait", async () => {
+    const { app } = fakeServer(undefined, { enabled: false });
+    const list = app.getPluginsList!;
+    const state = started({
+      ...app,
+      getPluginsList: () => {
+        // The synchronous part of the server's list outlasts the wait.
+        const until = Date.now() + 30;
+        while (Date.now() < until);
+        return list();
+      },
+    });
+    assert.equal(await state.isRestricted({ waitMs: 10 }), false);
+  });
+
+  it(
+    "reads the plugin list again after a null during a slow read",
+    { timeout: HUNG_LIST_TIMEOUT_MS },
+    async () => {
+      const server = fakeServer(undefined);
+      let reads = 0;
+      const state = started({
+        ...server.app,
+        getPluginsList: () =>
+          reads++ === 0
+            ? new Promise(() => {})
+            : Promise.resolve([{ id: INTERNET_PLUGIN_ID, enabled: false }]),
+      });
+      const t0 = Date.now();
+      const answer = state.isRestricted({ waitMs: 5000 });
+      setTimeout(() => server.publish(null), 20);
+      assert.equal(await answer, false);
+      assert.ok(Date.now() - t0 < 2500);
+    },
+  );
+
+  it("takes a state that came in while the plugin list was read", async () => {
+    for (const [enabled, value, restricted] of [
+      [true, "online", false],
+      [false, "metered", true],
+    ] as const) {
+      const server = fakeServer(undefined, { enabled });
+      const list = server.app.getPluginsList!;
+      const state = started({
+        ...server.app,
+        getPluginsList: async () => {
+          server.publish(value);
+          return list();
+        },
+      });
+      const t0 = Date.now();
+      assert.equal(await state.isRestricted({ waitMs: 5000 }), restricted);
+      assert.ok(Date.now() - t0 < 2500);
+    }
+  });
+
   it("unsubscribes and forgets the state on stop", async () => {
     const server = fakeServer("metered", null);
     const state = started(server.app);
@@ -274,5 +545,49 @@ describe("floating-tag auto-update on a restricted uplink", () => {
 
   it("pulls once signalk-internet clears its state on stop", async () => {
     assert.equal(await pullsOnStart(["metered", null], { enabled: false }), 1);
+  });
+});
+
+describe("the internet API", () => {
+  afterEach(() => {
+    _setDetectRuntimeForTesting(null);
+    _setClientForTesting(null);
+  });
+
+  it("answers from signalk-internet's state", async () => {
+    _setClientForTesting(makeMockClient({}));
+    _setDetectRuntimeForTesting(() => Promise.resolve(RUNTIME));
+    const dataDir = mkdtempSync(join(tmpdir(), "skc-internet-api-"));
+    const noop = () => {};
+    const server = fakeServer(undefined);
+    const plugin = containerManagerPlugin({
+      debug: noop,
+      error: noop,
+      setPluginStatus: noop,
+      setPluginError: noop,
+      getDataDirPath: () => dataDir,
+      config: { configPath: dataDir },
+      subscriptionmanager: server.app.subscriptionmanager,
+      getPluginsList: server.app.getPluginsList,
+    });
+    plugin.start({ backgroundUpdateChecks: false } as PluginConfig);
+    const api = (
+      globalThis as { __signalk_containerManager?: ContainerManagerApi }
+    ).__signalk_containerManager;
+    try {
+      if (!api) throw new Error("plugin did not expose containerManager API");
+      assert.equal(await api.internet.isRestricted(), true);
+      // The wait reaches the plugin's state: without it the answer is true.
+      const t0 = Date.now();
+      const answer = api.internet.isRestricted({ waitMs: 5000 });
+      setTimeout(() => server.publish("online"), 20);
+      assert.equal(await answer, false);
+      assert.ok(Date.now() - t0 < 2500);
+      server.publish("metered");
+      assert.equal(await api.internet.isRestricted(), true);
+    } finally {
+      if (plugin.stop) await plugin.stop();
+      rmSync(dataDir, { recursive: true, force: true });
+    }
   });
 });

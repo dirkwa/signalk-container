@@ -950,6 +950,7 @@ See [doc/plugin-developer-guide.md](doc/plugin-developer-guide.md) for the full 
 | `doctor.imageRunsAsUser(image, user?)`          | Probe whether `image` runs cleanly under the host-UID mapping signalk-container will emit (1.8.0+). Never throws — returns `{ ok, output, error? }`                                                                                                                                                                  |
 | `doctor.selfDeployment()`                       | Diagnose the Signal K deployment itself: socket resolution, daemon reachability, rootless/rootful detection, and (when containerised) self-container ID. Returns `{ status, remediation, ... }` — see `SelfDeploymentResult` in `src/types.ts`                                                                       |
 | `doctor.generateSetupSnippet(format?, result?)` | Generate a ready-to-paste compose fragment (`format: "compose"`, default) or `podman/docker run` command (`format: "run"`) tailored to the detected runtime — wires up the socket bind-mount. Pure templating over `SelfDeploymentResult`; includes a `dockerfile` note (no image change needed) and operator notes. |
+| `internet.isRestricted(options?)`               | Whether a download nobody asked for should wait, as signalk-internet reports the uplink: `true` while `metered`, `offline` or `captive`, or while an enabled signalk-internet has not published yet; `options.waitMs` waits that long for its first state, `options.signal` ends the wait (1.38.0+)                  |
 
 ## REST Endpoints
 

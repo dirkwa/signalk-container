@@ -2796,6 +2796,10 @@ export default (app: App) => {
     get doctor(): DoctorApi {
       return runtimeInfo ? liveDoctor : stubDoctor;
     },
+
+    internet: {
+      isRestricted: (options) => internetState.isRestricted(options),
+    },
   };
 
   const liveDoctor: DoctorApi = {
