@@ -859,6 +859,10 @@ All three fields participate in config-drift detection — adding, removing, or 
 
 The sections below are for plugin authors integrating with signalk-container. End users deploying the plugin do not need them.
 
+Sandbox execution is not available yet. The internal policy and bounded-output
+foundation, plus the remaining execution requirements, are documented in
+[Sandbox job implementation](doc/sandbox-jobs.md).
+
 ## How Other Plugins Use It
 
 ```typescript

@@ -2232,3 +2232,15 @@ export type {
   GithubReleasesSourceOptions,
   DockerHubTagsSourceOptions,
 };
+
+/** Internal preparation contract; not an executable ContainerManagerApi method. */
+export interface SandboxJobRequest {
+  /** Trusted consumer identity for namespace-scoped cleanup. */
+  ownerPluginId: string;
+  /** Locally installed, fully qualified image@sha256 digest. */
+  image: string;
+  /** Trusted fixed runner executable, never a submitted shell command. */
+  runnerPath: string;
+  /** Bounded worker-protocol bytes, containing no caller credentials. */
+  stdin: Uint8Array;
+}
