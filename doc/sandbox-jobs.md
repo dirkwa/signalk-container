@@ -112,6 +112,11 @@ Live verification on Docker Engine 29.8.0, Linux aarch64/cgroup v2 in Docker Des
   tmpfs exhaustion, kernel OOM and process/thread ceiling.
 - Output overflow, cancellation, missing memory enforcement withholding input,
   single-job admission, fresh filesystem state and cleanup recovery.
+- Native syscall tests: PTRACE_ATTACH, PTRACE_SEIZE, process_vm_readv and
+  process_vm_writev return EPERM against PID 1 and a forked child; the child's
+  sentinel memory remains unchanged. A positive control using the runtime's
+  default seccomp profile successfully traces, reads and changes its own child's
+  memory. The control never targets PID 1 and is not a production fallback.
 - Manual crash test: SIGKILL the submitting manager after stdin delivery while
   worker code attempts to stop/kill PID 1 and starts a detached busy child.
   Both processes stop with the container after approximately 15 seconds.
@@ -120,10 +125,20 @@ The trusted test image was
 `docker.io/library/node@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54`.
 It is test evidence, not an automatically installed production image.
 
+The native syscall tests use Python 3 ctypes in a trusted test image to call
+libc directly. They do not rely on Node lacking a tracing API, and do not add a
+Python dependency to the production worker contract. The verified image was
+Node 24 bookworm:
+`docker.io/library/node@sha256:9d266751ca3d7fdbe651c878ffd5ad0a42fed49a18c283509267c97f025b7496`.
+The fixture targets only container PID 1 and its own disposable child. It never
+targets host processes. A host that blocks the positive control must be reported
+as unable to establish this comparison, rather than counted as a seccomp pass.
+
 ```sh
 npm run build
 SANDBOX_TEST_IMAGE=<local-approved-digest> node --test dist/test/integration/sandbox.test.js
 SANDBOX_TEST_IMAGE=<local-approved-digest> node dist/scripts/tests/verify-sandbox-deadline.js
+SANDBOX_NATIVE_TEST_IMAGE=<local-approved-node-python-digest> node --test dist/test/integration/sandbox-memory.test.js
 ```
 
 Portable tests cover policy, framing, admission, cancellation and late creation.
