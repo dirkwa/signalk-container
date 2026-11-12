@@ -1599,6 +1599,12 @@ export interface ContainerManagerApi {
    * caller cannot. Available in signalk-container >= 1.16.0.
    */
   runJob(config: ContainerJobConfig): Promise<ContainerJobResult>;
+
+  /** Run one bounded, single-use sandbox after live isolation verification. */
+  runSandboxJob(
+    request: SandboxJobRequest,
+    options?: { signal?: AbortSignal },
+  ): Promise<SandboxJobResult>;
   /**
    * One-shot capture of the last `tail` lines of a managed
    * container's combined stdout/stderr log.  Mirrors
@@ -2233,7 +2239,7 @@ export type {
   DockerHubTagsSourceOptions,
 };
 
-/** Internal preparation contract; not an executable ContainerManagerApi method. */
+/** Trusted consumer sandbox request; image and runner must not come from submitted code. */
 export interface SandboxJobRequest {
   /** Trusted consumer identity for namespace-scoped cleanup. */
   ownerPluginId: string;
@@ -2243,4 +2249,24 @@ export interface SandboxJobRequest {
   runnerPath: string;
   /** Bounded worker-protocol bytes, containing no caller credentials. */
   stdin: Uint8Array;
+}
+
+/** Output combines stdout/stderr in observed frame order, without text decoding. */
+export interface SandboxJobResult {
+  id: string | null;
+  status:
+    | "completed"
+    | "failed"
+    | "deadline-exceeded"
+    | "output-limit"
+    | "isolation-unavailable"
+    | "cancelled"
+    | "runtime-error"
+    | "busy"
+    | "rate-limited";
+  exitCode: number | null;
+  oomKilled: boolean | null;
+  output: Uint8Array;
+  /** Pending means removal was not confirmed; the independent deadline still applies to started jobs. */
+  cleanup: "not-created" | "removed" | "pending";
 }

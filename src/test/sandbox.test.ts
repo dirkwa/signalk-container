@@ -39,8 +39,8 @@ describe("sandbox preparation", () => {
     const plan = await prepareSandboxJob(request(), client);
     assert.deepEqual([...calls.keys()], []);
     assert.equal(plan.options.Image, imageId);
-    assert.deepEqual(plan.options.Entrypoint, [runnerPath]);
-    assert.deepEqual(plan.options.Cmd, []);
+    assert.deepEqual(plan.options.Entrypoint, ["/usr/bin/timeout"]);
+    assert.deepEqual(plan.options.Cmd, ["--signal=KILL", "15s", runnerPath]);
     assert.equal(plan.options.User, "65534:65534");
     assert.equal(plan.options.NetworkDisabled, true);
     assert.equal(plan.options.Tty, false);
@@ -52,7 +52,8 @@ describe("sandbox preparation", () => {
     assert.equal(host.Privileged, false);
     assert.deepEqual(host.CapDrop, ["ALL"]);
     assert.deepEqual(host.CapAdd, []);
-    assert.deepEqual(host.SecurityOpt, ["no-new-privileges"]);
+    assert.equal(host.SecurityOpt[0], "no-new-privileges");
+    assert.ok(host.SecurityOpt[1].startsWith("seccomp="));
     assert.deepEqual(host.Binds, []);
     assert.deepEqual(host.Mounts, []);
     assert.deepEqual(host.Devices, []);
@@ -85,7 +86,11 @@ describe("sandbox preparation", () => {
       false,
     );
     assert.equal(plan.stdin.toString(), "private-code-and-input");
-    assert.deepEqual(plan.options.Env, ["HOME=/tmp", "TMPDIR=/tmp"]);
+    assert.deepEqual(plan.options.Env, [
+      "HOME=/tmp",
+      "TMPDIR=/tmp",
+      "PATH=/usr/local/bin:/usr/bin:/bin",
+    ]);
   });
 
   it("uses unique names and namespace-aware ownership labels", async () => {
@@ -227,7 +232,7 @@ describe("sandbox preparation", () => {
     const plan = await pending;
     assert.deepEqual(plan.stdin, original);
     assert.equal(plan.image, image);
-    assert.deepEqual(plan.options.Entrypoint, [runnerPath]);
+    assert.deepEqual(plan.options.Entrypoint, ["/usr/bin/timeout"]);
   });
 });
 
@@ -286,4 +291,65 @@ describe("sandbox output byte budget", () => {
       assert.throws(() => new SandboxOutput(limit), /Invalid/);
     });
   }
+});
+
+it("accepts Docker Hub canonical digest aliases", async () => {
+  const image = "docker.io/library/node@sha256:" + "a".repeat(64);
+  const plan = await prepareSandboxJob(
+    { ...request(), image },
+    makeMockClient({
+      images: {
+        [image]: {
+          ...imageInfo,
+          RepoDigests: [image.replace("docker.io/library/", "")],
+        },
+      },
+    }),
+  );
+  assert.equal(plan.image, image);
+});
+it("empties inherited image environment values before creating the job", async () => {
+  const plan = await prepareSandboxJob(
+    request(),
+    clientFor({
+      ...imageInfo,
+      Config: {
+        Env: ["SECRET=never-forward", "LD_PRELOAD=/evil.so", "PATH=/evil"],
+      },
+    }),
+  );
+  assert.deepEqual(plan.options.Env, [
+    "SECRET=",
+    "LD_PRELOAD=",
+    "HOME=/tmp",
+    "TMPDIR=/tmp",
+    "PATH=/usr/local/bin:/usr/bin:/bin",
+  ]);
+});
+
+it("protects the deadline supervisor from worker tracing and inherited init", async () => {
+  const plan = await prepareSandboxJob(request(), clientFor());
+  const host = plan.options.HostConfig!;
+  assert.equal(host.Init, false);
+  assert.ok(host.MaskedPaths?.includes("/proc/1"));
+  assert.ok(host.MaskedPaths?.includes("/dev/shm"));
+  const profile = JSON.parse(host.SecurityOpt[1].slice("seccomp=".length)) as {
+    defaultAction: string;
+    syscalls: Array<{ names: string[]; action: string }>;
+  };
+  assert.equal(profile.defaultAction, "SCMP_ACT_ERRNO");
+  const allowed = profile.syscalls
+    .filter((rule) => rule.action === "SCMP_ACT_ALLOW")
+    .flatMap((rule) => rule.names);
+  for (const name of [
+    "ptrace",
+    "process_vm_readv",
+    "process_vm_writev",
+    "pidfd_getfd",
+    "unshare",
+    "setns",
+    "mount",
+    "io_uring_setup",
+  ])
+    assert.ok(!allowed.includes(name), name);
 });

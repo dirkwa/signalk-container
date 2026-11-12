@@ -1,3 +1,4 @@
+import { SANDBOX_MASKED_PATHS, SANDBOX_SECCOMP } from "./sandbox-policy.js";
 import { randomUUID } from "node:crypto";
 import type Docker from "dockerode";
 import { getClient, type ContainerClient } from "./client.js";
@@ -39,23 +40,32 @@ const REQUEST_KEYS = new Set(["ownerPluginId", "image", "runnerPath", "stdin"]);
 
 /**
  * Prepare an inert creation plan. This never pulls, creates, starts or executes.
- * A future executor must verify effective isolation and a crash-surviving
- * deadline before releasing stdin. A create payload is not that verification.
+ * The executor must verify effective isolation before releasing stdin.
+ * A create payload is not that verification.
  */
 export async function prepareSandboxJob(
   request: SandboxJobRequest,
   client: ContainerClient = getClient(),
+  signal?: AbortSignal,
 ): Promise<PreparedSandboxJob> {
   validateRequest(request);
   // Copy before the first await so callers cannot swap the authorized input
   // or image while the daemon lookup is pending.
   const { image, ownerPluginId, runnerPath } = request;
   const stdin = Buffer.from(request.stdin);
-  const inspected = await client.getImage(image).inspect();
+  const inspected = await client
+    .getImage(image)
+    .inspect({ manifests: false, ...{ abortSignal: signal } })
+    .catch((error) => {
+      stdin.fill(0);
+      throw error;
+    });
   if (
     !IMAGE_ID.test(inspected.Id) ||
     !Array.isArray(inspected.RepoDigests) ||
-    !inspected.RepoDigests.includes(image)
+    !inspected.RepoDigests.some(
+      (digest: string) => qualifyDockerDigest(digest) === image,
+    )
   ) {
     throw new Error("Sandbox image digest could not be verified locally");
   }
@@ -80,11 +90,18 @@ export async function prepareSandboxJob(
   const options: Docker.ContainerCreateOptions = {
     name: `${jobPrefix()}sandbox-${id}`,
     Image: inspected.Id,
-    Entrypoint: [runnerPath],
-    Cmd: [],
+    Entrypoint: ["/usr/bin/timeout"],
+    Cmd: ["--signal=KILL", "15s", runnerPath],
     User: "65534:65534",
     WorkingDir: "/tmp",
-    Env: ["HOME=/tmp", "TMPDIR=/tmp"],
+    Env: [
+      ...(inspected.Config.Env ?? [])
+        .map((entry: string) => `${entry.split("=")[0]}=`)
+        .filter((entry: string) => !/^(HOME|TMPDIR|PATH)=/.test(entry)),
+      "HOME=/tmp",
+      "TMPDIR=/tmp",
+      "PATH=/usr/local/bin:/usr/bin:/bin",
+    ],
     AttachStdin: true,
     AttachStdout: true,
     AttachStderr: true,
@@ -99,11 +116,22 @@ export async function prepareSandboxJob(
     },
     HostConfig: {
       NetworkMode: "none",
+      Init: false,
+      OomKillDisable: false,
       ReadonlyRootfs: true,
       Privileged: false,
       CapDrop: ["ALL"],
       CapAdd: [],
-      SecurityOpt: ["no-new-privileges"],
+      SecurityOpt: ["no-new-privileges", `seccomp=${SANDBOX_SECCOMP}`],
+      MaskedPaths: [...SANDBOX_MASKED_PATHS],
+      ReadonlyPaths: [
+        "/proc/bus",
+        "/proc/fs",
+        "/proc/irq",
+        "/proc/sys",
+        "/proc/sysrq-trigger",
+      ],
+      Ulimits: [{ Name: "core", Soft: 0, Hard: 0 }],
       PidMode: "",
       IpcMode: "private",
       Binds: [],
@@ -227,4 +255,11 @@ export class SandboxOutput {
     this.used = 0;
     // Overflow remains terminal: clearing must not grant another output budget.
   }
+}
+
+function qualifyDockerDigest(digest: string): string {
+  const repository = digest.split("@")[0];
+  if (!repository.includes("/")) return `docker.io/library/${digest}`;
+  if (!isQualifiedImage(digest)) return `docker.io/${digest}`;
+  return digest;
 }
