@@ -859,6 +859,11 @@ All three fields participate in config-drift detection — adding, removing, or 
 
 The sections below are for plugin authors integrating with signalk-container. End users deploying the plugin do not need them.
 
+The experimental `runSandboxJob` API executes bounded, single-use containers
+after live isolation checks, with an independent container deadline. Its trusted
+image contract, runtime requirements and verification limits are documented in
+[Sandbox job implementation](doc/sandbox-jobs.md).
+
 ## How Other Plugins Use It
 
 ```typescript
