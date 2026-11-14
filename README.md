@@ -335,10 +335,11 @@ grep -sni '^[^#]*nofile' /etc/security/limits.conf /etc/security/limits.d/*.conf
 On Debian / Raspberry Pi OS the user manager is started through PAM
 (`pam_limits` in `/usr/lib/pam.d/systemd-user`), and systemd applies those
 limits _after_ the unit's own `LimitNOFILE`. An entry of type `hard` or `-`
-(often `65536`, from an old tuning guide) therefore caps the user manager
-below both settings described next, whatever they say. Raise it to `1048576`
-or remove it, then restart the user manager as shown in step 1. A `soft`-only
-entry does not lower the ceiling.
+for the user that runs the containers (its name, `@<group>` for a group it is
+in, `*`, or a UID/GID range that covers it; often `65536`, from an old tuning
+guide) therefore caps the user manager below both settings described next,
+whatever they say. Raise it to `1048576` or remove it, then restart the user
+manager as shown in step 1. A `soft`-only entry does not lower the ceiling.
 
 There are two places to set the user manager's limit. When Signal K itself
 runs under the user manager (the universal installer's Quadlet), the first is
@@ -390,7 +391,8 @@ next plugin start recreates it with the raised limit.
 system (PID 1) manager's `DefaultLimitNOFILE`, which stock Debian / Pi OS
 leaves at `1024:524288` (commented out in `/etc/systemd/system.conf`), and so
 does a `signalk.service` that sets no limit of its own. Raising that default
-raises both:
+raises both, unless a `LimitNOFILE` in a `user@.service` drop-in overrides it
+for the user manager — raise or remove a lower one there too:
 
 ```bash
 sudo sed -i 's/^#\?DefaultLimitNOFILE=.*/DefaultLimitNOFILE=1048576:1048576/' /etc/systemd/system.conf
