@@ -36,7 +36,7 @@ Instead of each plugin implementing its own container orchestration, they delega
 
 ## Requirements
 
-- Node.js >= 22
+- Node.js >= 24
 - Podman >= 5.4 (the supported baseline — Debian 13 "trixie" ships 5.4.2) or Docker installed on the host
 - Signal K server
 

@@ -64,7 +64,7 @@ reviews:
         `(globalThis as any).__signalk_containerManager` so JSDoc is
         the only documentation surface they get).
 
-        ## ESM / TypeScript strict / Node 22+
+        ## ESM / TypeScript strict / Node 24+
 
         - All new code in TypeScript. No new `.js` source files.
         - tsconfig is strict. Avoid `any`. The one allowed `any` is
