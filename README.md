@@ -311,22 +311,43 @@ container still starts — with the runtime's default limits — and the same
 advisory reports the shortfall. To grant the full value, raise the host
 limit.
 
-**Check the limit the container actually got:**
+**Check the limit the container actually got.** Managed containers are named
+`sk-<name>` by default (`podman ps` lists them); the QuestDB plugin's is
+`sk-signalk-questdb`:
 
 ```bash
 # podman, or `docker exec` on Docker
-podman exec <sk-container> cat /proc/1/limits | grep -i "open files"
+podman exec sk-signalk-questdb grep -i "open files" /proc/1/limits
 # Max open files   524288   524288   ← the per-process cap in effect
 ```
 
 **Rootless Podman** runs under the systemd user session, so the lever is the
 user manager's open-files limit, which a rootless container can never exceed.
-There are two places to set it; on stock Debian / Raspberry Pi OS you usually
-need the **second**. Editing `/etc/security/limits.conf` does **not** help —
-`pam_limits` only touches login shells, not the user manager that parents the
-podman socket. `LimitNOFILE` takes a `soft:hard` form; a single number sets
-soft = hard, and the container's hard ceiling is the user manager's _hard_
-limit.
+`LimitNOFILE` takes a `soft:hard` form; a single number sets soft = hard, and
+the container's hard ceiling is the user manager's _hard_ limit.
+
+First look for a `nofile` entry in the PAM limits files:
+
+```bash
+grep -sni '^[^#]*nofile' /etc/security/limits.conf /etc/security/limits.d/*.conf
+```
+
+On Debian / Raspberry Pi OS the user manager is started through PAM
+(`pam_limits` in `/usr/lib/pam.d/systemd-user`), and systemd applies those
+limits _after_ the unit's own `LimitNOFILE`. An entry of type `hard` or `-`
+for the user that runs the containers (its name, `@<group>` for a group it is
+in, `*`, or a UID/GID range that covers it; often `65536`, from an old tuning
+guide) therefore caps the user manager below both settings described next,
+whatever they say. Raise it to `1048576` or remove it, then restart the user
+manager as shown in step 1. A `soft`-only entry does not lower the ceiling.
+
+There are two places to set the user manager's limit. When Signal K itself
+runs under the user manager (the universal installer's Quadlet), the first is
+enough once the user manager restarts. When Signal K runs as a system service
+(`signalk.service` from `signalk-server-setup`, as on OpenPlotter),
+signalk-container also caps the request at the Signal K process's own hard
+limit, which that unit takes from the system default — use the second, which
+raises both.
 
 **1. Per-user-manager drop-in.** One-time, requires sudo:
 
@@ -363,13 +384,15 @@ next plugin start recreates it with the raised limit.
 > fixed in 5.5.0) — containers instead **inherit the podman service's own
 > limits**. The user-manager drop-in above is then not just the ceiling but
 > the actual source of the container's limit, and the recreate described
-> above is what picks it up.
+> above is what picks it up. A `LimitNOFILE` set on `podman.service` itself
+> overrides it, so if you set one there, use `1048576`.
 
-**2. System-wide default (Raspberry Pi OS / openplotter, and the reliable
-fallback).** Stock Debian / Pi OS ships `/etc/systemd/system.conf` with a
-commented `#DefaultLimitNOFILE=1024:524288` — that 524288 _hard_ default is
-what bounds the per-unit request when step 1 doesn't take. Raise the system
-(PID 1) manager's default directly:
+**2. System-wide default.** Without a drop-in, `user@.service` gets the
+system (PID 1) manager's `DefaultLimitNOFILE`, which stock Debian / Pi OS
+leaves at `1024:524288` (commented out in `/etc/systemd/system.conf`), and so
+does a `signalk.service` that sets no limit of its own. Raising that default
+raises both, unless a `LimitNOFILE` in a `user@.service` drop-in overrides it
+for the user manager — raise or remove a lower one there too:
 
 ```bash
 sudo sed -i 's/^#\?DefaultLimitNOFILE=.*/DefaultLimitNOFILE=1048576:1048576/' /etc/systemd/system.conf
@@ -421,11 +444,16 @@ The value cannot exceed the kernel's absolute per-process cap, `fs.nr_open`
 Verify (either path):
 
 ```bash
-systemctl show user@$(id -u <sk-user>).service -p LimitNOFILE
-# LimitNOFILE=1048576   ← the user manager now allows it
-<runtime> exec <sk-container> cat /proc/1/limits | grep -i "open files"
+# as the user that runs the containers
+grep -i "open files" /proc/$(systemctl show -p MainPID --value user@$(id -u).service)/limits
+# Max open files   1048576   1048576   ← the user manager now allows it
+podman exec sk-signalk-questdb grep -i "open files" /proc/1/limits
 # Max open files   1048576   1048576   ← the container actually got it
 ```
+
+`systemctl show user@<uid>.service -p LimitNOFILE` cannot replace the first
+check: it prints the unit's setting, not the limit the user manager got, so
+it still reads `1048576` when a `limits.conf` entry caps the manager.
 
 ### Watch out for systemd auto-restart (Quadlet / `Restart=always`)
 
