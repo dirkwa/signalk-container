@@ -395,7 +395,11 @@ container never gets more open files than that service has. Below 5.5 the
 request is dropped and the container gets podman's default; from 5.5 on, a
 request above the service's limit is refused and the container starts on that
 default instead. That default is the service's own limit, at most 1048576,
-unless `default_ulimits` in `containers.conf` sets another. Two
+unless a `nofile` entry in `default_ulimits` in `containers.conf` replaces it.
+Below 5.5 such an entry is all the container gets, so one below 1048576 keeps
+capping it after the service is raised. An entry above the service's limit is
+refused on every version, so the container does not start. Remove such an
+entry. Two
 settings lower `podman.service` below the user manager: a `LimitNOFILE` in one
 of its drop-ins (`systemctl --user cat podman.service` lists them), and a
 `DefaultLimitNOFILE` in the user manager's own configuration, the default for
