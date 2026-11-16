@@ -387,6 +387,34 @@ next plugin start recreates it with the raised limit.
 > above is what picks it up. A `LimitNOFILE` set on `podman.service` itself
 > overrides it, so if you set one there, use `1048576`.
 
+**The podman service's own limit.** signalk-container creates containers
+through the podman API, i.e. through `podman.service`, and a rootless
+container never gets more open files than that service has. Below 5.5 the
+container gets exactly its limit; from 5.5 on, a request above it is refused
+and the container starts without the request, on the service's limit. Two
+settings lower `podman.service` below the user manager: a `LimitNOFILE` in one
+of its drop-ins (`systemctl --user cat podman.service` lists them), and a
+`DefaultLimitNOFILE` in the user manager's own configuration, the default for
+every user unit (`/etc/systemd/user.conf`, `~/.config/systemd/user.conf` or a
+`user.conf.d/*.conf` file; `man systemd-user.conf` lists every path). Check
+what `podman.service` gets, as the user that runs the containers:
+
+```bash
+systemctl --user show podman.service -p LimitNOFILE
+# LimitNOFILE=1048576   ← anything lower caps the containers
+```
+
+If it is lower, raise or remove the setting that lowers it, or override it for
+`podman.service` alone with a drop-in, then reboot:
+
+```bash
+mkdir -p ~/.config/systemd/user/podman.service.d
+printf '[Service]\nLimitNOFILE=1048576\n' > ~/.config/systemd/user/podman.service.d/zz-nofile.conf
+systemctl --user daemon-reload
+```
+
+Drop-ins apply in name order and the last one wins, hence the `zz-` prefix.
+
 **2. System-wide default.** Without a drop-in, `user@.service` gets the
 system (PID 1) manager's `DefaultLimitNOFILE`, which stock Debian / Pi OS
 leaves at `1024:524288` (commented out in `/etc/systemd/system.conf`), and so
