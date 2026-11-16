@@ -381,11 +381,51 @@ next plugin start recreates it with the raised limit.
 > **Rootless Podman < 5.5.0**: the docker-compat API silently drops the
 > ulimit request at container create
 > ([containers/podman#25881](https://github.com/containers/podman/issues/25881),
-> fixed in 5.5.0) — containers instead **inherit the podman service's own
-> limits**. The user-manager drop-in above is then not just the ceiling but
-> the actual source of the container's limit, and the recreate described
-> above is what picks it up. A `LimitNOFILE` set on `podman.service` itself
-> overrides it, so if you set one there, use `1048576`.
+> fixed in 5.5.0) — containers instead get **podman's default**, the podman
+> service's own limit (see the next paragraph for the exceptions). The
+> user-manager drop-in above is then not just the ceiling but the actual
+> source of the container's limit, and the recreate described above is what
+> picks it up. A `LimitNOFILE` set on `podman.service` itself, or a
+> `DefaultLimitNOFILE` in the user manager's configuration, overrides it, so
+> if you set one there, use `1048576`.
+
+**The podman service's own limit.** signalk-container creates containers
+through the podman API, i.e. through `podman.service`, and a rootless
+container never gets more open files than that service has. Below 5.5 the
+request is dropped and the container gets podman's default; from 5.5 on, a
+request above the service's limit is refused and the container starts on that
+default instead. That default is the service's own limit, at most 1048576,
+unless a `nofile` entry in `default_ulimits` in `containers.conf` replaces it.
+Below 5.5 such an entry is all the container gets, so one below 1048576 keeps
+capping it after the service is raised. An entry above the service's limit is
+refused on every version, so the container does not start. Remove such an
+entry. Two
+settings lower `podman.service` below the user manager: a `LimitNOFILE` in one
+of its drop-ins (`systemctl --user cat podman.service` lists them), and a
+`DefaultLimitNOFILE` in the user manager's own configuration, the default for
+every user unit (`/etc/systemd/user.conf`, `~/.config/systemd/user.conf` or a
+`user.conf.d/*.conf` file; `man systemd-user.conf` lists every path). Check
+what `podman.service` gets, as the user that runs the containers:
+
+```bash
+systemctl --user show podman.service -p LimitNOFILE
+# LimitNOFILE=1048576   ← anything lower caps the containers
+```
+
+This prints the unit's setting. A running `podman.service` keeps the limit it
+started with until it restarts, so check the container itself after the reboot
+below (the `podman exec` command above).
+
+If it is lower, raise or remove the setting that lowers it, or override it for
+`podman.service` alone with a drop-in, then reboot:
+
+```bash
+mkdir -p ~/.config/systemd/user/podman.service.d
+printf '[Service]\nLimitNOFILE=1048576\n' > ~/.config/systemd/user/podman.service.d/zz-nofile.conf
+systemctl --user daemon-reload
+```
+
+Drop-ins apply in name order and the last one wins, hence the `zz-` prefix.
 
 **2. System-wide default.** Without a drop-in, `user@.service` gets the
 system (PID 1) manager's `DefaultLimitNOFILE`, which stock Debian / Pi OS
