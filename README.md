@@ -390,8 +390,10 @@ next plugin start recreates it with the raised limit.
 **The podman service's own limit.** signalk-container creates containers
 through the podman API, i.e. through `podman.service`, and a rootless
 container never gets more open files than that service has. Below 5.5 the
-container gets exactly its limit; from 5.5 on, a request above it is refused
-and the container starts without the request, on the service's limit. Two
+request is dropped and the container gets podman's default; from 5.5 on, a
+request above the service's limit is refused and the container starts on that
+default instead. That default is the service's own limit, at most 1048576,
+unless `default_ulimits` in `containers.conf` sets another. Two
 settings lower `podman.service` below the user manager: a `LimitNOFILE` in one
 of its drop-ins (`systemctl --user cat podman.service` lists them), and a
 `DefaultLimitNOFILE` in the user manager's own configuration, the default for
@@ -403,6 +405,10 @@ what `podman.service` gets, as the user that runs the containers:
 systemctl --user show podman.service -p LimitNOFILE
 # LimitNOFILE=1048576   ← anything lower caps the containers
 ```
+
+This prints the unit's setting. A running `podman.service` keeps the limit it
+started with until it restarts, so check the container itself after the reboot
+below (the `podman exec` command above).
 
 If it is lower, raise or remove the setting that lowers it, or override it for
 `podman.service` alone with a drop-in, then reboot:
