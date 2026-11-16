@@ -68,6 +68,11 @@ export interface ContainerClient {
         path: string;
         method: string;
         statusCodes: Record<number, boolean | string>;
+        /** Sandbox attach uses a zero-byte body before switching protocols. */
+        file?: Buffer;
+        options?: Record<string, unknown>;
+        hijack?: boolean;
+        isStream?: boolean;
         abortSignal?: AbortSignal;
       },
       callback: (err: Error | null, data: unknown) => void,

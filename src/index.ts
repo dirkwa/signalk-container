@@ -118,6 +118,7 @@ import {
   restartPolicyFor,
 } from "./containers.js";
 import { createLogStreamBroker, LogStreamBroker } from "./log-stream-broker.js";
+import { SandboxExecutor } from "./sandbox-executor.js";
 import { runJob, cleanupOrphanedJobs } from "./jobs.js";
 import type { ProbeCacheEntry } from "./devices.js";
 import {
@@ -357,6 +358,7 @@ export function _setHostDeviceProbeForTesting(
 // one contract — a browser-safe module with no node-only imports.
 
 export default (app: App) => {
+  const sandboxExecutor = new SandboxExecutor();
   let runtimeInfo: ContainerRuntimeInfo | null = null;
   const internetState = new InternetState(app);
   // A server shutdown stops every plugin at once, so a consumer's own stop()
@@ -2394,6 +2396,11 @@ export default (app: App) => {
       return readContainerNofile(name);
     },
 
+    async runSandboxJob(request, options) {
+      if (!runtimeInfo) throw new Error("No container runtime available");
+      return sandboxExecutor.run(request, options?.signal);
+    },
+
     async runJob(config: ContainerJobConfig): Promise<ContainerJobResult> {
       if (!runtimeInfo) throw new Error("No container runtime available");
       return runJob(runtimeInfo, {
@@ -3484,6 +3491,7 @@ export default (app: App) => {
         restartPollTimer = null;
       }
       restartPollInFlight = false;
+      sandboxExecutor.cancel();
       // Clear every outstanding degradation notification so a plugin stop
       // doesn't strand alerts on the bus, then drop the tracking state.
       degradation.reset();
