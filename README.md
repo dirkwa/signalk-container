@@ -381,11 +381,13 @@ next plugin start recreates it with the raised limit.
 > **Rootless Podman < 5.5.0**: the docker-compat API silently drops the
 > ulimit request at container create
 > ([containers/podman#25881](https://github.com/containers/podman/issues/25881),
-> fixed in 5.5.0) — containers instead **inherit the podman service's own
-> limits**. The user-manager drop-in above is then not just the ceiling but
-> the actual source of the container's limit, and the recreate described
-> above is what picks it up. A `LimitNOFILE` set on `podman.service` itself
-> overrides it, so if you set one there, use `1048576`.
+> fixed in 5.5.0) — containers instead get **podman's default**, the podman
+> service's own limit (see the next paragraph for the exceptions). The
+> user-manager drop-in above is then not just the ceiling but the actual
+> source of the container's limit, and the recreate described above is what
+> picks it up. A `LimitNOFILE` set on `podman.service` itself, or a
+> `DefaultLimitNOFILE` in the user manager's configuration, overrides it, so
+> if you set one there, use `1048576`.
 
 **The podman service's own limit.** signalk-container creates containers
 through the podman API, i.e. through `podman.service`, and a rootless
